@@ -14,6 +14,8 @@ demonstration_videos/**/*.log
 # Third-party runtime and nested dependency checkout
 third_party/
 mujoco_menagerie/
+!vendor/mujoco_menagerie/
+!vendor/mujoco_menagerie/**
 
 # ROS 2 build artifacts
 ros2_ws/build/

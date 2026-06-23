@@ -1,0 +1,3 @@
+<mujoco model="ur5e_cartpole_scene">
+  <include file="scene.xml"/>
+</mujoco>
