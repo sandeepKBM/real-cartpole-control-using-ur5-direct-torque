@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>real_cartpole_control</name>
+  <version>0.1.0</version>
+  <description>Control-first ROS package for connecting the real_cartpole workflow to a real UR5e arm.</description>
+
+  <maintainer email="ss5772@example.com">ss5772</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>builtin_interfaces</depend>
+  <depend>launch</depend>
+  <depend>launch_ros</depend>
+  <depend>rclpy</depend>
+  <depend>real_cartpole_description</depend>
+  <depend>sensor_msgs</depend>
+  <depend>trajectory_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

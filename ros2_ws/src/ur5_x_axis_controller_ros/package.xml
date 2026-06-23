@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>ur5_x_axis_controller_ros</name>
+  <version>0.1.0</version>
+  <description>
+    Torque-mode X-axis Cartesian controller for a UR5 in CoppeliaSim, wrapping
+    the simulator-independent controller_core stack. Provides a controller node
+    and an optional CoppeliaSim bridge node that uses the ZMQ Remote API.
+  </description>
+  <maintainer email="ss5772@users.noreply">ss5772</maintainer>
+  <license>TODO</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+
+  <exec_depend>ros2launch</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

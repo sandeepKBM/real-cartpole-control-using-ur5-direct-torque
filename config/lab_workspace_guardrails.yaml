@@ -1,0 +1,85 @@
+version: 1
+frame: mujoco_world
+frame_aliases:
+  - world
+units:
+  position: m
+  angle: rad
+diagnostic_only: true
+source_repo: https://github.com/Einksul/mujocoSim
+source_checkout: /common/users/ss5772/external/mujocoSim
+
+boundaries:
+  - name: floor
+    primitive: plane
+    frame: mujoco_world
+    pose:
+      position: [0.0, 0.0, -1.22]
+      quaternion: [1.0, 0.0, 0.0, 0.0]
+    margin_m: 0.0
+    rough_margin_m: 0.02
+    confidence: exact
+    description: Infinite floor plane from the scene XML.
+    source:
+      repo: https://github.com/Einksul/mujocoSim
+      file: src/mujoco_interface/models/scene_real_desired.xml
+      lines: [20, 22]
+      note: "Exact hardcoded plane position in the external scene."
+  - name: wall
+    primitive: plane
+    frame: mujoco_world
+    pose:
+      position: [0.0, 0.55, 0.0]
+      quaternion: [0.6532814745363387, 0.6532815440617974, -0.27059800653905053, -0.27059803533743415]
+    margin_m: 0.0
+    rough_margin_m: 0.02
+    confidence: exact
+    description: Slanted wall / lab boundary plane from the scene XML.
+    source:
+      repo: https://github.com/Einksul/mujocoSim
+      file: src/mujoco_interface/models/scene_real_desired.xml
+      lines: [24, 26]
+      note: "Exact hardcoded wall pose in the external scene."
+  - name: tools_side_obstacle
+    primitive: box
+    frame: mujoco_world
+    pose:
+      position: [0.8697413104882352, -0.8697413712306709, -0.65]
+      quaternion: [0.9238795, 0.0, 0.0, 0.3826834]
+    size: [0.4, 0.4, 0.55]
+    margin_m: 0.0
+    rough_margin_m: 0.02
+    confidence: exact
+    description: Tools-side obstacle / forbidden zone in the external scene.
+    source:
+      repo: https://github.com/Einksul/mujocoSim
+      file: src/mujoco_interface/models/scene_real_desired.xml
+      lines: [28, 30]
+      note: "World pose derived from body + geom transforms in MuJoCo."
+  - name: desk_pc_side_obstacle
+    primitive: box
+    frame: mujoco_world
+    pose:
+      position: [-1.4142135327426382, 0.8485281868079507, -0.65]
+      quaternion: [0.9238795, 0.0, 0.0, 0.3826834]
+    size: [0.75, 0.75, 0.425]
+    margin_m: 0.0
+    rough_margin_m: 0.02
+    confidence: exact
+    description: Desk / PC-side obstacle / forbidden zone in the external scene.
+    source:
+      repo: https://github.com/Einksul/mujocoSim
+      file: src/mujoco_interface/models/scene_real_desired.xml
+      lines: [33, 35]
+      note: "World pose derived from body + geom transforms in MuJoCo."
+
+unresolved:
+  - name: door_side
+    confidence: unknown
+    reason: No explicit door-side primitive was present in the inspected Einksul scene files.
+  - name: robot_base_exclusion
+    confidence: unknown
+    reason: No explicit lab base-exclusion zone was encoded in the inspected Einksul scene files.
+  - name: cartpole_rail_safe_range
+    confidence: unknown
+    reason: The external repo is a UR5e workspace visualizer and does not define the cartpole rail range.

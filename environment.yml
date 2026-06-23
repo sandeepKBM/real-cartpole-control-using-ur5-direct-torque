@@ -1,0 +1,36 @@
+# Conda environment for the real_Cartpole MuJoCo + ROS 2 + MoveIt workflow.
+# This environment is intentionally on Python 3.12 so RoboStack's `moveit_py`
+# bindings are available alongside the rest of the Jazzy stack.
+# Activate: conda activate mujoco_ur5e
+name: mujoco_ur5e
+channels:
+  - conda-forge
+  - robostack-jazzy
+dependencies:
+  - python=3.12
+  - pip
+  - wheel
+  - setuptools
+  - cmake
+  - make
+  - ninja
+  - pkg-config
+  - colcon-common-extensions
+  - ffmpeg
+  - filelock
+  - imageio
+  - imageio-ffmpeg
+  - ipywidgets
+  - matplotlib
+  - numpy
+  - pillow
+  - pyyaml
+  - tqdm
+  - ros-jazzy-desktop
+  - ros-jazzy-moveit
+  - ros-jazzy-moveit-py
+  - ros-jazzy-ros2-control
+  - ros-jazzy-ros2-controllers
+  - pip:
+      - mediapy
+      - mujoco>=2.3.3

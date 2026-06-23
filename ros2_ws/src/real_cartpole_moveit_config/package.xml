@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>real_cartpole_moveit_config</name>
+  <version>0.1.0</version>
+  <description>MoveIt metadata scaffold for the real_cartpole UR5e setup.</description>
+
+  <maintainer email="ss5772@example.com">ss5772</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>moveit_configs_utils</depend>
+  <depend>real_cartpole_description</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

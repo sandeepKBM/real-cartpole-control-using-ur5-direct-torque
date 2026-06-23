@@ -1,0 +1,32 @@
+# Local Codex / graph context
+.agents/
+.codex_graph/
+
+# Generated experiment outputs and reports
+outputs/
+reports/
+
+# Large generated media
+demonstration_videos/**/*.mp4
+demonstration_videos/**/*.json
+demonstration_videos/**/*.log
+
+# Third-party runtime and nested dependency checkout
+third_party/
+mujoco_menagerie/
+
+# ROS 2 build artifacts
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Python caches and bytecode
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Logs and backup files
+*.log
+*.jsonl
+*.out
+*.bak_*

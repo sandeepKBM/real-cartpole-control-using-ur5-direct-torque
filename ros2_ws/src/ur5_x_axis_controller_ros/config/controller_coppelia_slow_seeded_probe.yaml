@@ -1,0 +1,121 @@
+# Diagnostic preset for the seeded ROS 2 bridge/controller probe.
+# Same as controller_coppelia_slow_seeded_relaxed.yaml, but with a looser
+# safety gate so we can observe whether the controller actually moves in X
+# before the safety monitor cuts it off.
+
+controller:
+  control_rate_hz: 100
+
+  target_x_step_max_m: 0.01
+  target_x_velocity_limit_mps: 0.01
+
+  use_gravity_compensation: true
+
+  jacobian_singular_cond_max: 100000.0
+
+  gains:
+    kp_x: 10.0
+    kd_x: 4.0
+    kp_y: 32.0
+    kd_y: 8.0
+    kp_z: 48.0
+    kd_z: 10.0
+    kp_rot: 12.0
+    kd_rot: 3.0
+    kp_posture: 0.5
+    kd_posture: 0.15
+    kd_joint: 0.35
+
+  torque_limits_initial:
+    shoulder_pan_joint: 8.0
+    shoulder_lift_joint: 8.0
+    elbow_joint: 8.0
+    wrist_1_joint: 2.5
+    wrist_2_joint: 2.5
+    wrist_3_joint: 2.5
+
+  torque_limits_after_stable:
+    shoulder_pan_joint: 20.0
+    shoulder_lift_joint: 20.0
+    elbow_joint: 20.0
+    wrist_1_joint: 5.0
+    wrist_2_joint: 5.0
+    wrist_3_joint: 5.0
+
+  torque_limits_mode: "after_stable"
+
+  torque_rate_limit_nm_per_sec:
+    shoulder_pan_joint: 80.0
+    shoulder_lift_joint: 80.0
+    elbow_joint: 80.0
+    wrist_1_joint: 30.0
+    wrist_2_joint: 30.0
+    wrist_3_joint: 30.0
+
+  torque_lowpass_alpha: 0.15
+
+coppeliasim:
+  host: "127.0.0.1"
+  port: 23000
+
+  startup_joint_positions_rad:
+    [0.2, -1.15, 1.55, -1.8, -1.45, 0.35]
+
+  ee_object_name: "/UR5/UR5_connection"
+  ee_object_name_alternates:
+    - ":/UR5/UR5_connection"
+    - "/UR5_connection"
+    - ":/UR5_connection"
+    - "/UR5/connection"
+    - ":/UR5/connection"
+
+  task_frame:
+    mode: "mujoco_attachment_dummy"
+    parent_object_name: ""
+    parent_object_name_alternates: []
+    attachment_offset_m: [0.0, 0.0, -0.2]
+    attachment_quat_wxyz: [-0.7071067811865475, 0.7071067811865475, 0.0, 0.0]
+    dummy_size_m: 0.025
+
+  joint_name_map:
+    shoulder_pan_joint: "/UR5/joint"
+    shoulder_lift_joint: "/UR5/link/joint"
+    elbow_joint: "/UR5/link/link/joint"
+    wrist_1_joint: "/UR5/link/link/link/joint"
+    wrist_2_joint: "/UR5/link/link/link/link/joint"
+    wrist_3_joint: "/UR5/link/link/link/link/link/joint"
+
+  torque_application:
+    prefer_signed_target_force: true
+    fallback_large_velocity_rad_s: 10.0
+
+  jacobian:
+    source: "auto"
+    numerical_epsilon: 1.0e-5
+
+  publish_rate_hz: 100.0
+  step_simulation_manually: false
+
+safety:
+  max_abs_y_drift_m: 0.3
+  max_abs_z_drift_m: 0.3
+  max_orientation_error_rad: 2.5
+  max_joint_velocity_radps: 5.0
+  max_x_error_growth_steps: 150
+  emergency_stop_on_nan: true
+  emergency_stop_on_joint_limit: false
+
+logging:
+  trace_jsonl_path: ""
+  log_controller_debug_hz: 0.0
+
+topics:
+  joint_state_topic: "/joint_states"
+  ee_pose_topic: "/ur5/ee_pose"
+  ee_twist_topic: "/ur5/ee_twist"
+  jacobian_topic: "/ur5/jacobian"
+  target_x_topic: "/target_x"
+  torque_command_topic: "/ur5/torque_command"
+  controller_debug_topic: "/ur5/controller_debug"
+  safety_status_topic: "/ur5/safety_status"
+  gravity_torque_topic: "/ur5/gravity_torque"

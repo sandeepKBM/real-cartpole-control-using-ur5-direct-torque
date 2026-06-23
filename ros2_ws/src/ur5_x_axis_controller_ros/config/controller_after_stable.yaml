@@ -1,0 +1,128 @@
+# UR5 Cartesian impedance torque stack diagnostic preset.
+# Same as controller.yaml, but uses the higher after-stable torque caps.
+
+controller:
+  control_rate_hz: 100
+
+  target_x_step_max_m: 0.02
+  target_x_velocity_limit_mps: 0.02
+
+  use_gravity_compensation: false
+
+  jacobian_singular_cond_max: 100000.0
+
+  gains:
+    kp_x: 25.0
+    kd_x: 8.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 20.0
+    kd_rot: 5.0
+    kp_posture: 2.0
+    kd_posture: 0.5
+    kd_joint: 0.8
+
+  torque_limits_initial:
+    shoulder_pan_joint: 8.0
+    shoulder_lift_joint: 8.0
+    elbow_joint: 8.0
+    wrist_1_joint: 2.5
+    wrist_2_joint: 2.5
+    wrist_3_joint: 2.5
+
+  torque_limits_after_stable:
+    shoulder_pan_joint: 20.0
+    shoulder_lift_joint: 20.0
+    elbow_joint: 20.0
+    wrist_1_joint: 5.0
+    wrist_2_joint: 5.0
+    wrist_3_joint: 5.0
+
+  # Which torque cap dict to use: "initial" | "after_stable"
+  torque_limits_mode: "after_stable"
+
+  torque_rate_limit_nm_per_sec:
+    shoulder_pan_joint: 80.0
+    shoulder_lift_joint: 80.0
+    elbow_joint: 80.0
+    wrist_1_joint: 30.0
+    wrist_2_joint: 30.0
+    wrist_3_joint: 30.0
+
+  torque_lowpass_alpha: 0.15
+
+coppeliasim:
+  host: "127.0.0.1"
+  port: 23000
+
+  # Built-in UR5.ttm (models/robots/non-mobile/UR5.ttm): tool is the wrist F/T
+  # sensor ``UR5_connection`` under the ``UR5`` model root. Aliases vary by
+  # CoppeliaSim version (leading ``:`` = scene-root-relative in some builds).
+  ee_object_name: "/UR5/UR5_connection"
+  ee_object_name_alternates:
+    - ":/UR5/UR5_connection"
+    - "/UR5_connection"
+    - ":/UR5_connection"
+    - "/UR5/connection"
+    - ":/UR5/connection"
+
+  task_frame:
+    # For direct-torque acceleration transport, control an explicit task dummy
+    # that mirrors MuJoCo's attachment_site convention instead of silently using
+    # the raw wrist/force-sensor connection as the end effector.
+    # The verified CoppeliaSim mapping for this UR5.ttm build keeps the dummy
+    # parented to /UR5/UR5_connection with the attachment-site proxy rotated
+    # into the MuJoCo-style frame and shifted down the tool Z axis.
+    mode: "mujoco_attachment_dummy"
+    parent_object_name: ""
+    parent_object_name_alternates: []
+    attachment_offset_m: [0.0, 0.0, -0.2]
+    attachment_quat_wxyz: [-0.7071067811865475, 0.7071067811865475, 0.0, 0.0]
+    dummy_size_m: 0.025
+
+  # Primary paths match the default UR5.ttm kinematic chain (joint → link → …).
+  # The bridge / adapter also tries built-in alternates per joint if these fail.
+  joint_name_map:
+    shoulder_pan_joint: "/UR5/joint"
+    shoulder_lift_joint: "/UR5/link/joint"
+    elbow_joint: "/UR5/link/link/joint"
+    wrist_1_joint: "/UR5/link/link/link/joint"
+    wrist_2_joint: "/UR5/link/link/link/link/joint"
+    wrist_3_joint: "/UR5/link/link/link/link/link/joint"
+
+  torque_application:
+    prefer_signed_target_force: true
+    fallback_large_velocity_rad_s: 10.0
+
+  jacobian:
+    source: "auto"
+    numerical_epsilon: 1.0e-5
+
+  publish_rate_hz: 100.0
+  step_simulation_manually: false
+
+safety:
+  max_abs_y_drift_m: 0.03
+  max_abs_z_drift_m: 0.03
+  max_orientation_error_rad: 0.25
+  max_joint_velocity_radps: 1.5
+  max_x_error_growth_steps: 100
+  emergency_stop_on_nan: true
+  emergency_stop_on_joint_limit: true
+
+logging:
+  trace_jsonl_path: ""
+  log_controller_debug_hz: 0.0
+
+topics:
+  joint_state_topic: "/joint_states"
+  ee_pose_topic: "/ur5/ee_pose"
+  ee_twist_topic: "/ur5/ee_twist"
+  jacobian_topic: "/ur5/jacobian"
+  target_x_topic: "/target_x"
+  torque_command_topic: "/ur5/torque_command"
+  controller_debug_topic: "/ur5/controller_debug"
+  safety_status_topic: "/ur5/safety_status"
+  gravity_torque_topic: "/ur5/gravity_torque"
