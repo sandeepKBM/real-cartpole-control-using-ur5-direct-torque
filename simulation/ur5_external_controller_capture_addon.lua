@@ -108,7 +108,19 @@ local function writeSummary(success, reason)
     )
 end
 
+local function enableVisionRendering()
+    for _, param in ipairs({
+        sim.boolparam_display_enabled,
+        sim.boolparam_vision_sensor_handling_enabled,
+    }) do
+        pcall(function()
+            sim.setBoolParam(param, true)
+        end)
+    end
+end
+
 local function captureFrame(simTime)
+    enableVisionRendering()
     local matrix = cameraMatrix(captureCount, FRAME_COUNT)
     sim.setObjectMatrix(visionSensor, matrix, sim.handle_world)
     sim.handleVisionSensor(visionSensor)

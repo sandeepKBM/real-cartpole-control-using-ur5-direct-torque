@@ -32,6 +32,7 @@ from .lqr_controller import (
     CartPoleLQRConfig,
     CartPoleLQRController,
 )
+from .mpc_controller import CartPoleMPCConfig, CartPoleMPCController
 from .x_axis_cartesian_impedance import (
     CartesianImpedanceConfig,
     CartesianImpedanceOutput,
@@ -75,6 +76,8 @@ __all__ = [
     "CartPoleFallbackController",
     "CartPoleLQRConfig",
     "CartPoleLQRController",
+    "CartPoleMPCConfig",
+    "CartPoleMPCController",
     "CartesianImpedanceConfig",
     "CartesianImpedanceOutput",
     "XAxisCartesianImpedanceController",

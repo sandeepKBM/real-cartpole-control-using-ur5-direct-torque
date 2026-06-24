@@ -38,6 +38,12 @@ For the live lane:
 - The known-good startup mode is resident `xvfb-run -a` plain launch without
   `-h` or `-vscriptinfos`.
 
+**Torque limit diagnostics:** see [TORQUE_DIAGNOSTICS.md](TORQUE_DIAGNOSTICS.md).
+
+**Reciprocating EE transport (origin → +stroke → −stroke → origin):** see [RECIPROCATING_TRANSPORT.md](RECIPROCATING_TRANSPORT.md).
+
+**Cart-pole MPC outer loop:** see [CARTPOLE_MPC.md](CARTPOLE_MPC.md).
+
 On this cluster, the live lane needs the repo's Ubuntu 24.04 Singularity image:
 
 ```text
@@ -113,6 +119,14 @@ Most recent signal:
   - `--v-x-max 0.02`
   - it still failed `fixed_axes`, but it kept orientation and joint config
     within bounds and stayed inside the torque envelope
+
+Current LQR note:
+
+- the CoppeliaSim headless runner now has an `--accel-profile lqr` outer loop
+  that closes on measured world `x` / `x_dot` and still uses the constrained
+  `ik_joint_pd` torque allocator underneath
+- this is the transport LQR feedback law you asked about, but it remains
+  simulation-only and does not change the real-robot RTDE lane
 
 Sign-convention note: the point-to-point acceleration reference already emits
 a signed world-axis acceleration. Do not negate `target_axis_accel` again in

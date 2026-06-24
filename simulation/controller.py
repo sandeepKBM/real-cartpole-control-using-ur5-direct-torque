@@ -789,6 +789,7 @@ def acceleration_transport_controller(
     a_axis_max_m_s2: float = ACCEL_AXIS_DEFAULT_A_MAX_M_S2,
     v_axis_max_m_s: float = ACCEL_AXIS_DEFAULT_V_MAX_M_S,
     torque_headroom: float = 0.9,
+    joint_speed_limit_scale: float = 1.0,
     move_axis_weight: float = 120.0,
     hold_axis_weight: float = 100.0,
     orientation_weight: float = 64.0,
@@ -810,7 +811,10 @@ def acceleration_transport_controller(
 
     This is the generic version of the existing X transport controller. The
     legacy `acceleration_x_transport_controller` remains available as a
-    compatibility wrapper for older scripts and tests.
+    compatibility wrapper for older scripts and tests. The optional
+    `joint_speed_limit_scale` tightens the per-joint speed ceiling before the
+    feasibility checks, which is useful when the simulator's measured joint
+    velocity guard is much stricter than the nominal MuJoCo servo envelope.
     """
     q = np.asarray(q, dtype=np.float64).reshape(6)
     qvel = np.asarray(qvel, dtype=np.float64).reshape(6)
@@ -822,6 +826,7 @@ def acceleration_transport_controller(
     tool_jacobian_pos = np.asarray(tool_jacobian_pos, dtype=np.float64).reshape(3, 6)
     tool_jacobian_rot = np.asarray(tool_jacobian_rot, dtype=np.float64).reshape(3, 6)
     fixed_position = np.asarray(fixed_position, dtype=np.float64).reshape(3)
+    joint_speed_limit_scale = max(abs(float(joint_speed_limit_scale)), 1e-6)
 
     axis_idx = axis_name_to_index(transport_axis)
     fixed_axes = orthogonal_axis_indices(axis_idx)
@@ -879,7 +884,7 @@ def acceleration_transport_controller(
     delta = np.clip(delta, -max_delta, max_delta)
     qdot_des = delta / max(float(dt), 1e-9)
 
-    q_dot_ceiling = VELOCITY_MAX_DELTA_FULL / max(float(dt), 1e-6)
+    q_dot_ceiling = (VELOCITY_MAX_DELTA_FULL * joint_speed_limit_scale) / max(float(dt), 1e-6)
     abs_ratio = np.abs(qdot_des) / np.maximum(q_dot_ceiling, 1e-9)
     speed_ratio = float(np.max(abs_ratio))
     scale_speed = 1.0 if speed_ratio <= 1.0 else 1.0 / speed_ratio
@@ -916,6 +921,7 @@ def acceleration_transport_controller(
         "axis_velocity_saturated": bool(abs(v_axis_pre) > v_max + 1e-12),
         "speed_scale": float(scale_speed),
         "torque_scale": float(scale_torque),
+        "joint_speed_limit_scale": float(joint_speed_limit_scale),
         "speed_ratio": float(speed_ratio),
         "torque_ratio": float(torque_ratio),
         "q_dot_des": qdot_des.tolist(),

@@ -1,7 +1,15 @@
-# Conda environment for the real_Cartpole MuJoCo + ROS 2 + MoveIt workflow.
+# Conda environment for the real_Cartpole MuJoCo + ROS 2 + MoveIt + CoppeliaSim workflow.
 # This environment is intentionally on Python 3.12 so RoboStack's `moveit_py`
 # bindings are available alongside the rest of the Jazzy stack.
-# Activate: conda activate mujoco_ur5e
+#
+# Create (from repo root):
+#   conda env create -f environment.yml
+# Activate:
+#   conda activate mujoco_ur5e
+#
+# Cluster note: container launchers may hardcode
+#   /common/users/ss5772/miniforge3/bin/python3
+# On a local machine, either activate mujoco_ur5e or set PYTHON_BIN to your env python.
 name: mujoco_ur5e
 channels:
   - conda-forge
@@ -32,5 +40,8 @@ dependencies:
   - ros-jazzy-ros2-control
   - ros-jazzy-ros2-controllers
   - pip:
+      - coppeliasim_zmqremoteapi_client>=2.0.4
       - mediapy
       - mujoco>=2.3.3
+      - opencv-python-headless>=4.8
+      - scipy>=1.11

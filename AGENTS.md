@@ -7,21 +7,21 @@ Update it whenever a new workflow becomes reliable, a failure mode becomes clear
 ## Project Reality
 
 - The folder name is historical. This is primarily a UR5 / UR5e control workspace, not an active cartpole project.
-- Current active work is the CoppeliaSim controller/RPC path:
+- Current active work is CoppeliaSim only. Do not use MuJoCo simulation/controller paths for active debugging or development in this workspace.
   - make the UR5 arm move in CoppeliaSim using the existing single-axis torque controller.
   - the render-only CoppeliaSim video smoke path is done and should remain a separate baseline.
   - the controller-driven CoppeliaSim motion path is still in progress.
+  - MuJoCo-related code, videos, and notes are historical reference only unless a task explicitly says otherwise.
 - The most important current paths are:
   - `controller_core/`
   - `simulation/`
   - `ros2_ws/src/ur5_x_axis_controller_ros/`
-  - `mujoco_menagerie/universal_robots_ur5e/`
 - The diagnostic lab workspace guardrail workflow now lives in:
   - `config/lab_workspace_guardrails.yaml`
   - `simulation/workspace_guardrails.py`
   - `tools/check_trajectory_guardrails.py`
   - `tools/render_guardrail_overlay.py`
-  - optional `--draw-guardrails` flags on the MuJoCo simulation runners
+  - optional `--draw-guardrails` flags on the simulation runners
   - Treat it as simulation / visualization only. Do not wire `/viz/collision` into real-arm emergency stop logic.
 - The repo root is not a git repo. Do not assume `git status` will work here.
 - There is a nested git repo under `mujoco_menagerie/`.
@@ -32,7 +32,7 @@ Update it whenever a new workflow becomes reliable, a failure mode becomes clear
   - Current status is `docs/CURRENT_STATUS.md`.
   - **Smoke (Lua/PNG) vs ZMQ controller:** `docs/coppeliasim/PIPELINES.md`.
   - **Coppelia API for vision (handle → get, buffers):** `docs/coppeliasim/COPPELIASIM_VISION_NOTES.md`.
-  - **MuJoCo acceleration guardrails:** `docs/coppeliasim/MUJOCO_ACCELERATION_GUARDRAILS.md`.
+  - **MuJoCo acceleration guardrails:** `docs/coppeliasim/MUJOCO_ACCELERATION_GUARDRAILS.md` (historical reference only; do not use for active controller development).
   - The active RPC/controller plan is `docs/coppeliasim/RPC_CONTROLLER_TODO.md`.
   - Historical MuJoCo/MoveIt/SLSQP notes are archived under `docs/archive/`.
 

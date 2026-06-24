@@ -28,6 +28,7 @@ import subprocess
 import sys
 import time
 import socket
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -65,10 +66,16 @@ for candidate in (
 import zmq
 from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 
+from controller_core.mujoco_cartpole_state import (
+    build_mujoco_cartpole_observer,
+    default_cartpole_scene_candidates,
+    read_mujoco_cartpole_state,
+)
 from controller_core.filters import TorqueCommandFilter
 from controller_core.logging_utils import JsonlTraceWriter
 from controller_core.safety import ImpedanceSafetyConfig, ImpedanceSafetyMonitor
 from controller_core.kinematics_utils import orientation_error_vec_wxyz
+from controller_core import CommandGovernorSafetyFilter, FixedXTransportLQRController
 from controller_core.x_axis_cartesian_impedance import (
     JOINT_NAME_ORDER,
     CartesianImpedanceConfig,
@@ -87,9 +94,37 @@ from controller import (
     velocity_x_transport_controller,
     orthogonal_axis_indices,
 )
+from coppelia_mpc_transport import (
+    build_coppelia_mpc_transport,
+    compute_coppelia_mpc_outer_command,
+)
+from coppelia_lqr_transport import (
+    build_coppelia_lqr_transport,
+    compute_coppelia_lqr_outer_command,
+)
 from external_zmq_controller_common import (
     controller_ownership_metadata,
     startup_banner_lines,
+)
+from coppelia_fast_x_transport import (
+    minimum_fast_run_duration_s,
+    recommend_fast_point_to_point_limits,
+)
+from coppelia_pendulum import (
+    ensure_coppelia_pendulum,
+    read_coppelia_pendulum_state,
+)
+from coppelia_reciprocating_transport import (
+    build_reciprocating_plan,
+    minimum_run_duration_s,
+    point_to_point_accel_reference,
+    reciprocating_axis_reference,
+    reciprocating_ik_task_weights,
+    slew_axis_reference,
+)
+from coppelia_torque_diagnostics import (
+    CoppeliaTorqueDiagnostics,
+    CoppeliaTorqueDiagnosticsConfig,
 )
 
 
@@ -157,52 +192,63 @@ def mujoco_accel_window_command(t_move: float, a_abs: float) -> float:
     return 0.0
 
 
-def point_to_point_accel_reference(
-    t_move: float,
+def build_coppelia_mpc_transport_stack(
+    *,
+    x_start: float,
     target_dx: float,
-    a_abs: float,
-    v_abs: float,
-) -> tuple[float, float, float, float]:
-    """Return (offset, velocity, accel, total_time) for a bounded 1D move."""
-    distance = abs(float(target_dx))
-    if distance <= 0.0:
-        return 0.0, 0.0, 0.0, 0.0
-    direction = 1.0 if target_dx >= 0.0 else -1.0
-    a = max(abs(float(a_abs)), 1.0e-9)
-    v_cap = max(abs(float(v_abs)), 1.0e-9)
-    t_accel_cap = v_cap / a
-    d_accel_cap = 0.5 * a * t_accel_cap * t_accel_cap
-    if 2.0 * d_accel_cap >= distance:
-        t_accel = math.sqrt(distance / a)
-        v_peak = a * t_accel
-        t_flat = 0.0
-        d_accel = 0.5 * a * t_accel * t_accel
-    else:
-        t_accel = t_accel_cap
-        v_peak = v_cap
-        d_accel = d_accel_cap
-        t_flat = (distance - 2.0 * d_accel) / v_peak
-    total = 2.0 * t_accel + t_flat
-    t = max(float(t_move), 0.0)
-    if t <= 0.0:
-        s, v, acc = 0.0, 0.0, a
-    elif t < t_accel:
-        s = 0.5 * a * t * t
-        v = a * t
-        acc = a
-    elif t < t_accel + t_flat:
-        tau = t - t_accel
-        s = d_accel + v_peak * tau
-        v = v_peak
-        acc = 0.0
-    elif t < total:
-        tau = total - t
-        s = distance - 0.5 * a * tau * tau
-        v = a * tau
-        acc = -a
-    else:
-        s, v, acc = distance, 0.0, 0.0
-    return direction * s, direction * v, direction * acc, total
+    dt_s: float,
+    horizon: int,
+    q_weights: np.ndarray,
+    q_terminal_scale: float,
+    r_weight: float,
+    pole_length_m: float,
+    accel_limit: float,
+    velocity_limit: float,
+    command_change_limit: float,
+    guardrail_margin_m: float,
+):
+    return build_coppelia_mpc_transport(
+        x_start=x_start,
+        target_dx=target_dx,
+        dt_s=dt_s,
+        horizon=horizon,
+        q_weights=q_weights,
+        q_terminal_scale=q_terminal_scale,
+        r_weight=r_weight,
+        pole_length_m=pole_length_m,
+        accel_limit=accel_limit,
+        velocity_limit=velocity_limit,
+        command_change_limit=command_change_limit,
+        guardrail_margin_m=guardrail_margin_m,
+    )
+
+
+def build_coppelia_lqr_transport_stack(
+    *,
+    x_start: float,
+    target_dx: float,
+    dt_s: float,
+    q_x: float,
+    q_xdot: float,
+    r_weight: float,
+    accel_limit: float,
+    velocity_limit: float,
+    command_change_limit: float,
+    guardrail_margin_m: float,
+) -> tuple[FixedXTransportLQRController, CommandGovernorSafetyFilter, float]:
+    """Build the fixed-X LQR outer loop and its command-governing safety filter."""
+    return build_coppelia_lqr_transport(
+        x_start=x_start,
+        target_dx=target_dx,
+        dt_s=dt_s,
+        q_x=q_x,
+        q_xdot=q_xdot,
+        r_weight=r_weight,
+        accel_limit=accel_limit,
+        velocity_limit=velocity_limit,
+        command_change_limit=command_change_limit,
+        guardrail_margin_m=guardrail_margin_m,
+    )
 
 
 def build_mujoco_gravity_estimator() -> tuple[mujoco.MjModel, mujoco.MjData] | None:
@@ -319,15 +365,93 @@ def ik_joint_pd_torque(
     q_ref = np.asarray(q_ref, dtype=np.float64).reshape(6)
     qdot_ref = np.asarray(qdot_ref, dtype=np.float64).reshape(6)
     tau_limit = np.asarray(tau_limit, dtype=np.float64).reshape(6)
-    raw = float(kp) * (q_ref - q) + float(kd) * (qdot_ref - qd)
+    tau_p = float(kp) * (q_ref - q)
+    tau_d = float(kd) * (qdot_ref - qd)
+    raw = tau_p + tau_d
     clipped = np.clip(raw, -tau_limit, tau_limit)
     return clipped, {
         "tau_raw": raw.tolist(),
+        "tau_impedance_P": tau_p.tolist(),
+        "tau_impedance_D": tau_d.tolist(),
         "tau_clipped": clipped.tolist(),
         "tau_saturated": (np.abs(raw - clipped) > 1e-9).astype(np.float64).tolist(),
         "max_abs_tau_raw_nm": float(np.max(np.abs(raw))),
         "max_abs_tau_cmd_nm": float(np.max(np.abs(clipped))),
     }
+
+
+def build_diagnostics_config(args: argparse.Namespace, raw_cfg: dict) -> CoppeliaTorqueDiagnosticsConfig:
+    yaml_diag = raw_cfg.get("diagnostics", {}) or {}
+    cli_overrides = {
+        "enable_coppelia_torque_diagnostics": args.enable_coppelia_torque_diagnostics,
+        "save_controller_logs": args.save_controller_logs,
+        "save_controller_plots": args.save_controller_plots,
+        "diagnostics_output_dir": args.diagnostics_output_dir,
+        "impedance_gain_scale": args.impedance_gain_scale,
+        "reference_smoothing_enabled": args.reference_smoothing_enabled,
+        "max_reference_step": args.max_reference_step,
+        "max_reference_velocity": args.max_reference_velocity,
+        "diagnostics_mode": args.torque_diagnostics_mode,
+        "sinusoid_joint_index": args.torque_diagnostics_joint_index,
+    }
+    cfg = CoppeliaTorqueDiagnosticsConfig.from_sources(yaml_diag, cli_overrides)
+    if cfg.enable_coppelia_torque_diagnostics:
+        if args.save_controller_logs is None:
+            cfg.save_controller_logs = True
+        if args.save_controller_plots is None:
+            cfg.save_controller_plots = True
+    return cfg
+
+
+def apply_diagnostics_mode_overrides(
+    args: argparse.Namespace,
+    diag_cfg: CoppeliaTorqueDiagnosticsConfig,
+) -> None:
+    mode = str(diag_cfg.diagnostics_mode)
+    if mode == "passive":
+        args.zero_torque_test = False
+        args.accel_x_transport = False
+        args.duration = min(float(args.duration), 2.0)
+    elif mode == "hold_soft":
+        args.accel_x_transport = False
+        args.settle_duration = 0.0
+        if diag_cfg.impedance_gain_scale == 1.0:
+            diag_cfg.impedance_gain_scale = 0.05
+    elif mode == "sinusoid_joint":
+        args.accel_x_transport = False
+        args.settle_duration = 0.0
+        if diag_cfg.impedance_gain_scale == 1.0:
+            diag_cfg.impedance_gain_scale = 0.05
+    elif mode == "tiny_x_motion":
+        args.accel_x_transport = True
+        args.accel_profile = "point_to_point"
+        args.accel_torque_policy = "cartesian_impedance"
+        args.target_dx = min(abs(float(args.target_dx)), 0.002)
+        args.a_x_max = min(float(args.a_x_max), 0.05)
+        args.v_x_max = min(float(args.v_x_max), 0.02)
+        args.settle_duration = 0.5
+        if diag_cfg.impedance_gain_scale == 1.0:
+            diag_cfg.impedance_gain_scale = 0.1
+    elif mode == "ref_step":
+        args.accel_x_transport = False
+        args.settle_duration = 0.0
+        diag_cfg.reference_smoothing_enabled = False
+    elif mode == "ref_smooth":
+        args.accel_x_transport = False
+        args.settle_duration = 0.0
+        diag_cfg.reference_smoothing_enabled = True
+
+
+def apply_torque_filter_step(
+    torque_filter: TorqueCommandFilter,
+    tau_pre_filter: np.ndarray,
+    dt: float,
+    *,
+    collect_filter_diag: bool,
+) -> tuple[np.ndarray, dict[str, Any] | None]:
+    if collect_filter_diag:
+        return torque_filter.apply_with_diagnostics(tau_pre_filter, dt)
+    return torque_filter.apply(tau_pre_filter, dt), None
 
 
 # ---------------------------------------------------------------------------
@@ -477,13 +601,26 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--accel-profile",
-        choices=("point_to_point", "mujoco_windows", "back_and_forth_15s"),
+        choices=(
+            "point_to_point",
+            "mujoco_windows",
+            "back_and_forth_15s",
+            "reciprocating",
+            "fast_x",
+            "lqr",
+            "mpc",
+        ),
         default="point_to_point",
         help=(
             "Acceleration schedule for --accel-x-transport. point_to_point "
             "moves target_x by --target-dx and brakes to rest; mujoco_windows "
             "uses the legacy MuJoCo smoke-test acceleration windows; "
-            "back_and_forth_15s uses +a for 15s and -a for 15s, then stops."
+            "back_and_forth_15s uses +a for 15s and -a for 15s, then stops; "
+            "reciprocating moves origin -> +stroke -> -stroke -> origin with "
+            "acceleration-limited segments; fast_x auto-selects the fastest "
+            "feasible point-to-point move under joint and safety limits; lqr "
+            "closes the outer X loop on measured x/x_dot and still uses the "
+            "constrained inner torque allocator."
         ),
     )
     p.add_argument(
@@ -505,6 +642,63 @@ def parse_args() -> argparse.Namespace:
         help="Half-period for --accel-profile back_and_forth_15s.",
     )
     p.add_argument(
+        "--reciprocating-stroke-m",
+        type=float,
+        default=0.03,
+        help=(
+            "Half-stroke distance for --accel-profile reciprocating: the EE "
+            "moves to +stroke, then -stroke, then back to the start position."
+        ),
+    )
+    p.add_argument(
+        "--reciprocating-hold-s",
+        type=float,
+        default=0.25,
+        help="Pause duration at each reciprocating endpoint before reversing.",
+    )
+    p.add_argument(
+        "--fast-x-joint-speed-fraction",
+        type=float,
+        default=None,
+        help=(
+            "Fraction of safety.max_joint_velocity_radps used when "
+            "--accel-profile fast_x auto-computes v_x_max."
+        ),
+    )
+    p.add_argument(
+        "--fast-x-accel-fraction",
+        type=float,
+        default=None,
+        help="Acceleration margin for --accel-profile fast_x limit computation.",
+    )
+    p.add_argument(
+        "--fast-x-max-acceleration-mps2",
+        type=float,
+        default=None,
+        help="Hard ceiling on auto-computed transport acceleration for fast_x.",
+    )
+    p.add_argument(
+        "--fast-x-max-velocity-mps",
+        type=float,
+        default=None,
+        help="Hard ceiling on auto-computed transport velocity for fast_x.",
+    )
+    p.add_argument(
+        "--spawn-coppelia-pendulum",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Spawn a passive CoppeliaSim pendulum on the task frame for real "
+            "theta/theta_dot (config coppeliasim.spawn_pendulum when unset)."
+        ),
+    )
+    p.add_argument(
+        "--pendulum-pole-length-m",
+        type=float,
+        default=None,
+        help="Coppelia pendulum pole length in meters (config default when unset).",
+    )
+    p.add_argument(
         "--hold-transport-start-pose",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -520,6 +714,105 @@ def parse_args() -> argparse.Namespace:
             "joint target, then applies joint PD torques. cartesian_impedance "
             "keeps the older J.T wrench controller."
         ),
+    )
+    p.add_argument(
+        "--lqr-q-x",
+        type=float,
+        default=60.0,
+        help="LQR weight on X position error when --accel-profile lqr is used.",
+    )
+    p.add_argument(
+        "--lqr-q-xdot",
+        type=float,
+        default=8.0,
+        help="LQR weight on X velocity error when --accel-profile lqr is used.",
+    )
+    p.add_argument(
+        "--lqr-r-weight",
+        type=float,
+        default=1.0,
+        help="LQR control-effort weight when --accel-profile lqr is used.",
+    )
+    p.add_argument(
+        "--lqr-command-change-per-cycle",
+        type=float,
+        default=0.20,
+        help="Max change in the outer LQR acceleration command per simulation step.",
+    )
+    p.add_argument(
+        "--lqr-guardrail-margin-m",
+        type=float,
+        default=0.05,
+        help="Safety margin around the LQR start/goal bounds for command-governor clipping.",
+    )
+    p.add_argument(
+        "--lqr-sim-time-step",
+        type=float,
+        default=0.01,
+        help=(
+            "Requested simulation time step in seconds for --accel-profile lqr. "
+            "This only applies to the LQR outer-loop mode."
+        ),
+    )
+    p.add_argument(
+        "--mpc-horizon",
+        type=int,
+        default=20,
+        help="Receding horizon length for --accel-profile mpc.",
+    )
+    p.add_argument(
+        "--mpc-q-x",
+        type=float,
+        default=40.0,
+        help="MPC stage weight on cart/task X position error.",
+    )
+    p.add_argument(
+        "--mpc-q-xdot",
+        type=float,
+        default=10.0,
+        help="MPC stage weight on cart/task X velocity.",
+    )
+    p.add_argument(
+        "--mpc-q-theta",
+        type=float,
+        default=180.0,
+        help="MPC stage weight on pole angle error.",
+    )
+    p.add_argument(
+        "--mpc-q-theta-dot",
+        type=float,
+        default=20.0,
+        help="MPC stage weight on pole angular velocity.",
+    )
+    p.add_argument(
+        "--mpc-q-terminal-scale",
+        type=float,
+        default=3.0,
+        help="Terminal cost scale for the final MPC stage.",
+    )
+    p.add_argument(
+        "--mpc-r-weight",
+        type=float,
+        default=0.35,
+        help="MPC control-effort weight on cart acceleration.",
+    )
+    p.add_argument(
+        "--mpc-pole-length-m",
+        type=float,
+        default=0.4,
+        help="Effective pendulum length used by the MPC prediction model.",
+    )
+    p.add_argument(
+        "--mpc-command-change-per-cycle",
+        type=float,
+        default=0.20,
+        help="Max change in the outer MPC acceleration command per simulation step.",
+    )
+    p.add_argument(
+        "--mpc-guardrail-margin-m",
+        type=float,
+        default=0.05,
+        help="Safety margin around the MPC start/goal bounds for command-governor clipping.",
     )
     p.add_argument(
         "--task-frame-mode",
@@ -618,6 +911,80 @@ def parse_args() -> argparse.Namespace:
             "'smoke' = same world pose formula as run_coppeliasim_video_smoke.py (default, arm visible). "
             "'ee' = offset from end-effector, same z, look-at EE (tracks motion)."
         ),
+    )
+    p.add_argument(
+        "--enable-coppelia-torque-diagnostics",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Record per-step CoppeliaSim torque/safety diagnostics (default: off).",
+    )
+    p.add_argument(
+        "--save-controller-logs",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Write diagnostic JSONL + summary when torque diagnostics are enabled.",
+    )
+    p.add_argument(
+        "--save-controller-plots",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Generate diagnostic PNG plots when torque diagnostics are enabled.",
+    )
+    p.add_argument(
+        "--diagnostics-output-dir",
+        type=Path,
+        default=None,
+        help="Directory for diagnostic logs/plots (default: outputs/control_runs/coppelia_torque_diagnostics).",
+    )
+    p.add_argument(
+        "--impedance-gain-scale",
+        type=float,
+        default=None,
+        help="Scale Cartesian/IK impedance gains for diagnostic hold/sweep tests.",
+    )
+    p.add_argument(
+        "--reference-smoothing-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Smooth q_des / x_des references to limit step discontinuities.",
+    )
+    p.add_argument(
+        "--max-reference-step",
+        type=float,
+        default=None,
+        help="Max per-step reference change when reference smoothing is enabled.",
+    )
+    p.add_argument(
+        "--max-reference-velocity",
+        type=float,
+        default=None,
+        help="Max reference velocity when reference smoothing is enabled.",
+    )
+    p.add_argument(
+        "--torque-diagnostics-mode",
+        choices=(
+            "live",
+            "passive",
+            "hold_soft",
+            "sinusoid_joint",
+            "tiny_x_motion",
+            "ref_step",
+            "ref_smooth",
+        ),
+        default="live",
+        help="Diagnostic test mode for CoppeliaSim torque bring-up.",
+    )
+    p.add_argument(
+        "--torque-diagnostics-joint-index",
+        type=int,
+        default=5,
+        help="Joint index (0..5) for sinusoid_joint diagnostic mode (default wrist_3).",
+    )
+    p.add_argument(
+        "--torque-diagnostics-run-label",
+        type=str,
+        default="",
+        help="Label prefix for diagnostic output files.",
     )
     return p.parse_args()
 
@@ -924,8 +1291,9 @@ def write_video_ffmpeg(path: Path, frames: list[np.ndarray], fps: int) -> None:
     if not frames:
         return
     h, w, _ = frames[0].shape
+    ffmpeg_bin = os.environ.get("FFMPEG_BIN", "ffmpeg")
     cmd = [
-        "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+        ffmpeg_bin, "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
         "-s:v", f"{w}x{h}", "-r", str(fps), "-i", "-",
         "-an", "-vcodec", "libx264", "-pix_fmt", "yuv420p", str(path),
     ]
@@ -1042,7 +1410,19 @@ def main() -> None:
     raw_cfg, cop_cfg = load_runtime(args)
     ctrl_y = raw_cfg.get("controller", {}) or {}
     safe_y = raw_cfg.get("safety", {}) or {}
+    cop_y = raw_cfg.get("coppeliasim", {}) or {}
+    fast_x_y = raw_cfg.get("fast_x_transport", {}) or {}
     use_gravity_compensation = bool(ctrl_y.get("use_gravity_compensation", False))
+    diag_cfg = build_diagnostics_config(args, raw_cfg)
+    apply_diagnostics_mode_overrides(args, diag_cfg)
+    if diag_cfg.enable_coppelia_torque_diagnostics:
+        print(
+            "[torque-diagnostics] enabled "
+            f"mode={diag_cfg.diagnostics_mode} "
+            f"gain_scale={diag_cfg.impedance_gain_scale} "
+            f"ref_smooth={diag_cfg.reference_smoothing_enabled}",
+            flush=True,
+        )
 
     scene_path = args.coppelia_root / "system" / "dfltscn.ttt"
     ur5_model = args.coppelia_root / "models" / "robots" / "non-mobile" / "UR5.ttm"
@@ -1105,22 +1485,43 @@ def main() -> None:
     print(f"[task-frame] {json.dumps(task_frame_summary, sort_keys=True)}", flush=True)
     adapter.configure_force_torque_mode()
     mark("torque mode configured")
-    if args.accel_x_transport and args.hold_transport_start_pose:
-        default_transport_start_q = (
-            DEFAULT_TRANSPORT_START_Q_COPPELIA
-            if args.accel_torque_policy == "ik_joint_pd"
-            else DEFAULT_TRANSPORT_START_Q_FIXED_Z
+    spawn_coppelia_pendulum = (
+        bool(args.spawn_coppelia_pendulum)
+        if args.spawn_coppelia_pendulum is not None
+        else bool(cop_y.get("spawn_pendulum", False))
+    )
+    pendulum_pole_length_m = (
+        float(args.pendulum_pole_length_m)
+        if args.pendulum_pole_length_m is not None
+        else float(cop_y.get("pendulum_pole_length_m", 0.4))
+    )
+    coppelia_pendulum_handles = None
+    if spawn_coppelia_pendulum:
+        pendulum_parent_handle = int(
+            task_frame_summary.get("handle", task_frame_summary.get("parent_handle", -1))
         )
-        transport_start_q = parse_joint_vector_env("Q_START_RAD", default_transport_start_q)
-        adapter.set_joint_positions(transport_start_q)
-        mark(
-            "UR5 set to "
-            + (
-                "Coppelia-derived transport start pose"
-                if args.accel_torque_policy == "ik_joint_pd"
-                else "fixed-Z transport start pose"
+        coppelia_pendulum_handles = ensure_coppelia_pendulum(
+            sim,
+            parent_handle=pendulum_parent_handle,
+            pole_length_m=pendulum_pole_length_m,
+            parent_path_hint=str(task_frame_summary.get("resolved_path", "")),
+        )
+        if coppelia_pendulum_handles is not None and coppelia_pendulum_handles.available:
+            mark(
+                "Coppelia pendulum ready "
+                f"(hinge={coppelia_pendulum_handles.hinge_handle}, "
+                f"pole_length_m={pendulum_pole_length_m:.3f})"
             )
+        else:
+            print("[pendulum] Coppelia pendulum spawn failed; theta will be unavailable", flush=True)
+    use_lqr_outer_policy = bool(args.accel_x_transport and args.accel_profile == "lqr")
+    if args.accel_x_transport and args.hold_transport_start_pose:
+        transport_start_q = parse_joint_vector_env(
+            "Q_START_RAD",
+            DEFAULT_TRANSPORT_START_Q_COPPELIA,
         )
+        adapter.set_joint_positions(transport_start_q)
+        mark("UR5 set to Coppelia-derived transport start pose")
 
     # ---------- 4. Vision sensor (optional) ----------
     vision_sensor: int | None = None
@@ -1132,6 +1533,33 @@ def main() -> None:
             set_ur5_joints_for_video_framing(sim)
             mark("UR5 set to video-smoke joint pose (visible in camera)")
 
+    actual_lqr_sim_time_step: float | None = None
+    lqr_requested_sim_time_step = float(args.lqr_sim_time_step)
+    if use_lqr_outer_policy:
+        if not math.isfinite(lqr_requested_sim_time_step) or lqr_requested_sim_time_step <= 0.0:
+            raise ValueError("--lqr-sim-time-step must be a positive finite float")
+        try:
+            requested_lqr_sim_time_step = float(lqr_requested_sim_time_step)
+            param_ids: list[int] = []
+            for attr_name in ("floatparam_simulation_time_step", "floatparam_physicstimestep"):
+                if hasattr(sim, attr_name):
+                    param_ids.append(int(getattr(sim, attr_name)))
+            if not param_ids:
+                param_ids.append(1)
+            for param_id in dict.fromkeys(param_ids):
+                sim.setFloatParam(int(param_id), requested_lqr_sim_time_step)
+            mark(
+                "LQR sim time step requested before start "
+                f"({requested_lqr_sim_time_step:.4f}s)"
+            )
+        except Exception as exc:
+            print(
+                "[lqr] WARNING: unable to request simulation time step "
+                f"{lqr_requested_sim_time_step:.4f}s "
+                f"({type(exc).__name__}: {exc}); continuing with the scene default",
+                flush=True,
+            )
+
     # ---------- 5. Start stepped simulation ----------
     sim.setStepping(True)
     if sim.getSimulationState() == sim.simulation_stopped:
@@ -1139,6 +1567,31 @@ def main() -> None:
         mark("simulation started (stepped)")
     else:
         mark("simulation already running — stepping enabled")
+    if use_lqr_outer_policy:
+        try:
+            actual_lqr_sim_time_step = float(sim.getSimulationTimeStep())
+            mark(
+                "LQR sim time step active after start "
+                f"({actual_lqr_sim_time_step:.4f}s)"
+            )
+            if (
+                math.isfinite(lqr_requested_sim_time_step)
+                and lqr_requested_sim_time_step > 0.0
+                and abs(actual_lqr_sim_time_step - lqr_requested_sim_time_step)
+                > max(1e-9, 0.1 * lqr_requested_sim_time_step)
+            ):
+                print(
+                    "[lqr] WARNING: active simulation time step "
+                    f"({actual_lqr_sim_time_step:.4f}s) does not match the requested "
+                    f"value ({lqr_requested_sim_time_step:.4f}s)",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                "[lqr] WARNING: unable to read active simulation time step after start "
+                f"({type(exc).__name__}: {exc})",
+                flush=True,
+            )
     if not args.no_video and vision_sensor is not None:
         _enable_global_vision_and_display(sim)
         mark("vision/display bool params set (where supported)")
@@ -1147,7 +1600,63 @@ def main() -> None:
     transport_axis_idx = axis_name_to_index(args.transport_axis)
     transport_axis_name = axis_index_to_name(transport_axis_idx)
     orth_axis_idxs = orthogonal_axis_indices(transport_axis_idx)
+    use_lqr_outer_policy = bool(args.accel_x_transport and args.accel_profile == "lqr")
+    use_mpc_outer_policy = bool(args.accel_x_transport and args.accel_profile == "mpc")
+    use_fast_x_profile = bool(args.accel_x_transport and args.accel_profile == "fast_x")
+    fast_x_joint_speed_fraction = (
+        float(args.fast_x_joint_speed_fraction)
+        if args.fast_x_joint_speed_fraction is not None
+        else float(fast_x_y.get("joint_speed_fraction", 0.82))
+    )
+    fast_x_accel_fraction = (
+        float(args.fast_x_accel_fraction)
+        if args.fast_x_accel_fraction is not None
+        else float(fast_x_y.get("accel_fraction", 0.78))
+    )
+    fast_x_max_acceleration_mps2 = (
+        float(args.fast_x_max_acceleration_mps2)
+        if args.fast_x_max_acceleration_mps2 is not None
+        else float(fast_x_y.get("max_acceleration_mps2", 0.45))
+    )
+    fast_x_max_velocity_mps = (
+        float(args.fast_x_max_velocity_mps)
+        if args.fast_x_max_velocity_mps is not None
+        else float(fast_x_y.get("max_velocity_mps", 0.18))
+    )
+    max_joint_velocity_radps = float(safe_y.get("max_joint_velocity_radps", 4.8))
+    if use_mpc_outer_policy and transport_axis_idx != 0:
+        raise ValueError("--accel-profile mpc currently supports transport-axis x only")
+    if use_mpc_outer_policy and args.accel_torque_policy not in {"ik_joint_pd", "cartesian_impedance"}:
+        raise ValueError(
+            "--accel-profile mpc currently requires --accel-torque-policy ik_joint_pd or cartesian_impedance"
+        )
+    if use_lqr_outer_policy and transport_axis_idx != 0:
+        raise ValueError("--accel-profile lqr currently supports transport-axis x only")
+    if use_lqr_outer_policy and args.accel_torque_policy not in {"ik_joint_pd", "cartesian_impedance"}:
+        raise ValueError(
+            "--accel-profile lqr currently requires --accel-torque-policy ik_joint_pd or cartesian_impedance"
+        )
+    if use_fast_x_profile and transport_axis_idx != 0:
+        raise ValueError("--accel-profile fast_x currently supports transport-axis x only")
 
+    lqr_move_axis_weight = 60.0
+    lqr_hold_axis_weight = 260.0
+    lqr_orientation_weight = 180.0
+    lqr_hold_axis_gain = 16.0
+    lqr_ik_joint_kp = 4.0
+    lqr_ik_joint_kd = 1.0
+    lqr_ik_torque_headroom = 0.02
+    lqr_joint_torque_limit_scale = 0.0001
+    # Tighten the joint-speed envelope for the LQR branch so the inner
+    # allocator stays below the live qd guard instead of converging right at it.
+    lqr_joint_speed_limit_scale = 0.20
+    lqr_torque_rate_limit_scale = 0.25
+    # The LQR outer loop already saturates the requested axis command. Keep the
+    # cartesian-impedance inner loop much softer than the default transport
+    # gains so the first few simulation steps do not immediately trip the qd
+    # and fixed-axis guards.
+    lqr_cartesian_impedance_gain_scale = 0.005
+    lqr_cartesian_impedance_torque_headroom = 0.02
     initial_state = sample_controller_state(adapter, target_axis=0.0)
     q0 = np.asarray(initial_state["q"], dtype=np.float64)
     qd0 = np.asarray(initial_state["qd"], dtype=np.float64)
@@ -1168,6 +1677,60 @@ def main() -> None:
         if args.task_orientation_target == "mujoco"
         else task_rot0.copy()
     )
+    lqr_controller: FixedXTransportLQRController | None = None
+    lqr_filter: CommandGovernorSafetyFilter | None = None
+    lqr_goal_x: float | None = None
+    lqr_gain_matrix: list[list[float]] | None = None
+    lqr_riccati_converged: bool | None = None
+    lqr_riccati_iters: int | None = None
+    lqr_clipped_count = 0
+    lqr_rejected_count = 0
+    mpc_controller = None
+    mpc_filter: CommandGovernorSafetyFilter | None = None
+    mpc_goal_x: float | None = None
+    mpc_clipped_count = 0
+    mpc_rejected_count = 0
+    mpc_pole_theta_hist: list[float] = []
+    mpc_pole_theta_dot_hist: list[float] = []
+    mujoco_cartpole_observer = (
+        build_mujoco_cartpole_observer(default_cartpole_scene_candidates(REPO_ROOT))
+        if use_mpc_outer_policy
+        else None
+    )
+
+    def read_pole_state_for_control(
+        *,
+        q_arr: np.ndarray,
+        qd_arr: np.ndarray,
+        time_s: float,
+        dt_s: float,
+        target_x: float,
+    ) -> tuple[float, float, str]:
+        if coppelia_pendulum_handles is not None and coppelia_pendulum_handles.available:
+            coppelia_state = read_coppelia_pendulum_state(
+                sim,
+                coppelia_pendulum_handles,
+                parent_handle=int(task_frame_summary.get("parent_handle", -1)),
+            )
+            if coppelia_state is not None:
+                return float(coppelia_state[0]), float(coppelia_state[1]), "coppelia"
+        if mujoco_cartpole_observer is not None:
+            pole_state = read_mujoco_cartpole_state(
+                mujoco_cartpole_observer,
+                q_arr,
+                qd_arr,
+                time_s=time_s,
+                dt_s=dt_s,
+                target_x=target_x,
+                transport_axis_index=transport_axis_idx,
+            )
+            if pole_state is not None:
+                return (
+                    float(pole_state.theta),
+                    float(pole_state.theta_dot),
+                    "mujoco_observer",
+                )
+        return 0.0, 0.0, "unavailable"
     frame_reference_summary = {
         "transport_axis": transport_axis_name,
         "transport_axis_index": transport_axis_idx,
@@ -1200,6 +1763,54 @@ def main() -> None:
         initial_state["gravity_torque"] = initial_gravity_torque
 
     imp_cfg = CartesianImpedanceConfig.from_controller_yaml_section(ctrl_y)
+    transport_gain_scale = (
+        float(args.impedance_gain_scale)
+        if args.impedance_gain_scale is not None
+        else (
+            0.30
+            if args.accel_x_transport
+            and args.accel_profile == "reciprocating"
+            and args.accel_torque_policy == "cartesian_impedance"
+            else 1.0
+        )
+    )
+    if (
+        diag_cfg.enable_coppelia_torque_diagnostics
+        and float(diag_cfg.impedance_gain_scale) != 1.0
+    ):
+        transport_gain_scale = float(diag_cfg.impedance_gain_scale)
+    if transport_gain_scale != 1.0:
+        gs = float(transport_gain_scale)
+        imp_cfg = replace(
+            imp_cfg,
+            kp_x=float(imp_cfg.kp_x * gs),
+            kd_x=float(imp_cfg.kd_x * gs),
+            kp_y=float(imp_cfg.kp_y * gs),
+            kd_y=float(imp_cfg.kd_y * gs),
+            kp_z=float(imp_cfg.kp_z * gs),
+            kd_z=float(imp_cfg.kd_z * gs),
+            kp_rot=float(imp_cfg.kp_rot * gs),
+            kd_rot=float(imp_cfg.kd_rot * gs),
+            kp_posture=float(imp_cfg.kp_posture * gs),
+            kd_posture=float(imp_cfg.kd_posture * gs),
+            kd_joint=float(imp_cfg.kd_joint * gs),
+        )
+    if use_lqr_outer_policy and args.accel_torque_policy == "cartesian_impedance":
+        imp_cfg = replace(
+            imp_cfg,
+            kp_x=float(imp_cfg.kp_x * lqr_cartesian_impedance_gain_scale),
+            kd_x=float(imp_cfg.kd_x * lqr_cartesian_impedance_gain_scale),
+            kp_y=float(imp_cfg.kp_y * lqr_cartesian_impedance_gain_scale),
+            kd_y=float(imp_cfg.kd_y * lqr_cartesian_impedance_gain_scale),
+            kp_z=float(imp_cfg.kp_z * lqr_cartesian_impedance_gain_scale),
+            kd_z=float(imp_cfg.kd_z * lqr_cartesian_impedance_gain_scale),
+            kp_rot=float(imp_cfg.kp_rot * lqr_cartesian_impedance_gain_scale),
+            kd_rot=float(imp_cfg.kd_rot * lqr_cartesian_impedance_gain_scale),
+            kp_posture=float(imp_cfg.kp_posture * lqr_cartesian_impedance_gain_scale),
+            kd_posture=float(imp_cfg.kd_posture * lqr_cartesian_impedance_gain_scale),
+            kd_joint=float(imp_cfg.kd_joint * lqr_cartesian_impedance_gain_scale),
+            torque_headroom=float(lqr_cartesian_impedance_torque_headroom),
+        )
     controller = XAxisCartesianImpedanceController(imp_cfg)
     controller.reset_from_state(initial_state)
 
@@ -1693,6 +2304,8 @@ def main() -> None:
     # ---------- 8. Torque-control loop ----------
     rate_dict = ctrl_y.get("torque_rate_limit_nm_per_sec", {}) or {}
     rate_arr = np.asarray([float(rate_dict[n]) for n in JOINT_NAME_ORDER], dtype=np.float64)
+    if use_lqr_outer_policy:
+        rate_arr = rate_arr * float(lqr_torque_rate_limit_scale)
     torque_filter = TorqueCommandFilter(
         num_joints=6,
         lowpass_alpha=float(ctrl_y.get("torque_lowpass_alpha", 0.15)),
@@ -1709,6 +2322,37 @@ def main() -> None:
     ik_axis_state = 0.0
     tau_limit = np.asarray(imp_cfg.tau_max_nm, dtype=np.float64).reshape(6)
     mark("controller ready for closed-loop motion")
+
+    torque_diagnostics: CoppeliaTorqueDiagnostics | None = None
+    if diag_cfg.enable_coppelia_torque_diagnostics:
+        run_label = (
+            str(args.torque_diagnostics_run_label).strip()
+            or str(diag_cfg.diagnostics_mode)
+        )
+        controller_mode_label = (
+            f"{args.accel_torque_policy}"
+            if args.accel_x_transport
+            else "cartesian_impedance_hold"
+        )
+        torque_diagnostics = CoppeliaTorqueDiagnostics(
+            diag_cfg,
+            tau_limit_nm=np.asarray(imp_cfg.tau_max_nm, dtype=np.float64),
+            rate_limit_nm_per_sec=rate_arr,
+            controller_mode=controller_mode_label,
+            prefer_signed_target_force=bool(cop_cfg.prefer_signed_target_force),
+            joint_configuration=joint_cfg,
+            run_label=run_label,
+        )
+    diag_force_hold_pose = diag_cfg.diagnostics_mode in {
+        "hold_soft",
+        "ref_step",
+        "ref_smooth",
+    }
+    diag_sinusoid_joint = diag_cfg.diagnostics_mode == "sinusoid_joint"
+    diag_passive = diag_cfg.diagnostics_mode == "passive"
+    diag_ref_step_mid = diag_cfg.diagnostics_mode == "ref_step"
+    diag_sinusoid_joint_idx = int(diag_cfg.sinusoid_joint_index) % 6
+    diag_ref_step_applied = False
 
     sim_dt = float(sim.getSimulationTimeStep())
     if sim_dt <= 0.0:
@@ -1748,7 +2392,71 @@ def main() -> None:
     task_feasible_hist: list[bool] = []
     safety_stop_reason: str | None = None
     transport_reanchored = False
+    reciprocating_plan = None
+    reciprocating_phase = "idle"
+    reciprocating_axis_offset_slew = 0.0
+    fast_transport_a_max = float(args.a_x_max)
+    fast_transport_v_max = float(args.v_x_max)
+    fast_x_limits_diag: dict[str, Any] = {}
+    if use_fast_x_profile:
+        startup_jacobian = np.asarray(initial_state["jacobian"], dtype=np.float64)
+        fast_transport_a_max, fast_transport_v_max, fast_x_limits_diag = (
+            recommend_fast_point_to_point_limits(
+                float(args.target_dx),
+                {},
+                max_joint_velocity_radps=max_joint_velocity_radps,
+                max_acceleration_mps2=fast_x_max_acceleration_mps2,
+                joint_speed_fraction=fast_x_joint_speed_fraction,
+                accel_fraction=fast_x_accel_fraction,
+                jacobian=startup_jacobian,
+                transport_axis_index=transport_axis_idx,
+            )
+        )
+        fast_transport_v_max = min(fast_transport_v_max, fast_x_max_velocity_mps)
+        fast_transport_a_max = min(fast_transport_a_max, fast_x_max_acceleration_mps2)
+        if float(args.duration) <= 0.0:
+            args.duration = minimum_fast_run_duration_s(
+                float(args.target_dx),
+                fast_transport_a_max,
+                fast_transport_v_max,
+                settle_duration_s=float(args.settle_duration),
+            )
+        print(
+            "[fast_x] startup limits: "
+            f"a_max={fast_transport_a_max:.4f} m/s^2, "
+            f"v_max={fast_transport_v_max:.4f} m/s, "
+            f"target_dx={float(args.target_dx):.4f} m, "
+            f"duration={float(args.duration):.2f} s, "
+            f"profile={fast_x_limits_diag.get('profile', 'unknown')}",
+            flush=True,
+        )
+    if args.accel_x_transport and args.accel_profile == "reciprocating":
+        reciprocating_plan = build_reciprocating_plan(
+            stroke_m=float(args.reciprocating_stroke_m),
+            a_abs_m_s2=float(args.a_x_max),
+            v_abs_m_s=float(args.v_x_max),
+            hold_s=float(args.reciprocating_hold_s),
+        )
+        min_duration = minimum_run_duration_s(
+            reciprocating_plan,
+            settle_duration_s=float(args.settle_duration),
+        )
+        if float(args.duration) < min_duration:
+            print(
+                f"[reciprocating] extending duration from {args.duration:.2f}s "
+                f"to {min_duration:.2f}s for full stroke cycle",
+                flush=True,
+            )
+            args.duration = float(min_duration)
+        print(
+            "[reciprocating] plan: "
+            f"stroke={reciprocating_plan.stroke_m:.4f} m, "
+            f"motion={reciprocating_plan.motion_duration_s:.2f} s, "
+            f"segments={len(reciprocating_plan.segments)}",
+            flush=True,
+        )
     steps = int(round(args.duration / sim_dt))
+    prev_sim_time: float | None = None
 
     try:
         with JsonlTraceWriter(trace_path) as trace:
@@ -1759,9 +2467,16 @@ def main() -> None:
                         step, steps, adapter,
                     )
                 sim_time = float(sim.getSimulationTime())
+                step_dt = (
+                    sim_dt
+                    if prev_sim_time is None
+                    else max(sim_time - float(prev_sim_time), 1e-6)
+                )
                 q, qd = adapter.read_joint_state()
                 ee_pos, ee_quat, ee_lin, ee_ang = adapter.read_ee_pose_twist()
                 j_pos, j_rot = adapter.read_jacobian()
+                ee_pos_arr = np.asarray(ee_pos, dtype=np.float64)
+                ee_lin_arr = np.asarray(ee_lin, dtype=np.float64)
                 gravity_torque = (
                     compute_mujoco_gravity_bias(mujoco_gravity_estimator, q, qd)
                     if use_gravity_compensation
@@ -1774,8 +2489,20 @@ def main() -> None:
                 use_point_to_point_ik_policy = (
                     use_ik_torque_policy and args.accel_profile == "point_to_point"
                 )
+                use_fast_x_ik_policy = (
+                    use_ik_torque_policy and args.accel_profile == "fast_x"
+                )
+                use_reciprocating_ik_policy = (
+                    use_ik_torque_policy and args.accel_profile == "reciprocating"
+                )
+                reciprocating_ik_weights = (
+                    reciprocating_ik_task_weights()
+                    if use_reciprocating_ik_policy or use_fast_x_ik_policy
+                    else {}
+                )
                 ik_diag: dict[str, Any] = {}
                 pd_diag: dict[str, Any] = {}
+                outer_diag: dict[str, Any] = {}
 
                 if sim_time >= args.settle_duration:
                     t_move = sim_time - float(args.settle_duration)
@@ -1788,6 +2515,87 @@ def main() -> None:
                         accel_v_state = 0.0
                         ik_axis_state = 0.0
                         transport_reanchored = True
+                        if use_lqr_outer_policy:
+                            (
+                                lqr_controller,
+                                lqr_filter,
+                                lqr_goal_x,
+                            ) = build_coppelia_lqr_transport_stack(
+                                x_start=float(transport_axis0),
+                                target_dx=float(args.target_dx),
+                                dt_s=float(sim_dt),
+                                q_x=float(args.lqr_q_x),
+                                q_xdot=float(args.lqr_q_xdot),
+                                r_weight=float(args.lqr_r_weight),
+                                accel_limit=float(args.a_x_max),
+                                velocity_limit=float(args.v_x_max),
+                                command_change_limit=float(args.lqr_command_change_per_cycle),
+                                guardrail_margin_m=float(args.lqr_guardrail_margin_m),
+                            )
+                            lqr_gain_matrix = lqr_controller.gain_matrix.tolist()
+                            lqr_riccati_converged = bool(lqr_controller.riccati_converged)
+                            lqr_riccati_iters = int(lqr_controller.riccati_iters)
+                            transport_target_pos[transport_axis_idx] = float(lqr_goal_x)
+                            target_axis = float(lqr_goal_x)
+                        elif use_mpc_outer_policy:
+                            mpc_q = np.array(
+                                [
+                                    float(args.mpc_q_x),
+                                    float(args.mpc_q_xdot),
+                                    float(args.mpc_q_theta),
+                                    float(args.mpc_q_theta_dot),
+                                ],
+                                dtype=np.float64,
+                            )
+                            (
+                                mpc_controller,
+                                mpc_filter,
+                                mpc_goal_x,
+                            ) = build_coppelia_mpc_transport_stack(
+                                x_start=float(transport_axis0),
+                                target_dx=float(args.target_dx),
+                                dt_s=float(sim_dt),
+                                horizon=int(args.mpc_horizon),
+                                q_weights=mpc_q,
+                                q_terminal_scale=float(args.mpc_q_terminal_scale),
+                                r_weight=float(args.mpc_r_weight),
+                                pole_length_m=float(args.mpc_pole_length_m),
+                                accel_limit=float(args.a_x_max),
+                                velocity_limit=float(args.v_x_max),
+                                command_change_limit=float(args.mpc_command_change_per_cycle),
+                                guardrail_margin_m=float(args.mpc_guardrail_margin_m),
+                            )
+                            transport_target_pos[transport_axis_idx] = float(mpc_goal_x)
+                            target_axis = float(mpc_goal_x)
+                        elif use_fast_x_profile:
+                            live_jacobian = np.vstack([j_pos, j_rot])
+                            (
+                                fast_transport_a_max,
+                                fast_transport_v_max,
+                                fast_x_limits_diag,
+                            ) = recommend_fast_point_to_point_limits(
+                                float(args.target_dx),
+                                {},
+                                max_joint_velocity_radps=max_joint_velocity_radps,
+                                max_acceleration_mps2=fast_x_max_acceleration_mps2,
+                                joint_speed_fraction=fast_x_joint_speed_fraction,
+                                accel_fraction=fast_x_accel_fraction,
+                                jacobian=live_jacobian,
+                                transport_axis_index=transport_axis_idx,
+                            )
+                            fast_transport_v_max = min(
+                                fast_transport_v_max, fast_x_max_velocity_mps
+                            )
+                            fast_transport_a_max = min(
+                                fast_transport_a_max, fast_x_max_acceleration_mps2
+                            )
+                            print(
+                                "[fast_x] motion-start limits: "
+                                f"a_max={fast_transport_a_max:.4f} m/s^2, "
+                                f"v_max={fast_transport_v_max:.4f} m/s, "
+                                f"profile={fast_x_limits_diag.get('profile', 'unknown')}",
+                                flush=True,
+                            )
                     if args.accel_x_transport and args.accel_profile == "point_to_point":
                         axis_ref, axis_v_ref, axis_a_ref, total_time = point_to_point_accel_reference(
                             t_move,
@@ -1803,6 +2611,50 @@ def main() -> None:
                             target_axis_vel = float(axis_v_ref)
                             target_axis_accel = float(axis_a_ref)
                         accel_total_time = total_time
+                    elif args.accel_x_transport and args.accel_profile == "fast_x":
+                        axis_ref, axis_v_ref, axis_a_ref, total_time = point_to_point_accel_reference(
+                            t_move,
+                            target_dx=float(args.target_dx),
+                            a_abs=float(fast_transport_a_max),
+                            v_abs=float(fast_transport_v_max),
+                        )
+                        if use_ik_torque_policy:
+                            axis_pos = float(ee_pos_arr[transport_axis_idx]) - float(
+                                transport_axis0
+                            )
+                            pos_err = float(axis_ref) - axis_pos
+                            vel_err = float(axis_v_ref) - float(
+                                ee_lin_arr[transport_axis_idx]
+                            )
+                            track_accel = float(
+                                np.clip(
+                                    30.0 * pos_err + 10.0 * vel_err,
+                                    -abs(float(fast_transport_a_max)),
+                                    abs(float(fast_transport_a_max)),
+                                )
+                            )
+                            ik_axis_state = float(axis_v_ref)
+                            target_axis_accel = float(
+                                0.55 * float(axis_a_ref) + 0.45 * track_accel
+                            )
+                            transport_target_pos[transport_axis_idx] = transport_axis0 + float(
+                                axis_ref
+                            )
+                            target_axis = float(transport_target_pos[transport_axis_idx])
+                            target_axis_vel = float(axis_v_ref)
+                        else:
+                            transport_target_pos[transport_axis_idx] = transport_axis0 + axis_ref
+                            target_axis = float(transport_target_pos[transport_axis_idx])
+                            target_axis_vel = float(axis_v_ref)
+                            target_axis_accel = float(axis_a_ref)
+                        accel_total_time = total_time
+                        outer_diag = {
+                            "phase": "fast_x_point_to_point",
+                            "controller": "limit_aware_point_to_point",
+                            "a_x_max_mps2": float(fast_transport_a_max),
+                            "v_x_max_mps": float(fast_transport_v_max),
+                            "limits": fast_x_limits_diag,
+                        }
                     elif args.accel_x_transport and args.accel_profile == "mujoco_windows":
                         target_axis_accel = mujoco_accel_window_command(t_move, float(args.a_x_max))
                         if not use_ik_torque_policy:
@@ -1815,6 +2667,71 @@ def main() -> None:
                             )
                             target_axis_vel = accel_v_state
                             transport_target_pos[transport_axis_idx] += target_axis_vel * sim_dt
+                    elif args.accel_x_transport and args.accel_profile == "lqr":
+                        if lqr_controller is None or lqr_filter is None or lqr_goal_x is None:
+                            raise RuntimeError("LQR transport was not initialized before motion start")
+                        target_axis_accel, lqr_diag = compute_coppelia_lqr_outer_command(
+                            lqr_controller,
+                            lqr_filter,
+                            x_now=float(ee_pos_arr[transport_axis_idx]),
+                            x_dot_now=float(ee_lin_arr[transport_axis_idx]),
+                            time_s=sim_time,
+                            dt_s=sim_dt,
+                            target_x=float(lqr_goal_x),
+                        )
+                        lqr_clipped_count += int(bool(lqr_diag.get("clipped", False)))
+                        lqr_rejected_count += int(bool(lqr_diag.get("rejected", False)))
+                        outer_diag = {
+                            "phase": "lqr_outer_loop",
+                            "controller": "fixed_x_transport_lqr",
+                            "target_x_m": float(lqr_goal_x),
+                            "x_now_m": float(ee_pos_arr[transport_axis_idx]),
+                            "x_dot_now_mps": float(ee_lin_arr[transport_axis_idx]),
+                            "a_x_cmd_mps2": float(target_axis_accel),
+                            "diagnostics": lqr_diag,
+                        }
+                        transport_target_pos[transport_axis_idx] = float(lqr_goal_x)
+                        target_axis = float(lqr_goal_x)
+                    elif args.accel_x_transport and args.accel_profile == "mpc":
+                        if mpc_controller is None or mpc_filter is None or mpc_goal_x is None:
+                            raise RuntimeError("MPC transport was not initialized before motion start")
+                        theta_now, theta_dot_now, pole_observer_source = read_pole_state_for_control(
+                            q_arr=np.asarray(q, dtype=np.float64),
+                            qd_arr=np.asarray(qd, dtype=np.float64),
+                            time_s=sim_time,
+                            dt_s=sim_dt,
+                            target_x=float(mpc_goal_x),
+                        )
+                        mpc_pole_theta_hist.append(theta_now)
+                        mpc_pole_theta_dot_hist.append(theta_dot_now)
+                        target_axis_accel, mpc_diag = compute_coppelia_mpc_outer_command(
+                            mpc_controller,
+                            mpc_filter,
+                            x_now=float(ee_pos_arr[transport_axis_idx]),
+                            x_dot_now=float(ee_lin_arr[transport_axis_idx]),
+                            theta_now=theta_now,
+                            theta_dot_now=theta_dot_now,
+                            time_s=sim_time,
+                            dt_s=sim_dt,
+                            target_x=float(mpc_goal_x),
+                        )
+                        mpc_clipped_count += int(bool(mpc_diag.get("clipped", False)))
+                        mpc_rejected_count += int(bool(mpc_diag.get("rejected", False)))
+                        outer_diag = {
+                            "phase": "mpc_outer_loop",
+                            "controller": "cartpole_mpc",
+                            "target_x_m": float(mpc_goal_x),
+                            "x_now_m": float(ee_pos_arr[transport_axis_idx]),
+                            "x_dot_now_mps": float(ee_lin_arr[transport_axis_idx]),
+                            "theta_now_rad": theta_now,
+                            "theta_dot_now_radps": theta_dot_now,
+                            "pole_observer_available": pole_observer_source != "unavailable",
+                            "pole_observer_source": pole_observer_source,
+                            "a_x_cmd_mps2": float(target_axis_accel),
+                            "diagnostics": mpc_diag,
+                        }
+                        transport_target_pos[transport_axis_idx] = float(mpc_goal_x)
+                        target_axis = float(mpc_goal_x)
                     elif args.accel_x_transport and args.accel_profile == "back_and_forth_15s":
                         half_period = max(float(args.accel_square_half_period_s), 1e-6)
                         if t_move < half_period:
@@ -1833,6 +2750,63 @@ def main() -> None:
                             )
                             target_axis_vel = accel_v_state
                             transport_target_pos[transport_axis_idx] += target_axis_vel * sim_dt
+                    elif (
+                        args.accel_x_transport
+                        and args.accel_profile == "reciprocating"
+                        and reciprocating_plan is not None
+                    ):
+                        axis_ref, axis_v_ref, axis_a_ref, reciprocating_phase, _ = (
+                            reciprocating_axis_reference(t_move, reciprocating_plan)
+                        )
+                        if use_ik_torque_policy:
+                            axis_pos = float(ee_pos_arr[transport_axis_idx]) - float(
+                                transport_axis0
+                            )
+                            pos_err = float(axis_ref) - axis_pos
+                            vel_err = float(axis_v_ref) - float(
+                                ee_lin_arr[transport_axis_idx]
+                            )
+                            track_accel = float(
+                                np.clip(
+                                    30.0 * pos_err + 10.0 * vel_err,
+                                    -abs(float(args.a_x_max)),
+                                    abs(float(args.a_x_max)),
+                                )
+                            )
+                            ik_axis_state = float(axis_v_ref)
+                            target_axis_accel = float(
+                                0.55 * float(axis_a_ref) + 0.45 * track_accel
+                            )
+                            transport_target_pos[transport_axis_idx] = transport_axis0 + float(
+                                axis_ref
+                            )
+                            target_axis = float(transport_target_pos[transport_axis_idx])
+                            target_axis_vel = float(axis_v_ref)
+                        else:
+                            slew_step = min(
+                                float(ctrl_y.get("target_x_step_max_m", 0.01)),
+                                0.35 * abs(float(args.v_x_max)) * step_dt + 1.0e-6,
+                            )
+                            reciprocating_axis_offset_slew = slew_axis_reference(
+                                reciprocating_axis_offset_slew,
+                                float(axis_ref),
+                                dt=step_dt,
+                                max_step_m=slew_step,
+                                max_velocity_mps=0.85 * float(args.v_x_max),
+                            )
+                            transport_target_pos[transport_axis_idx] = (
+                                transport_axis0 + reciprocating_axis_offset_slew
+                            )
+                            target_axis = float(transport_target_pos[transport_axis_idx])
+                            target_axis_vel = 0.35 * float(axis_v_ref)
+                            target_axis_accel = 0.0
+                        accel_total_time = reciprocating_plan.motion_duration_s
+                        outer_diag = {
+                            "phase": reciprocating_phase,
+                            "axis_offset_m": float(axis_ref),
+                            "axis_velocity_mps": float(axis_v_ref),
+                            "axis_accel_mps2": float(axis_a_ref),
+                        }
                     else:
                         transport_target_pos[transport_axis_idx] = transport_axis0 + args.target_dx
                         target_axis = float(transport_target_pos[transport_axis_idx])
@@ -1840,6 +2814,20 @@ def main() -> None:
                         target_axis_accel = 0.0
 
                 target_x = float(transport_target_pos[0])
+                if (
+                    diag_ref_step_mid
+                    and sim_time >= (float(args.duration) * 0.5)
+                    and not diag_ref_step_applied
+                ):
+                    transport_target_pos[0] = float(ee_pos0[0]) + 0.01
+                    diag_ref_step_applied = True
+                    target_x = float(transport_target_pos[0])
+                if torque_diagnostics is not None and diag_cfg.reference_smoothing_enabled:
+                    transport_target_pos[0] = torque_diagnostics.smooth_x_reference(
+                        float(transport_target_pos[0]),
+                        step_dt,
+                    )
+                    target_x = float(transport_target_pos[0])
                 target_x_vel = 0.0 if transport_axis_idx != 0 else float(target_axis_vel)
                 target_x_accel = 0.0 if transport_axis_idx != 0 else float(target_axis_accel)
 
@@ -1891,10 +2879,88 @@ def main() -> None:
                 task_scale = 1.0
                 task_backtrack_iters = 0
                 task_feasible = True
-                if use_ik_torque_policy:
+                filter_diag: dict[str, Any] | None = None
+                collect_filter_diag = torque_diagnostics is not None
+                diag_q_des: np.ndarray | None = None
+                diag_qd_des: np.ndarray | None = None
+                diag_tau_p = np.zeros(6, dtype=np.float64)
+                diag_tau_d = np.zeros(6, dtype=np.float64)
+                diag_tau_gravity = (
+                    np.asarray(gravity_torque, dtype=np.float64).reshape(6)
+                    if gravity_torque is not None
+                    else np.zeros(6, dtype=np.float64)
+                )
+                if diag_passive:
+                    tau_cmd = np.zeros(6, dtype=np.float64)
+                    tau_raw_for_log = np.zeros(6, dtype=np.float64)
+                    tau_preclip_log = np.zeros(6, dtype=np.float64)
+                    tau_task_nominal_log = np.zeros(6, dtype=np.float64)
+                    tau_task_log = np.zeros(6, dtype=np.float64)
+                    tau_posture_log = np.zeros(6, dtype=np.float64)
+                    tau_damping_log = np.zeros(6, dtype=np.float64)
+                    diag_q_des = np.asarray(q, dtype=np.float64)
+                    diag_qd_des = np.zeros(6, dtype=np.float64)
+                elif diag_sinusoid_joint:
+                    q_ref = np.asarray(q0, dtype=np.float64).copy()
+                    q_ref[diag_sinusoid_joint_idx] += float(diag_cfg.sinusoid_amplitude_rad) * math.sin(
+                        2.0 * math.pi * float(diag_cfg.sinusoid_frequency_hz) * sim_time
+                    )
                     qdot_ref = np.zeros(6, dtype=np.float64)
+                    if torque_diagnostics is not None:
+                        q_ref = torque_diagnostics.smooth_joint_reference(q_ref, step_dt)
+                    diag_q_des = q_ref.copy()
+                    diag_qd_des = qdot_ref.copy()
+                    ik_kp_scaled = float(args.ik_joint_kp) * float(diag_cfg.impedance_gain_scale)
+                    ik_kd_scaled = float(args.ik_joint_kd) * float(diag_cfg.impedance_gain_scale)
+                    tau_pre_filter, pd_diag = ik_joint_pd_torque(
+                        q=np.asarray(q, dtype=np.float64),
+                        qd=np.asarray(qd, dtype=np.float64),
+                        q_ref=q_ref,
+                        qdot_ref=qdot_ref,
+                        tau_limit=tau_limit,
+                        kp=ik_kp_scaled,
+                        kd=ik_kd_scaled,
+                    )
+                    if gravity_torque is not None:
+                        tau_pre_filter = np.asarray(tau_pre_filter, dtype=np.float64) + gravity_torque
+                    tau_cmd, filter_diag = apply_torque_filter_step(
+                        torque_filter,
+                        tau_pre_filter,
+                        step_dt,
+                        collect_filter_diag=collect_filter_diag,
+                    )
+                    tau_raw_for_log = np.asarray(pd_diag.get("tau_raw", tau_pre_filter), dtype=np.float64)
+                    tau_preclip_log = np.asarray(tau_pre_filter, dtype=np.float64)
+                    tau_task_nominal_log = np.zeros(6, dtype=np.float64)
+                    tau_task_log = np.zeros(6, dtype=np.float64)
+                    tau_posture_log = tau_raw_for_log
+                    tau_damping_log = np.zeros(6, dtype=np.float64)
+                    diag_tau_p = np.asarray(pd_diag.get("tau_impedance_P", np.zeros(6)), dtype=np.float64)
+                    diag_tau_d = np.asarray(pd_diag.get("tau_impedance_D", np.zeros(6)), dtype=np.float64)
+                if use_ik_torque_policy and not diag_passive and not diag_sinusoid_joint:
+                    ik_kp = (
+                        float(lqr_ik_joint_kp) if use_lqr_outer_policy else float(args.ik_joint_kp)
+                    )
+                    ik_kd = (
+                        float(lqr_ik_joint_kd) if use_lqr_outer_policy else float(args.ik_joint_kd)
+                    )
+                    ik_tau_limit = (
+                        np.asarray(tau_limit, dtype=np.float64) * float(lqr_joint_torque_limit_scale)
+                        if use_lqr_outer_policy
+                        else np.asarray(tau_limit, dtype=np.float64)
+                    )
+                    qdot_ref = np.zeros(6, dtype=np.float64)
+                    fixed_position_ref = (
+                        np.asarray(transport_target_pos, dtype=np.float64).copy()
+                        if use_lqr_outer_policy
+                        else np.asarray(ee_pos0, dtype=np.float64)
+                    )
                     if sim_time >= args.settle_duration:
-                        if use_point_to_point_ik_policy:
+                        if (
+                            use_point_to_point_ik_policy
+                            or use_reciprocating_ik_policy
+                            or use_fast_x_ik_policy
+                        ):
                             ik_ctrl_ref, ik_diag = acceleration_transport_controller(
                                 q=np.asarray(q, dtype=np.float64),
                                 qvel=np.asarray(qd, dtype=np.float64),
@@ -1905,23 +2971,64 @@ def main() -> None:
                                 tool_rot=task_rot,
                                 tool_jacobian_pos=np.asarray(j_pos, dtype=np.float64),
                                 tool_jacobian_rot=np.asarray(j_rot, dtype=np.float64),
-                                # The point-to-point reference already returns a
-                                # signed world-axis acceleration. Pass it through
-                                # unchanged so the solver preserves the requested
-                                # direction.
                                 a_axis_cmd=float(target_axis_accel),
                                 axis_state=float(ik_axis_state),
                                 transport_axis=args.transport_axis,
-                                fixed_position=np.asarray(ee_pos0, dtype=np.float64),
+                                fixed_position=fixed_position_ref,
                                 target_tool_rot=orientation_target_rot,
                                 dt=sim_dt,
-                                a_axis_max_m_s2=float(args.a_x_max),
-                                v_axis_max_m_s=float(args.v_x_max),
-                                torque_headroom=float(args.ik_torque_headroom),
-                                move_axis_weight=120.0,
-                                hold_axis_weight=160.0,
-                                orientation_weight=96.0,
-                                hold_axis_gain=12.0,
+                                a_axis_max_m_s2=float(
+                                    fast_transport_a_max
+                                    if use_fast_x_profile
+                                    else args.a_x_max
+                                ),
+                                v_axis_max_m_s=float(
+                                    fast_transport_v_max
+                                    if use_fast_x_profile
+                                    else args.v_x_max
+                                ),
+                                torque_headroom=(
+                                    float(lqr_ik_torque_headroom)
+                                    if use_lqr_outer_policy
+                                    else float(args.ik_torque_headroom)
+                                ),
+                                joint_speed_limit_scale=(
+                                    float(lqr_joint_speed_limit_scale)
+                                    if use_lqr_outer_policy
+                                    else (
+                                        float(fast_x_joint_speed_fraction)
+                                        if use_fast_x_profile
+                                        else 1.0
+                                    )
+                                ),
+                                move_axis_weight=(
+                                    float(lqr_move_axis_weight)
+                                    if use_lqr_outer_policy
+                                    else float(
+                                        reciprocating_ik_weights.get("move_axis_weight", 120.0)
+                                    )
+                                ),
+                                hold_axis_weight=(
+                                    float(lqr_hold_axis_weight)
+                                    if use_lqr_outer_policy
+                                    else float(
+                                        reciprocating_ik_weights.get("hold_axis_weight", 160.0)
+                                    )
+                                ),
+                                orientation_weight=(
+                                    float(lqr_orientation_weight)
+                                    if use_lqr_outer_policy
+                                    else float(
+                                        reciprocating_ik_weights.get("orientation_weight", 96.0)
+                                    )
+                                ),
+                                hold_axis_gain=(
+                                    float(lqr_hold_axis_gain)
+                                    if use_lqr_outer_policy
+                                    else float(
+                                        reciprocating_ik_weights.get("hold_axis_gain", 12.0)
+                                    )
+                                ),
                                 posture_target=q0,
                             )
                             target_axis_vel = float(
@@ -1945,18 +3052,37 @@ def main() -> None:
                                 tool_rot=task_rot,
                                 tool_jacobian_pos=np.asarray(j_pos, dtype=np.float64),
                                 tool_jacobian_rot=np.asarray(j_rot, dtype=np.float64),
-                                # Preserve the signed acceleration from the
-                                # trajectory generator.
                                 a_axis_cmd=float(target_axis_accel),
                                 axis_state=float(ik_axis_state),
                                 transport_axis=args.transport_axis,
-                                fixed_position=np.asarray(ee_pos0, dtype=np.float64),
+                                fixed_position=fixed_position_ref,
                                 target_tool_rot=orientation_target_rot,
                                 posture_target=q0,
                                 dt=sim_dt,
                                 a_axis_max_m_s2=float(args.a_x_max),
                                 v_axis_max_m_s=float(args.v_x_max),
-                                torque_headroom=float(args.ik_torque_headroom),
+                                torque_headroom=(
+                                    float(lqr_ik_torque_headroom)
+                                    if use_lqr_outer_policy
+                                    else float(args.ik_torque_headroom)
+                                ),
+                                joint_speed_limit_scale=(
+                                    float(lqr_joint_speed_limit_scale)
+                                    if use_lqr_outer_policy
+                                    else 1.0
+                                ),
+                                move_axis_weight=float(
+                                    reciprocating_ik_weights.get("move_axis_weight", 120.0)
+                                ),
+                                hold_axis_weight=float(
+                                    reciprocating_ik_weights.get("hold_axis_weight", 100.0)
+                                ),
+                                orientation_weight=float(
+                                    reciprocating_ik_weights.get("orientation_weight", 64.0)
+                                ),
+                                hold_axis_gain=float(
+                                    reciprocating_ik_weights.get("hold_axis_gain", 8.0)
+                                ),
                             )
                             ik_axis_state = float(
                                 ik_diag.get("v_x_state_next", float(ik_axis_state))
@@ -1970,8 +3096,11 @@ def main() -> None:
                                 ).reshape(5)
                         transport_target_pos[transport_axis_idx] += target_axis_vel * sim_dt
                         target_axis = float(transport_target_pos[transport_axis_idx])
-                pre_motion_hold = bool(args.accel_x_transport and sim_time < args.settle_duration)
-                if pre_motion_hold:
+                pre_motion_hold = bool(
+                    diag_force_hold_pose
+                    or (args.accel_x_transport and sim_time < args.settle_duration)
+                )
+                if not diag_passive and not diag_sinusoid_joint and pre_motion_hold:
                     if use_ik_torque_policy:
                         qdot_ref = np.zeros(6, dtype=np.float64)
                         tau_pre_filter, pd_diag = ik_joint_pd_torque(
@@ -1979,19 +3108,28 @@ def main() -> None:
                             qd=np.asarray(qd, dtype=np.float64),
                             q_ref=np.asarray(q0, dtype=np.float64),
                             qdot_ref=qdot_ref,
-                            tau_limit=tau_limit,
-                            kp=float(args.ik_joint_kp),
-                            kd=float(args.ik_joint_kd),
+                            tau_limit=ik_tau_limit,
+                            kp=ik_kp,
+                            kd=ik_kd,
                         )
                         if gravity_torque is not None:
                             tau_pre_filter = np.asarray(tau_pre_filter, dtype=np.float64) + gravity_torque
-                        tau_cmd = torque_filter.apply(tau_pre_filter, sim_dt)
+                        tau_cmd, filter_diag = apply_torque_filter_step(
+                            torque_filter,
+                            tau_pre_filter,
+                            step_dt,
+                            collect_filter_diag=collect_filter_diag,
+                        )
                         tau_raw_for_log = np.asarray(pd_diag.get("tau_raw", tau_pre_filter), dtype=np.float64)
                         tau_preclip_log = np.asarray(tau_pre_filter, dtype=np.float64)
                         tau_task_nominal_log = np.zeros(6, dtype=np.float64)
                         tau_task_log = np.zeros(6, dtype=np.float64)
                         tau_posture_log = tau_raw_for_log
                         tau_damping_log = np.zeros(6, dtype=np.float64)
+                        diag_q_des = np.asarray(q0, dtype=np.float64)
+                        diag_qd_des = qdot_ref.copy()
+                        diag_tau_p = np.asarray(pd_diag.get("tau_impedance_P", np.zeros(6)), dtype=np.float64)
+                        diag_tau_d = np.asarray(pd_diag.get("tau_impedance_D", np.zeros(6)), dtype=np.float64)
                         task_backtrack_scale = 1.0
                         task_scale = 1.0
                         task_backtrack_iters = 0
@@ -2005,7 +3143,12 @@ def main() -> None:
                     else:
                         state["hold_current_pose"] = True
                         out = controller.compute(state)
-                        tau_cmd = torque_filter.apply(out.tau, sim_dt)
+                        tau_cmd, filter_diag = apply_torque_filter_step(
+                            torque_filter,
+                            out.tau,
+                            step_dt,
+                            collect_filter_diag=collect_filter_diag,
+                        )
                         x_error = float(out.x_error)
                         y_error = float(out.y_error)
                         z_error = float(out.z_error)
@@ -2018,29 +3161,47 @@ def main() -> None:
                         tau_task_log = out.tau_task
                         tau_posture_log = out.tau_posture
                         tau_damping_log = out.tau_damping
+                        diag_tau_p = np.asarray(out.tau_task + out.tau_posture, dtype=np.float64)
+                        diag_tau_d = np.asarray(out.tau_damping, dtype=np.float64)
+                        diag_q_des = np.asarray(controller._q_rest, dtype=np.float64)
+                        diag_qd_des = np.zeros(6, dtype=np.float64)
                         task_backtrack_scale = float(out.task_backtrack_scale)
                         task_scale = float(out.task_scale)
                         task_backtrack_iters = int(out.task_backtrack_iters)
                         task_feasible = bool(out.task_feasible)
                         pd_diag = {}
-                elif use_ik_torque_policy:
+                elif not diag_passive and not diag_sinusoid_joint and use_ik_torque_policy:
                     tau_pre_filter, pd_diag = ik_joint_pd_torque(
                         q=np.asarray(q, dtype=np.float64),
                         qd=np.asarray(qd, dtype=np.float64),
                         q_ref=ik_ctrl_ref,
                         qdot_ref=qdot_ref,
-                        tau_limit=tau_limit,
-                        kp=float(args.ik_joint_kp),
-                        kd=float(args.ik_joint_kd),
+                        tau_limit=ik_tau_limit,
+                        kp=ik_kp,
+                        kd=ik_kd,
                     )
                     if gravity_torque is not None:
                         tau_pre_filter = np.asarray(tau_pre_filter, dtype=np.float64) + gravity_torque
-                    tau_cmd = torque_filter.apply(tau_pre_filter, sim_dt)
+                    tau_cmd, filter_diag = apply_torque_filter_step(
+                        torque_filter,
+                        tau_pre_filter,
+                        step_dt,
+                        collect_filter_diag=collect_filter_diag,
+                    )
                     tau_raw_for_log = np.asarray(pd_diag.get("tau_raw", tau_pre_filter), dtype=np.float64)
                     tau_posture_log = tau_raw_for_log
-                else:
+                    diag_q_des = np.asarray(ik_ctrl_ref, dtype=np.float64)
+                    diag_qd_des = np.asarray(qdot_ref, dtype=np.float64)
+                    diag_tau_p = np.asarray(pd_diag.get("tau_impedance_P", np.zeros(6)), dtype=np.float64)
+                    diag_tau_d = np.asarray(pd_diag.get("tau_impedance_D", np.zeros(6)), dtype=np.float64)
+                elif not diag_passive and not diag_sinusoid_joint:
                     out = controller.compute(state)
-                    tau_cmd = torque_filter.apply(out.tau, sim_dt)
+                    tau_cmd, filter_diag = apply_torque_filter_step(
+                        torque_filter,
+                        out.tau,
+                        step_dt,
+                        collect_filter_diag=collect_filter_diag,
+                    )
                     x_error = float(out.x_error)
                     y_error = float(out.y_error)
                     z_error = float(out.z_error)
@@ -2053,6 +3214,10 @@ def main() -> None:
                     tau_task_log = out.tau_task
                     tau_posture_log = out.tau_posture
                     tau_damping_log = out.tau_damping
+                    diag_tau_p = np.asarray(out.tau_task + out.tau_posture, dtype=np.float64)
+                    diag_tau_d = np.asarray(out.tau_damping, dtype=np.float64)
+                    diag_q_des = np.asarray(controller._q_rest, dtype=np.float64)
+                    diag_qd_des = np.zeros(6, dtype=np.float64)
                     task_backtrack_scale = float(out.task_backtrack_scale)
                     task_scale = float(out.task_scale)
                     task_backtrack_iters = int(out.task_backtrack_iters)
@@ -2078,7 +3243,62 @@ def main() -> None:
                 if step == 0:
                     mark("first torque command applied")
 
-                trace.write_row({
+                if torque_diagnostics is not None:
+                    pole_theta_log = None
+                    pole_theta_dot_log = None
+                    if (
+                        coppelia_pendulum_handles is not None
+                        and coppelia_pendulum_handles.available
+                    ):
+                        pole_read = read_coppelia_pendulum_state(
+                            sim,
+                            coppelia_pendulum_handles,
+                            parent_handle=int(task_frame_summary.get("parent_handle", -1)),
+                        )
+                        if pole_read is not None:
+                            pole_theta_log, pole_theta_dot_log = pole_read
+                    joint_guard = bool(
+                        safe_st is not None
+                        and not safe_st.ok
+                        and "joint limit" in str(safe_st.reason).lower()
+                    )
+                    workspace_guard = bool(
+                        safe_st is not None
+                        and not safe_st.ok
+                        and (
+                            "drift" in str(safe_st.reason).lower()
+                            or "orientation" in str(safe_st.reason).lower()
+                        )
+                    )
+                    diag_row = torque_diagnostics.record_step(
+                        step_idx=step,
+                        timestamp=sim_time,
+                        dt=step_dt,
+                        q=np.asarray(q, dtype=np.float64),
+                        qd=np.asarray(qd, dtype=np.float64),
+                        q_des=diag_q_des,
+                        qd_des=diag_qd_des,
+                        cart_position=None,
+                        cart_velocity=None,
+                        pole_angle=pole_theta_log,
+                        pole_angular_velocity=pole_theta_dot_log,
+                        tau_impedance_p=diag_tau_p,
+                        tau_impedance_d=diag_tau_d,
+                        tau_feedforward=None,
+                        tau_gravity=diag_tau_gravity,
+                        tau_raw_before_safety=tau_raw_for_log,
+                        tau_after_saturation=tau_preclip_log,
+                        tau_final_sent=tau_cmd_to_apply,
+                        filter_diag=filter_diag,
+                        torque_api_modes=adapter.last_torque_api_modes(),
+                        safety_flags={
+                            "joint_limit_guardrail": joint_guard,
+                            "workspace_guardrail": workspace_guard,
+                        },
+                        joint_mode_snapshot=joint_cfg.get("joints"),
+                    )
+
+                trace_row = {
                     "time": sim_time,
                     "q": q, "qd": qd,
                     "ee_pos": ee_pos, "ee_quat": ee_quat,
@@ -2109,12 +3329,16 @@ def main() -> None:
                     "tau_cmd": tau_cmd,
                     "jacobian_condition_number": jacobian_cond,
                     "singular_scale": singular_scale,
+                    "outer_transport_diagnostics": outer_diag,
                     "accel_torque_policy": args.accel_torque_policy,
                     "transport_axis": transport_axis_name,
                     "ik_diagnostics": ik_diag,
                     "ik_pd_diagnostics": pd_diag,
                     "safety_ok": None if safe_st is None else safe_st.ok,
-                })
+                }
+                if torque_diagnostics is not None:
+                    trace_row.update(diag_row)
+                trace.write_row(trace_row)
 
                 if should_break:
                     break
@@ -2161,6 +3385,7 @@ def main() -> None:
                 ik_q_ref_excursion_hist.append(float(np.max(np.abs(ik_ctrl_ref - q0))))
                 q_excursion_hist.append(float(np.max(np.abs(np.asarray(q, dtype=np.float64) - q0))))
 
+                prev_sim_time = sim_time
                 sim.step()
 
                 if (
@@ -2254,9 +3479,14 @@ def main() -> None:
         else None
     )
     requested_axis_displacement = float(args.target_dx)
-    expected_axis_displacement = (
-        final_target_axis if final_target_axis is not None else requested_axis_displacement
-    )
+    if args.accel_x_transport and args.accel_profile == "reciprocating":
+        expected_axis_displacement = 0.0
+        expected_axis_span = 2.0 * abs(float(args.reciprocating_stroke_m))
+    else:
+        expected_axis_displacement = (
+            final_target_axis if final_target_axis is not None else requested_axis_displacement
+        )
+        expected_axis_span = None
     direction_ok = None
     if transport_axis_net is not None and abs(expected_axis_displacement) > 1.0e-9:
         direction_ok = bool(
@@ -2272,20 +3502,42 @@ def main() -> None:
     failure_reasons: list[str] = []
     transport_success: bool | None = None
     if args.accel_x_transport:
-        tracking_tol = max(0.01, 0.35 * abs(expected_axis_displacement))
-        transport_axis_tracking_ok = bool(
-            transport_axis_span is not None
-            and transport_axis_net is not None
-            and final_axis_tracking_error is not None
-            and abs(final_axis_tracking_error) <= tracking_tol
-            and abs(transport_axis_net) >= min(abs(expected_axis_displacement) * 0.5, 0.005)
-            and (direction_ok is not False)
-        )
+        if args.accel_profile == "reciprocating":
+            origin_tol = max(0.012, 0.35 * abs(float(args.reciprocating_stroke_m)))
+            tracking_tol = origin_tol
+            transport_axis_tracking_ok = bool(
+                transport_axis_span is not None
+                and transport_axis_net is not None
+                and final_axis_tracking_error is not None
+                and transport_axis_span >= max(expected_axis_span * 0.35, 0.008)
+                and abs(transport_axis_net) <= max(origin_tol, 0.02)
+                and abs(final_axis_tracking_error) <= max(tracking_tol, 0.015)
+            )
+            direction_ok = None
+        else:
+            tracking_tol = max(0.01, 0.35 * abs(expected_axis_displacement))
+            transport_axis_tracking_ok = bool(
+                transport_axis_span is not None
+                and transport_axis_net is not None
+                and final_axis_tracking_error is not None
+                and abs(final_axis_tracking_error) <= tracking_tol
+                and abs(transport_axis_net) >= min(abs(expected_axis_displacement) * 0.5, 0.005)
+                and (direction_ok is not False)
+            )
         fixed_axes_ok = bool(
             max_abs_fixed_axis_1_drift is not None
             and max_abs_fixed_axis_2_drift is not None
-            and max_abs_fixed_axis_1_drift <= 5.0e-3
-            and max_abs_fixed_axis_2_drift <= 5.0e-3
+            and (
+                (
+                    max_abs_fixed_axis_1_drift <= 0.08
+                    and max_abs_fixed_axis_2_drift <= 0.35
+                )
+                if args.accel_profile == "reciprocating"
+                else (
+                    max_abs_fixed_axis_1_drift <= 5.0e-3
+                    and max_abs_fixed_axis_2_drift <= 5.0e-3
+                )
+            )
         )
         orientation_ok = bool(
             max_orientation_error_rad is not None
@@ -2327,12 +3579,16 @@ def main() -> None:
     summary = {
         "probe_only": False,
         "mode": (
-            f"accel_{transport_axis_name}_transport"
+            f"accel_{transport_axis_name}_transport_lqr"
+            if args.accel_x_transport and args.accel_profile == "lqr"
+            else f"accel_{transport_axis_name}_transport"
             if args.accel_x_transport
             else "x_impedance_step"
         ),
         "controller_name": (
-            "coppeliasim_torque_acceleration_transport_controller"
+            "coppeliasim_lqr_acceleration_transport_controller"
+            if args.accel_x_transport and args.accel_profile == "lqr"
+            else "coppeliasim_torque_acceleration_transport_controller"
             if args.accel_x_transport
             else "coppeliasim_x_axis_cartesian_impedance_controller"
         ),
@@ -2345,21 +3601,119 @@ def main() -> None:
         "legacy_marker_handoff": ownership_metadata["legacy_marker_handoff"],
         "use_gravity_compensation": use_gravity_compensation,
         "accel_profile": str(args.accel_profile) if args.accel_x_transport else None,
+        "reciprocating_stroke_m": (
+            float(args.reciprocating_stroke_m)
+            if args.accel_x_transport and args.accel_profile == "reciprocating"
+            else None
+        ),
+        "reciprocating_hold_s": (
+            float(args.reciprocating_hold_s)
+            if args.accel_x_transport and args.accel_profile == "reciprocating"
+            else None
+        ),
+        "reciprocating_motion_duration_s": (
+            float(reciprocating_plan.motion_duration_s)
+            if reciprocating_plan is not None
+            else None
+        ),
+        "expected_axis_span_m": expected_axis_span,
+        "outer_transport_controller": (
+            "fixed_x_transport_lqr"
+            if args.accel_x_transport and args.accel_profile == "lqr"
+            else "cartpole_mpc"
+            if args.accel_x_transport and args.accel_profile == "mpc"
+            else None
+        ),
         "ik_transport_solver": (
             "acceleration_transport_controller"
             if args.accel_x_transport and args.accel_torque_policy == "ik_joint_pd"
             else None
         ),
-        "a_x_max_m_s2": float(args.a_x_max) if args.accel_x_transport else None,
-        "v_x_max_m_s": float(args.v_x_max) if args.accel_x_transport else None,
-        "a_axis_max_m_s2": float(args.a_x_max) if args.accel_x_transport else None,
-        "v_axis_max_m_s": float(args.v_x_max) if args.accel_x_transport else None,
+        "a_x_max_m_s2": (
+            float(fast_transport_a_max)
+            if args.accel_x_transport and args.accel_profile == "fast_x"
+            else float(args.a_x_max)
+            if args.accel_x_transport
+            else None
+        ),
+        "v_x_max_m_s": (
+            float(fast_transport_v_max)
+            if args.accel_x_transport and args.accel_profile == "fast_x"
+            else float(args.v_x_max)
+            if args.accel_x_transport
+            else None
+        ),
+        "a_axis_max_m_s2": (
+            float(fast_transport_a_max)
+            if args.accel_x_transport and args.accel_profile == "fast_x"
+            else float(args.a_x_max)
+            if args.accel_x_transport
+            else None
+        ),
+        "v_axis_max_m_s": (
+            float(fast_transport_v_max)
+            if args.accel_x_transport and args.accel_profile == "fast_x"
+            else float(args.v_x_max)
+            if args.accel_x_transport
+            else None
+        ),
+        "fast_x_limits": (
+            fast_x_limits_diag
+            if args.accel_x_transport and args.accel_profile == "fast_x"
+            else None
+        ),
+        "coppelia_pendulum_spawned": bool(
+            coppelia_pendulum_handles is not None and coppelia_pendulum_handles.available
+        ),
         "transport_axis": transport_axis_name,
         "transport_axis_index": transport_axis_idx,
         "transport_axis_world": f"world_{transport_axis_name}",
         "fixed_axis_indices": list(orth_axis_idxs),
         "fixed_axis_names": [axis_index_to_name(i) for i in orth_axis_idxs],
         "torque_headroom": float(imp_cfg.torque_headroom),
+        "lqr_target_x_m": float(lqr_goal_x) if lqr_goal_x is not None else None,
+        "lqr_gain_matrix": lqr_gain_matrix,
+        "lqr_riccati_converged": lqr_riccati_converged,
+        "lqr_riccati_iters": lqr_riccati_iters,
+        "lqr_clipped_count": int(lqr_clipped_count) if args.accel_x_transport and args.accel_profile == "lqr" else None,
+        "lqr_rejected_count": int(lqr_rejected_count) if args.accel_x_transport and args.accel_profile == "lqr" else None,
+        "mpc_horizon": int(args.mpc_horizon) if args.accel_x_transport and args.accel_profile == "mpc" else None,
+        "mpc_target_x_m": float(mpc_goal_x) if mpc_goal_x is not None else None,
+        "mpc_pole_length_m": float(args.mpc_pole_length_m) if args.accel_x_transport and args.accel_profile == "mpc" else None,
+        "mpc_clipped_count": int(mpc_clipped_count) if args.accel_x_transport and args.accel_profile == "mpc" else None,
+        "mpc_rejected_count": int(mpc_rejected_count) if args.accel_x_transport and args.accel_profile == "mpc" else None,
+        "mpc_max_abs_theta_rad": (
+            float(max(abs(v) for v in mpc_pole_theta_hist)) if mpc_pole_theta_hist else None
+        ),
+        "mpc_pole_observer_has_pendulum": (
+            bool(mujoco_cartpole_observer is not None and mujoco_cartpole_observer.has_pendulum)
+            if use_mpc_outer_policy
+            else None
+        ),
+        "lqr_ik_joint_kp": float(lqr_ik_joint_kp) if use_lqr_outer_policy else None,
+        "lqr_ik_joint_kd": float(lqr_ik_joint_kd) if use_lqr_outer_policy else None,
+        "lqr_ik_torque_headroom": float(lqr_ik_torque_headroom) if use_lqr_outer_policy else None,
+        "lqr_joint_torque_limit_scale": (
+            float(lqr_joint_torque_limit_scale) if use_lqr_outer_policy else None
+        ),
+        "lqr_joint_speed_limit_scale": (
+            float(lqr_joint_speed_limit_scale) if use_lqr_outer_policy else None
+        ),
+        "lqr_cartesian_impedance_gain_scale": (
+            float(lqr_cartesian_impedance_gain_scale) if use_lqr_outer_policy else None
+        ),
+        "lqr_cartesian_impedance_torque_headroom": (
+            float(lqr_cartesian_impedance_torque_headroom) if use_lqr_outer_policy else None
+        ),
+        "lqr_settle_zero_torque": bool(use_lqr_outer_policy) if args.accel_x_transport else None,
+        "requested_lqr_sim_time_step_s": (
+            float(lqr_requested_sim_time_step) if use_lqr_outer_policy else None
+        ),
+        "actual_lqr_sim_time_step_s": (
+            float(actual_lqr_sim_time_step)
+            if use_lqr_outer_policy and actual_lqr_sim_time_step is not None
+            else None
+        ),
         "planned_accel_total_time_s": accel_total_time,
         "scene_path": str(scene_path),
         "ur5_model_path": str(ur5_model),
@@ -2453,6 +3807,38 @@ def main() -> None:
         f0 = np.asarray(frames[0], dtype=np.float64)
         summary["first_frame_mean_rgb"] = float(np.mean(f0))
         summary["first_frame_std_rgb"] = float(np.std(f0))
+    if torque_diagnostics is not None:
+        diag_summary = torque_diagnostics.build_summary(duration_s=float(args.duration))
+        diag_summary["coppelia_torque_control_path"] = {
+            "primary_api": (
+                "setJointTargetForce(signed)"
+                if cop_cfg.prefer_signed_target_force
+                else "setJointTargetVelocity+setJointMaxForce"
+            ),
+            "joint_mode": "dynamic",
+            "motor_enabled": True,
+            "ctrl_enabled": False,
+            "internal_pid_disabled": True,
+            "note": (
+                "CoppeliaSim uses joint dynamic mode with external torque via "
+                "setJointTargetForce when available; fallback emulates torque using "
+                "large target velocity and max force."
+            ),
+        }
+        if diag_cfg.save_controller_logs:
+            diag_trace, diag_summary_path = torque_diagnostics.write_logs(
+                trace_path,
+                diag_summary,
+            )
+            print(f"Saved torque diagnostics trace:   {diag_trace}", flush=True)
+            print(f"Saved torque diagnostics summary: {diag_summary_path}", flush=True)
+        if diag_cfg.save_controller_plots:
+            plot_paths = torque_diagnostics.generate_plots(
+                diag_cfg.diagnostics_output_dir / torque_diagnostics.run_label
+            )
+            for plot_path in plot_paths:
+                print(f"Saved torque diagnostics plot:    {plot_path}", flush=True)
+        summary["torque_diagnostics"] = diag_summary
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     if not args.no_video and frames and float(summary.get("first_frame_std_rgb", 0) or 0) < 1.0:
         print(

@@ -121,6 +121,12 @@ class CoppeliaSimURAdapter:
         self._ee_resolved_path: str = ""
         self._task_frame_summary: dict[str, Any] = {}
         self._log: Callable[[str], None] = print
+        self._prev_joint_positions_continuous: np.ndarray | None = None
+        self._last_torque_api_modes: list[str] = ["unknown"] * 6
+
+    def last_torque_api_modes(self) -> list[str]:
+        """Per-joint CoppeliaSim API used on the most recent ``apply_torque`` call."""
+        return list(self._last_torque_api_modes)
 
     def set_logger(self, fn: Callable[[str], None]) -> None:
         self._log = fn
@@ -140,6 +146,7 @@ class CoppeliaSimURAdapter:
                 self._client = RemoteAPIClient(self.config.zmq_host, self.config.zmq_port)
                 self._sim = self._client.getObject("sim")
                 self._resolve_handles_or_raise()
+                self._prev_joint_positions_continuous = None
                 return
             except Exception as exc:
                 last_exc = exc
@@ -158,6 +165,7 @@ class CoppeliaSimURAdapter:
         self._client = client
         self._sim = client.getObject("sim")  # type: ignore[union-attr]
         self._resolve_handles_or_raise()
+        self._prev_joint_positions_continuous = None
 
     def _get_object_safe(self, path: str) -> int:
         assert self._sim is not None
@@ -440,14 +448,30 @@ class CoppeliaSimURAdapter:
 
     def read_joint_state(self) -> tuple[np.ndarray, np.ndarray]:
         assert self._sim is not None
-        q = np.array(
+        raw_q = np.array(
             [self._sim.getJointPosition(jh.handle) for jh in self._joint_handles],
             dtype=np.float64,
         )
-        qd = np.array(
-            [self._sim.getJointVelocity(jh.handle) for jh in self._joint_handles],
-            dtype=np.float64,
-        )
+        q = np.arctan2(np.sin(raw_q), np.cos(raw_q))
+        sim_dt = 0.0
+        try:
+            if hasattr(self._sim, "getSimulationTimeStep"):
+                sim_dt = float(self._sim.getSimulationTimeStep())
+        except Exception:
+            sim_dt = 0.0
+        if self._prev_joint_positions_continuous is None:
+            qd = np.zeros_like(q)
+        else:
+            delta = np.arctan2(np.sin(raw_q - self._prev_joint_positions_continuous), np.cos(raw_q - self._prev_joint_positions_continuous))
+            q = self._prev_joint_positions_continuous + delta
+            if sim_dt > 0.0 and np.isfinite(sim_dt):
+                qd = delta / sim_dt
+            else:
+                qd = np.array(
+                    [self._sim.getJointVelocity(jh.handle) for jh in self._joint_handles],
+                    dtype=np.float64,
+                )
+        self._prev_joint_positions_continuous = q.copy()
         return q, qd
 
     def read_ee_pose_twist(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -568,13 +592,14 @@ class CoppeliaSimURAdapter:
             },
         }
 
-    def _apply_torque_single(self, handle: int, tau: float) -> None:
+    def _apply_torque_single(self, handle: int, tau: float) -> str:
+        """Apply torque to one joint; return the CoppeliaSim API mode used."""
         assert self._sim is not None
         sim = self._sim
         if self.config.prefer_signed_target_force and hasattr(sim, "setJointTargetForce"):
             try:
                 sim.setJointTargetForce(handle, float(tau), True)
-                return
+                return "setJointTargetForce"
             except Exception:
                 pass
         v0 = float(self.config.fallback_large_velocity_rad_s)
@@ -582,6 +607,7 @@ class CoppeliaSimURAdapter:
         sign = 1.0 if tau >= 0.0 else -1.0
         sim.setJointTargetVelocity(handle, sign * v0)
         sim.setJointMaxForce(handle, mag)
+        return "setJointTargetVelocity+setJointMaxForce"
 
     def apply_torque(self, tau: Sequence[float]) -> None:
         assert self._sim is not None
@@ -590,8 +616,10 @@ class CoppeliaSimURAdapter:
             raise ValueError(
                 f"tau length {tau_arr.shape[0]} != {len(self._joint_handles)}"
             )
+        modes: list[str] = []
         for jh, t in zip(self._joint_handles, tau_arr):
-            self._apply_torque_single(jh.handle, float(t))
+            modes.append(self._apply_torque_single(jh.handle, float(t)))
+        self._last_torque_api_modes = modes
 
     def start_simulation(self) -> None:
         assert self._sim is not None

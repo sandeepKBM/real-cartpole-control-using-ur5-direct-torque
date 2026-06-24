@@ -1,10 +1,12 @@
 # Current Status
 
-Last updated: 2026-06-18 (latest live probes showed the external ZMQ lane connects, seeds a known-good pose, the ROS 2 legacy positional controller can execute a real X target step, the extracted lab workspace guardrail overlay/checker is in place, and the direct impedance / `ik_joint_pd` long sweeps still fail the live safety envelope)
+Last updated: 2026-06-23 (latest live probes showed the external ZMQ lane connects, seeds a known-good pose, the ROS 2 legacy positional controller can execute a real X target step, the extracted lab workspace guardrail overlay/checker is in place, and the direct impedance / `ik_joint_pd` long sweeps still fail the live safety envelope)
 
 ## Active Objective
 
 The current goal is to make the UR5 arm move in CoppeliaSim using the existing single-axis torque controller.
+
+MuJoCo transport / LQR experiments are archived reference material only. Do not use MuJoCo simulation/controller paths for active work in this workspace unless a task explicitly asks for that.
 
 The controller we care about right now is the portable Cartesian impedance torque controller:
 
@@ -49,7 +51,7 @@ simulation/launch_coppeliasim_x_axis_headless.sh
 - The ROS 2 legacy positional controller family `legacy_xz_transport_pd` is now verified on the live CoppeliaSim bridge/controller path via `ros2_ws/src/ur5_x_axis_controller_ros/config/controller_coppelia_legacy_xz_transport_relaxed.yaml`.
   - In the verified diagnostic run, publishing an absolute `/target_x` step from about `x=-0.111855` to `x=-0.101855` moved the EE to about `x=-0.089835` with the relaxed safety gate remaining green.
   - The conservative legacy preset still exists, but the relaxed preset is the one that actually demonstrated motion on this build.
-- The direct-torque acceleration transport path now has an `ik_joint_pd` policy: a signed world-X acceleration command feeds the MuJoCo differential-IK policy, IK produces a reduced-chain joint target with shoulder pan locked, and Coppelia receives direct joint torques from a conservative joint-PD torque law.
+- The direct-torque acceleration transport path now has an `ik_joint_pd` policy: a signed world-X acceleration command feeds the transport differential-IK policy, IK produces a reduced-chain joint target with shoulder pan locked, and Coppelia receives direct joint torques from a conservative joint-PD torque law.
 - The Coppelia adapter can now create an explicit `mujoco_attachment_dummy` task frame instead of silently controlling the raw `/UR5/UR5_connection` proxy.
 - The direct-torque summary now reports frame-reference metadata, local fixed-Z X IK capability, X tracking, single-axis Y drift, fixed-Z drift, orientation hold, joint-configuration sanity, torque saturation, and explicit failure reasons.
 - A diagnostic-only lab workspace guardrail model extracted from the external Einksul MuJoCo visualizer now exists in `config/lab_workspace_guardrails.yaml`, with shared checker and overlay helpers in `simulation/workspace_guardrails.py` and an offline trajectory checker in `tools/check_trajectory_guardrails.py`.

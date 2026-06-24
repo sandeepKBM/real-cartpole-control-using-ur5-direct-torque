@@ -205,11 +205,19 @@ launch_coppelia_bg() {
 
   case "${COPPELIASIM_LAUNCH_MODE}" in
     xvfb_resident_plain)
-      launch_prefix=(xvfb-run -a)
+      if [[ -n "${XVFB_RUN_BIN:-}" ]]; then
+        launch_prefix=("${XVFB_RUN_BIN}" -a)
+      else
+        launch_prefix=(xvfb-run -a)
+      fi
       ;;
     resident_plain)
       if [[ "${FORCE_XVFB}" == "1" || -z "${DISPLAY:-}" ]]; then
-        launch_prefix=(xvfb-run -a)
+        if [[ -n "${XVFB_RUN_BIN:-}" ]]; then
+          launch_prefix=("${XVFB_RUN_BIN}" -a)
+        else
+          launch_prefix=(xvfb-run -a)
+        fi
       fi
       ;;
     legacy_headless)
@@ -257,16 +265,22 @@ launch_coppelia_bg() {
 }
 
 launch_python_fg() {
-  timeout "${MAX_SIM_SECONDS}" "${RUNNER_CMD[@]}" >"${RUNNER_LOG}" 2>&1
+  (
+    cd "${ROOT}"
+    timeout "${MAX_SIM_SECONDS}" "${RUNNER_CMD[@]}"
+  ) >"${RUNNER_LOG}" 2>&1
 }
 
 wait_for_rpc_port() {
-  local deadline=$((SECONDS + 20))
+  local deadline=$((SECONDS + 60))
   while [[ "${SECONDS}" -lt "${deadline}" ]]; do
+    if { : > "/dev/tcp/127.0.0.1/${PORT}"; } 2>/dev/null; then
+      return 0
+    fi
     if command -v ss >/dev/null 2>&1 && ss -ltn "sport = :${PORT}" | grep -q LISTEN; then
       return 0
     fi
-    sleep 0.1
+    sleep 0.2
   done
   return 1
 }
@@ -320,6 +334,7 @@ if [[ "${PORT_ALREADY_LISTENING}" -eq 0 ]]; then
     echo "[launcher] RPC port ${PORT} did not start listening" >&2
     exit 1
   fi
+  sleep 2
 else
   echo "[launcher] Reusing existing CoppeliaSim on port ${PORT} (allow-existing-sim)"
 fi

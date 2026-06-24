@@ -4,7 +4,9 @@ This workspace is currently focused on one active problem:
 
 **make the UR5 arm move in CoppeliaSim using the existing single-axis torque controller.**
 
-The historical folder name is misleading. Treat this as a UR5 / UR5e control workspace with MuJoCo history, ROS 2 scaffolding, and an active CoppeliaSim torque-control bring-up.
+Workspace rule: CoppeliaSim is the only active runtime for current development. MuJoCo code, videos, and notes are historical reference only unless a task explicitly says otherwise.
+
+The historical folder name is misleading. Treat this as a UR5 / UR5e control workspace with ROS 2 scaffolding and an active CoppeliaSim torque-control bring-up; MuJoCo work is archived.
 
 ## Start Here
 
@@ -13,8 +15,8 @@ Read these in order:
 1. [Current Status](CURRENT_STATUS.md)
 2. [CoppeliaSim: two pipelines (smoke vs ZMQ)](coppeliasim/PIPELINES.md)
 3. [UR5 controller, from first principles](coppeliasim/CONTROLLER_FIRST_PRINCIPLES.md)
-4. [MuJoCo acceleration controller guardrails](coppeliasim/MUJOCO_ACCELERATION_GUARDRAILS.md)
-5. [Lab workspace guardrails extracted from MuJoCo](simulation/lab_workspace_guardrails.md)
+4. [MuJoCo acceleration controller guardrails](coppeliasim/MUJOCO_ACCELERATION_GUARDRAILS.md) (historical reference only)
+5. [Lab workspace guardrails extracted from MuJoCo](simulation/lab_workspace_guardrails.md) (diagnostic only)
 6. [CoppeliaSim vision API notes (handle → get, buffers)](coppeliasim/COPPELIASIM_VISION_NOTES.md)
 7. [External ZMQ controller bring-up](coppeliasim/EXTERNAL_ZMQ_CONTROLLER_BRINGUP.md)
 8. [CoppeliaSim RPC Controller System](coppeliasim/RPC_CONTROLLER_SYSTEM.md)
@@ -33,6 +35,7 @@ Read these in order:
 | Coppelia Python deps | `third_party/coppelia_pydeps/` | Shared Python dependency anchor for ZMQ RPC. |
 | Current outputs | `outputs/control_runs/` | Traces, logs, frame dumps, probe summaries. |
 | Current videos | `demonstration_videos/ur5e_coppeliasim/` | CoppeliaSim validation videos. |
+| Archived MuJoCo reference | `mujoco_menagerie/`, `simulation/run_x_acceleration_transport.py`, `controller_core/transport_lqr.py` | Historical reference only; do not use for active controller development. |
 
 ## Known-Good Command
 

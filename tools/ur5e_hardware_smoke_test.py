@@ -29,7 +29,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="receive-only",
         help="Which staged test to run.",
     )
-    p.add_argument("--robot-ip", default="", help="UR5e robot IP address.")
+    p.add_argument("--robot-ip", default="172.16.71.77", help="UR5e robot IP address.")
     p.add_argument("--frequency", type=float, default=500.0, help="Target RTDE loop frequency in Hz.")
     p.add_argument("--duration", type=float, default=30.0, help="Stage duration in seconds.")
     p.add_argument("--max-deadline-ms", type=float, default=3.0, help="Deadline threshold in ms.")
