@@ -48,10 +48,14 @@ DEFAULT_COPPELIA_ROOT = (
 )
 DEFAULT_COPPELIA_PYDEPS = REPO_ROOT / "third_party" / "coppelia_pydeps"
 MUJOCO_MENAGERIE = REPO_ROOT / "mujoco_menagerie"
+MUJOCO_MENAGERIE_VENDOR = REPO_ROOT / "vendor" / "mujoco_menagerie"
 MUJOCO_GRAVITY_SCENE_CANDIDATES = (
     MUJOCO_MENAGERIE / "universal_robots_ur5e" / "scene_ur5e_cartpole.xml",
     MUJOCO_MENAGERIE / "universal_robots_ur5e" / "scene.xml",
     MUJOCO_MENAGERIE / "universal_robots_ur5e" / "ur5e.xml",
+    MUJOCO_MENAGERIE_VENDOR / "universal_robots_ur5e" / "scene_ur5e_cartpole.xml",
+    MUJOCO_MENAGERIE_VENDOR / "universal_robots_ur5e" / "scene.xml",
+    MUJOCO_MENAGERIE_VENDOR / "universal_robots_ur5e" / "ur5e.xml",
 )
 
 _bootstrap_root = Path(os.environ.get("COPPELIA_ROOT", str(DEFAULT_COPPELIA_ROOT)))
@@ -74,13 +78,14 @@ from controller_core.mujoco_cartpole_state import (
 from controller_core.filters import TorqueCommandFilter
 from controller_core.logging_utils import JsonlTraceWriter
 from controller_core.safety import ImpedanceSafetyConfig, ImpedanceSafetyMonitor
-from controller_core.kinematics_utils import orientation_error_vec_wxyz
+from controller_core.kinematics_utils import orientation_error_vec_wxyz, world_linear_jacobian
 from controller_core import CommandGovernorSafetyFilter, FixedXTransportLQRController
 from controller_core.x_axis_cartesian_impedance import (
     JOINT_NAME_ORDER,
     CartesianImpedanceConfig,
     XAxisCartesianImpedanceController,
 )
+from controller_core.torque_task_qp import TorqueTaskQPConfig, TorqueTaskQPController
 from ur5_x_axis_controller_ros.config_loader import load_yaml_config
 from ur5_x_axis_controller_ros.coppeliasim_adapter import (
     CoppeliaSimConfig,
@@ -121,6 +126,7 @@ from coppelia_reciprocating_transport import (
     reciprocating_axis_reference,
     reciprocating_ik_task_weights,
     slew_axis_reference,
+    y_transport_ik_task_weights,
 )
 from coppelia_torque_diagnostics import (
     CoppeliaTorqueDiagnostics,
@@ -153,12 +159,12 @@ DEFAULT_TRANSPORT_START_Q_FIXED_Z = np.array(
 # transport-plane pose that already proved stable in Coppelia.
 DEFAULT_TRANSPORT_START_Q_COPPELIA = np.array(
     [
-        -2.11069988e-06,
-        1.53821459e-01,
-        -1.87279755e00,
-        5.86278649e00,
-        -6.28331410e00,
-        5.28092864e00,
+        0.0,
+        4.43244063e-02,
+        -1.67570517e00,
+        5.09435844e00,
+        -6.28345754e00,
+        5.96178335e00,
     ],
     dtype=np.float64,
 )
@@ -292,6 +298,46 @@ def compute_mujoco_gravity_bias(
     return np.asarray(data.qfrc_bias[:6], dtype=np.float64).copy()
 
 
+def coppelia_gravity_feedforward(
+    estimator: tuple[mujoco.MjModel, mujoco.MjData] | None,
+    q: np.ndarray,
+    qd: np.ndarray,
+    sign: float = -1.0,
+    scale: float = 1.0,
+) -> np.ndarray | None:
+    """Map MuJoCo qfrc_bias to CoppeliaSim joint-torque feedforward.
+
+    Empirical probe (2026-06-25) shows MuJoCo bias at scale=1.0
+    gives near-perfect gravity balance (dz=+0.007m over 50 steps).
+    Higher scales (1.5, 1.8) cause large Z drift due to partial
+    sign cancellation across joints.
+    """
+    bias = compute_mujoco_gravity_bias(estimator, q, qd)
+    if bias is None:
+        return None
+    return float(sign) * float(scale) * np.asarray(bias, dtype=np.float64)
+
+
+def gravity_compensation_flags(ctrl: dict) -> tuple[str, bool, bool]:
+    """Return (source_label, use_mujoco_bias, use_coppelia_calibrated_ff)."""
+    enabled = bool(ctrl.get("use_gravity_compensation", False))
+    source = str(ctrl.get("gravity_compensation_source", "mujoco")).strip().lower()
+    if not enabled:
+        return source, False, False
+    use_mujoco = source in ("mujoco", "both", "mujoco_plus_coppelia", "hybrid")
+    use_coppelia = source in (
+        "coppelia_calibrated",
+        "coppelia",
+        "both",
+        "mujoco_plus_coppelia",
+        "hybrid",
+    )
+    if source in ("", "auto"):
+        use_mujoco = True
+        use_coppelia = False
+    return source, use_mujoco, use_coppelia
+
+
 def quat_wxyz_to_rotation_matrix(quat: np.ndarray) -> np.ndarray:
     q = np.asarray(quat, dtype=np.float64).reshape(4)
     n = float(np.linalg.norm(q))
@@ -377,6 +423,35 @@ def ik_joint_pd_torque(
         "tau_saturated": (np.abs(raw - clipped) > 1e-9).astype(np.float64).tolist(),
         "max_abs_tau_raw_nm": float(np.max(np.abs(raw))),
         "max_abs_tau_cmd_nm": float(np.max(np.abs(clipped))),
+    }
+
+
+def resolve_ik_transport_task_weights(
+    transport_axis_idx: int,
+    reciprocating_ik_weights: dict[str, float],
+    *,
+    use_lqr_outer_policy: bool,
+    lqr_move_axis_weight: float,
+    lqr_hold_axis_weight: float,
+    lqr_orientation_weight: float,
+    lqr_hold_axis_gain: float,
+) -> dict[str, float]:
+    if use_lqr_outer_policy:
+        return {
+            "move_axis_weight": float(lqr_move_axis_weight),
+            "hold_axis_weight": float(lqr_hold_axis_weight),
+            "orientation_weight": float(lqr_orientation_weight),
+            "hold_axis_gain": float(lqr_hold_axis_gain),
+        }
+    if reciprocating_ik_weights:
+        return reciprocating_ik_weights
+    if int(transport_axis_idx) == 1:
+        return y_transport_ik_task_weights()
+    return {
+        "move_axis_weight": 120.0,
+        "hold_axis_weight": 160.0,
+        "orientation_weight": 96.0,
+        "hold_axis_gain": 12.0,
     }
 
 
@@ -580,6 +655,29 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--port", type=int, default=23000)
     p.add_argument("--duration", type=float, default=8.0)
     p.add_argument("--settle-duration", type=float, default=2.0)
+    p.add_argument(
+        "--motion-hold-warmup",
+        type=float,
+        default=0.0,
+        help=(
+            "Seconds of full Cartesian QP plane hold after settle (or from t=0 when "
+            "settle-duration is 0) before axis transport begins."
+        ),
+    )
+    p.add_argument(
+        "--gravity-compensation-source",
+        type=str,
+        default=None,
+        choices=(
+            "mujoco",
+            "coppelia_calibrated",
+            "both",
+        ),
+        help=(
+            "Override controller.gravity_compensation_source: mujoco qfrc_bias, "
+            "Coppelia EMA static-hold feedforward, or both."
+        ),
+    )
     p.add_argument("--target-dx", type=float, default=0.02)
     p.add_argument(
         "--accel-x-transport",
@@ -706,13 +804,13 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--accel-torque-policy",
-        choices=("ik_joint_pd", "cartesian_impedance"),
+        choices=("ik_joint_pd", "cartesian_impedance", "qp_torque"),
         default="ik_joint_pd",
         help=(
             "Direct-torque policy used by --accel-x-transport. ik_joint_pd "
-            "uses the MuJoCo differential-IK acceleration policy to produce a "
-            "joint target, then applies joint PD torques. cartesian_impedance "
-            "keeps the older J.T wrench controller."
+            "uses differential IK + joint PD. cartesian_impedance uses J.T "
+            "wrench with backtracking. qp_torque solves a box QP on torques "
+            "with velocity-implied bounds."
         ),
     )
     p.add_argument(
@@ -832,6 +930,30 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ik-joint-kp", type=float, default=45.0)
     p.add_argument("--ik-joint-kd", type=float, default=9.0)
     p.add_argument("--ik-torque-headroom", type=float, default=0.65)
+    p.add_argument(
+        "--cartesian-z-kp",
+        type=float,
+        default=0.0,
+        help="Cartesian Z stiffness (N/m) applied via J^T during IK PD transport.",
+    )
+    p.add_argument(
+        "--cartesian-z-kd",
+        type=float,
+        default=0.0,
+        help="Cartesian Z damping (N/(m/s)) applied via J^T during IK PD transport.",
+    )
+    p.add_argument(
+        "--cartesian-z-ki",
+        type=float,
+        default=0.0,
+        help="Cartesian Z integral gain (N/(m*s)) for gravity model error.",
+    )
+    p.add_argument(
+        "--gravity-scale",
+        type=float,
+        default=1.0,
+        help="Scale MuJoCo qfrc_bias for Coppelia gravity feedforward.",
+    )
     p.add_argument(
         "--max-joint-excursion-rad",
         type=float,
@@ -1413,6 +1535,12 @@ def main() -> None:
     cop_y = raw_cfg.get("coppeliasim", {}) or {}
     fast_x_y = raw_cfg.get("fast_x_transport", {}) or {}
     use_gravity_compensation = bool(ctrl_y.get("use_gravity_compensation", False))
+    if args.gravity_compensation_source is not None:
+        ctrl_y = {**ctrl_y, "gravity_compensation_source": args.gravity_compensation_source}
+    gravity_source, use_mujoco_gravity, use_coppelia_calibrated_gravity = (
+        gravity_compensation_flags(ctrl_y)
+    )
+    gravity_comp_sign = float(ctrl_y.get("gravity_compensation_sign", -1.0))
     diag_cfg = build_diagnostics_config(args, raw_cfg)
     apply_diagnostics_mode_overrides(args, diag_cfg)
     if diag_cfg.enable_coppelia_torque_diagnostics:
@@ -1561,6 +1689,27 @@ def main() -> None:
             )
 
     # ---------- 5. Start stepped simulation ----------
+    torque_sim_dt_target = 0.005
+    if args.accel_x_transport and not use_lqr_outer_policy:
+        try:
+            param_ids: list[int] = []
+            for attr_name in ("floatparam_simulation_time_step", "floatparam_physicstimestep"):
+                if hasattr(sim, attr_name):
+                    param_ids.append(int(getattr(sim, attr_name)))
+            if not param_ids:
+                param_ids.append(1)
+            for param_id in dict.fromkeys(param_ids):
+                sim.setFloatParam(int(param_id), torque_sim_dt_target)
+            mark(
+                f"requested sim time step {torque_sim_dt_target:.4f}s "
+                f"for direct-torque transport"
+            )
+        except Exception as exc:
+            print(
+                f"[torque] WARNING: unable to set sim time step to "
+                f"{torque_sim_dt_target:.4f}s ({type(exc).__name__}: {exc})",
+                flush=True,
+            )
     sim.setStepping(True)
     if sim.getSimulationState() == sim.simulation_stopped:
         sim.startSimulation()
@@ -1624,17 +1773,25 @@ def main() -> None:
         else float(fast_x_y.get("max_velocity_mps", 0.18))
     )
     max_joint_velocity_radps = float(safe_y.get("max_joint_velocity_radps", 4.8))
-    if use_mpc_outer_policy and transport_axis_idx != 0:
-        raise ValueError("--accel-profile mpc currently supports transport-axis x only")
-    if use_mpc_outer_policy and args.accel_torque_policy not in {"ik_joint_pd", "cartesian_impedance"}:
+    if use_mpc_outer_policy and args.accel_torque_policy not in {
+        "ik_joint_pd",
+        "cartesian_impedance",
+        "qp_torque",
+    }:
         raise ValueError(
-            "--accel-profile mpc currently requires --accel-torque-policy ik_joint_pd or cartesian_impedance"
+            "--accel-profile mpc requires --accel-torque-policy "
+            "ik_joint_pd, cartesian_impedance, or qp_torque"
         )
     if use_lqr_outer_policy and transport_axis_idx != 0:
         raise ValueError("--accel-profile lqr currently supports transport-axis x only")
-    if use_lqr_outer_policy and args.accel_torque_policy not in {"ik_joint_pd", "cartesian_impedance"}:
+    if use_lqr_outer_policy and args.accel_torque_policy not in {
+        "ik_joint_pd",
+        "cartesian_impedance",
+        "qp_torque",
+    }:
         raise ValueError(
-            "--accel-profile lqr currently requires --accel-torque-policy ik_joint_pd or cartesian_impedance"
+            "--accel-profile lqr requires --accel-torque-policy "
+            "ik_joint_pd, cartesian_impedance, or qp_torque"
         )
     if use_fast_x_profile and transport_axis_idx != 0:
         raise ValueError("--accel-profile fast_x currently supports transport-axis x only")
@@ -1668,6 +1825,7 @@ def main() -> None:
     transport_axis0 = float(ee_pos0[transport_axis_idx])
     initial_state["target_x"] = target_x0
     initial_state["target_axis"] = transport_axis0
+    initial_state["transport_axis_index"] = int(transport_axis_idx)
     task_rot0 = quat_wxyz_to_rotation_matrix(ee_quat0)
     mujoco_orientation_error_rad0 = rotation_error_angle_rad(
         task_rot0, TARGET_SITE_ROTATION_WORLD
@@ -1752,11 +1910,15 @@ def main() -> None:
         initial_state["jacobian"], transport_axis_idx
     )
     mujoco_gravity_estimator = (
-        build_mujoco_gravity_estimator() if use_gravity_compensation else None
+        build_mujoco_gravity_estimator() if use_mujoco_gravity else None
     )
+    gravity_scale = float(args.gravity_scale)
     initial_gravity_torque = (
-        compute_mujoco_gravity_bias(mujoco_gravity_estimator, q0, qd0)
-        if use_gravity_compensation
+        coppelia_gravity_feedforward(
+            mujoco_gravity_estimator, q0, qd0, gravity_comp_sign,
+            scale=gravity_scale,
+        )
+        if use_mujoco_gravity
         else None
     )
     if initial_gravity_torque is not None:
@@ -1770,7 +1932,7 @@ def main() -> None:
             0.30
             if args.accel_x_transport
             and args.accel_profile == "reciprocating"
-            and args.accel_torque_policy == "cartesian_impedance"
+            and args.accel_torque_policy in {"cartesian_impedance", "qp_torque"}
             else 1.0
         )
     )
@@ -1795,7 +1957,7 @@ def main() -> None:
             kd_posture=float(imp_cfg.kd_posture * gs),
             kd_joint=float(imp_cfg.kd_joint * gs),
         )
-    if use_lqr_outer_policy and args.accel_torque_policy == "cartesian_impedance":
+    if use_lqr_outer_policy and args.accel_torque_policy in {"cartesian_impedance", "qp_torque"}:
         imp_cfg = replace(
             imp_cfg,
             kp_x=float(imp_cfg.kp_x * lqr_cartesian_impedance_gain_scale),
@@ -1811,8 +1973,86 @@ def main() -> None:
             kd_joint=float(imp_cfg.kd_joint * lqr_cartesian_impedance_gain_scale),
             torque_headroom=float(lqr_cartesian_impedance_torque_headroom),
         )
-    controller = XAxisCartesianImpedanceController(imp_cfg)
-    controller.reset_from_state(initial_state)
+    use_qp_torque_policy = args.accel_torque_policy == "qp_torque"
+    if use_qp_torque_policy:
+        qp_cfg = TorqueTaskQPConfig.from_controller_yaml_section(
+            {**ctrl_y, "safety": safe_y}
+        )
+        if transport_gain_scale != 1.0:
+            gs = float(transport_gain_scale)
+            qp_cfg = replace(
+                qp_cfg,
+                kp_x=float(qp_cfg.kp_x * gs),
+                kd_x=float(qp_cfg.kd_x * gs),
+                kp_y=float(qp_cfg.kp_y * gs),
+                kd_y=float(qp_cfg.kd_y * gs),
+                kp_z=float(qp_cfg.kp_z * gs),
+                kd_z=float(qp_cfg.kd_z * gs),
+                kp_rot=float(qp_cfg.kp_rot * gs),
+                kd_rot=float(qp_cfg.kd_rot * gs),
+                kp_posture=float(qp_cfg.kp_posture * gs),
+                kd_posture=float(qp_cfg.kd_posture * gs),
+                kd_joint=float(qp_cfg.kd_joint * gs),
+            )
+        if use_lqr_outer_policy:
+            qp_cfg = replace(
+                qp_cfg,
+                kp_x=float(qp_cfg.kp_x * lqr_cartesian_impedance_gain_scale),
+                kd_x=float(qp_cfg.kd_x * lqr_cartesian_impedance_gain_scale),
+                kp_y=float(qp_cfg.kp_y * lqr_cartesian_impedance_gain_scale),
+                kd_y=float(qp_cfg.kd_y * lqr_cartesian_impedance_gain_scale),
+                kp_z=float(qp_cfg.kp_z * lqr_cartesian_impedance_gain_scale),
+                kd_z=float(qp_cfg.kd_z * lqr_cartesian_impedance_gain_scale),
+                kp_rot=float(qp_cfg.kp_rot * lqr_cartesian_impedance_gain_scale),
+                kd_rot=float(qp_cfg.kd_rot * lqr_cartesian_impedance_gain_scale),
+                kp_posture=float(qp_cfg.kp_posture * lqr_cartesian_impedance_gain_scale),
+                kd_posture=float(qp_cfg.kd_posture * lqr_cartesian_impedance_gain_scale),
+                kd_joint=float(qp_cfg.kd_joint * lqr_cartesian_impedance_gain_scale),
+                torque_headroom=float(lqr_cartesian_impedance_torque_headroom),
+            )
+        controller = TorqueTaskQPController(qp_cfg)
+    else:
+        controller = XAxisCartesianImpedanceController(imp_cfg)
+    settle_plane_hold_controller: TorqueTaskQPController | None = None
+    if (
+        args.accel_x_transport
+        and args.hold_transport_start_pose
+        and not use_qp_torque_policy
+    ):
+        hold_qp_cfg = TorqueTaskQPConfig.from_controller_yaml_section(
+            {
+                **ctrl_y,
+                "safety": safe_y,
+                "torque_limits_mode": "after_stable",
+            }
+        )
+        hold_qp_cfg = replace(
+            hold_qp_cfg,
+            kp_x=float(hold_qp_cfg.kp_x),
+            kd_x=float(hold_qp_cfg.kd_x),
+            kp_y=float(hold_qp_cfg.kp_y),
+            kd_y=float(hold_qp_cfg.kd_y),
+            kp_z=float(hold_qp_cfg.kp_z * 1.5),
+            kd_z=float(hold_qp_cfg.kd_z * 1.2),
+            kp_rot=float(hold_qp_cfg.kp_rot),
+            kd_rot=float(hold_qp_cfg.kd_rot),
+            torque_headroom=0.92,
+            enforce_velocity_torque_bounds=False,
+        )
+        settle_plane_hold_controller = TorqueTaskQPController(hold_qp_cfg)
+    controller.reset_from_state(
+        {
+            **initial_state,
+            "transport_axis_index": int(transport_axis_idx),
+        }
+    )
+    if settle_plane_hold_controller is not None:
+        settle_plane_hold_controller.reset_from_state(
+            {
+                **initial_state,
+                "transport_axis_index": int(transport_axis_idx),
+            }
+        )
 
     safety = ImpedanceSafetyMonitor(
         ImpedanceSafetyConfig(
@@ -2291,13 +2531,23 @@ def main() -> None:
             initial_state["jacobian"], transport_axis_idx
         )
         initial_gravity_torque = (
-            compute_mujoco_gravity_bias(mujoco_gravity_estimator, q0, qd0)
-            if use_gravity_compensation
+            coppelia_gravity_feedforward(
+                mujoco_gravity_estimator, q0, qd0, gravity_comp_sign,
+                scale=gravity_scale,
+            )
+            if use_mujoco_gravity
             else None
         )
         if initial_gravity_torque is not None:
             initial_state["gravity_torque"] = initial_gravity_torque
         controller.reset_from_state(initial_state)
+        if settle_plane_hold_controller is not None:
+            settle_plane_hold_controller.reset_from_state(
+                {
+                    **initial_state,
+                    "transport_axis_index": int(transport_axis_idx),
+                }
+            )
         safety.set_initial_position(ee_pos0, transport_axis_idx)
         mark("warmup state sampled — controller reset")
 
@@ -2313,6 +2563,7 @@ def main() -> None:
     )
 
     transport_target_pos = ee_pos0.copy()
+    cartesian_hold_pos = ee_pos0.copy()
     target_axis = transport_target_pos[transport_axis_idx]
     target_axis_vel = 0.0
     target_axis_accel = 0.0
@@ -2320,7 +2571,44 @@ def main() -> None:
     accel_total_time = None
     ik_ctrl_ref = q0.copy()
     ik_axis_state = 0.0
+    motion_hold_warmup_s = float(args.motion_hold_warmup)
+    if use_coppelia_calibrated_gravity and motion_hold_warmup_s <= 0.0:
+        print(
+            "[gravity] coppelia_calibrated needs motion-hold-warmup > 0; "
+            "defaulting warmup to 0.5 s",
+            flush=True,
+        )
+        motion_hold_warmup_s = 0.5
+    nominal_transport_start_time = float(args.settle_duration) + motion_hold_warmup_s
+    transport_start_time = nominal_transport_start_time
+    transport_ready = not args.accel_x_transport
+    transport_z_gate_max_extension_s = 3.0
+    transport_arm_reason: str | None = None
+    coppelia_ff_ema_alpha = 0.2
     tau_limit = np.asarray(imp_cfg.tau_max_nm, dtype=np.float64).reshape(6)
+    coppelia_static_tau_ff = np.zeros(6, dtype=np.float64)
+    coppelia_ff_frozen: np.ndarray | None = None
+    if (
+        args.accel_x_transport
+        and settle_plane_hold_controller is not None
+        and nominal_transport_start_time >= float(args.settle_duration)
+    ):
+        prime_state = {
+            **initial_state,
+            "hold_current_pose": False,
+            "hold_all_cartesian_axes": True,
+            "target_ee_pos": np.asarray(ee_pos0, dtype=np.float64),
+            "target_ee_vel": np.zeros(3, dtype=np.float64),
+            "transport_axis_index": int(transport_axis_idx),
+        }
+        tau_prime = np.zeros(6, dtype=np.float64)
+        if initial_gravity_torque is not None:
+            tau_prime = np.asarray(initial_gravity_torque, dtype=np.float64).copy()
+        tau_prime = np.clip(tau_prime, -tau_limit, tau_limit)
+        torque_filter._y = tau_prime.copy()
+        torque_filter._initialized = True
+        adapter.apply_torque(tau_prime)
+        mark("primed hold torque before first control step")
     mark("controller ready for closed-loop motion")
 
     torque_diagnostics: CoppeliaTorqueDiagnostics | None = None
@@ -2457,6 +2745,7 @@ def main() -> None:
         )
     steps = int(round(args.duration / sim_dt))
     prev_sim_time: float | None = None
+    cart_z_integral: float = 0.0
 
     try:
         with JsonlTraceWriter(trace_path) as trace:
@@ -2475,13 +2764,63 @@ def main() -> None:
                 q, qd = adapter.read_joint_state()
                 ee_pos, ee_quat, ee_lin, ee_ang = adapter.read_ee_pose_twist()
                 j_pos, j_rot = adapter.read_jacobian()
+                if str(cop_cfg.jacobian_source).lower() in {"auto", "api"}:
+                    ee_rot_world = quat_wxyz_to_rotation_matrix(
+                        np.asarray(ee_quat, dtype=np.float64)
+                    )
+                    j_pos = world_linear_jacobian(j_pos, ee_rot_world)
+                    j_rot = world_linear_jacobian(j_rot, ee_rot_world)
                 ee_pos_arr = np.asarray(ee_pos, dtype=np.float64)
                 ee_lin_arr = np.asarray(ee_lin, dtype=np.float64)
                 gravity_torque = (
-                    compute_mujoco_gravity_bias(mujoco_gravity_estimator, q, qd)
-                    if use_gravity_compensation
+                    coppelia_gravity_feedforward(
+                        mujoco_gravity_estimator, q, qd, gravity_comp_sign,
+                        scale=gravity_scale,
+                    )
+                    if use_mujoco_gravity
                     else None
                 )
+
+                if args.accel_x_transport and not transport_ready:
+                    if sim_time >= nominal_transport_start_time:
+                        z_hold_drift = abs(
+                            float(ee_pos_arr[2]) - float(cartesian_hold_pos[2])
+                        )
+                        if args.task_orientation_target == "mujoco":
+                            gate_ori_err = rotation_error_angle_rad(
+                                quat_wxyz_to_rotation_matrix(
+                                    np.asarray(ee_quat, dtype=np.float64)
+                                ),
+                                TARGET_SITE_ROTATION_WORLD,
+                            )
+                        else:
+                            gate_ori_err = float(
+                                np.linalg.norm(
+                                    orientation_error_vec_wxyz(ee_quat0, ee_quat)
+                                )
+                            )
+                        gate_timeout = (
+                            sim_time
+                            >= nominal_transport_start_time
+                            + transport_z_gate_max_extension_s
+                        )
+                        if (z_hold_drift < 0.03 and gate_ori_err < 0.2) or gate_timeout:
+                            transport_ready = True
+                            transport_start_time = sim_time
+                            if use_coppelia_calibrated_gravity:
+                                coppelia_ff_frozen = coppelia_static_tau_ff.copy()
+                            reason = (
+                                "z_stable"
+                                if z_hold_drift < 0.03 and gate_ori_err < 0.2
+                                else "hold_timeout"
+                            )
+                            transport_arm_reason = reason
+                            print(
+                                f"[transport] Y motion armed at t={sim_time:.2f}s "
+                                f"({reason}, z_drift={z_hold_drift:.4f} m, "
+                                f"ori_err={gate_ori_err:.3f} rad)",
+                                flush=True,
+                            )
 
                 use_ik_torque_policy = (
                     args.accel_x_transport and args.accel_torque_policy == "ik_joint_pd"
@@ -2504,11 +2843,12 @@ def main() -> None:
                 pd_diag: dict[str, Any] = {}
                 outer_diag: dict[str, Any] = {}
 
-                if sim_time >= args.settle_duration:
-                    t_move = sim_time - float(args.settle_duration)
+                if transport_ready:
+                    t_move = sim_time - transport_start_time
                     if args.accel_x_transport and not transport_reanchored:
-                        transport_target_pos = np.asarray(ee_pos, dtype=np.float64).copy()
-                        transport_axis0 = float(transport_target_pos[transport_axis_idx])
+                        transport_axis0 = float(ee_pos_arr[transport_axis_idx])
+                        transport_target_pos = np.asarray(cartesian_hold_pos, dtype=np.float64).copy()
+                        transport_target_pos[transport_axis_idx] = transport_axis0
                         target_axis = float(transport_axis0)
                         target_axis_vel = 0.0
                         target_axis_accel = 0.0
@@ -2535,8 +2875,11 @@ def main() -> None:
                             lqr_gain_matrix = lqr_controller.gain_matrix.tolist()
                             lqr_riccati_converged = bool(lqr_controller.riccati_converged)
                             lqr_riccati_iters = int(lqr_controller.riccati_iters)
-                            transport_target_pos[transport_axis_idx] = float(lqr_goal_x)
-                            target_axis = float(lqr_goal_x)
+                            if use_ik_torque_policy:
+                                transport_target_pos[transport_axis_idx] = float(lqr_goal_x)
+                                target_axis = float(lqr_goal_x)
+                            else:
+                                target_axis = float(transport_axis0)
                         elif use_mpc_outer_policy:
                             mpc_q = np.array(
                                 [
@@ -2565,8 +2908,11 @@ def main() -> None:
                                 command_change_limit=float(args.mpc_command_change_per_cycle),
                                 guardrail_margin_m=float(args.mpc_guardrail_margin_m),
                             )
-                            transport_target_pos[transport_axis_idx] = float(mpc_goal_x)
-                            target_axis = float(mpc_goal_x)
+                            if use_ik_torque_policy:
+                                transport_target_pos[transport_axis_idx] = float(mpc_goal_x)
+                                target_axis = float(mpc_goal_x)
+                            else:
+                                target_axis = float(transport_axis0)
                         elif use_fast_x_profile:
                             live_jacobian = np.vstack([j_pos, j_rot])
                             (
@@ -2690,8 +3036,20 @@ def main() -> None:
                             "a_x_cmd_mps2": float(target_axis_accel),
                             "diagnostics": lqr_diag,
                         }
-                        transport_target_pos[transport_axis_idx] = float(lqr_goal_x)
-                        target_axis = float(lqr_goal_x)
+                        if use_ik_torque_policy:
+                            transport_target_pos[transport_axis_idx] = float(lqr_goal_x)
+                            target_axis = float(lqr_goal_x)
+                        else:
+                            accel_v_state = float(
+                                np.clip(
+                                    accel_v_state + target_axis_accel * sim_dt,
+                                    -abs(float(args.v_x_max)),
+                                    abs(float(args.v_x_max)),
+                                )
+                            )
+                            target_axis_vel = accel_v_state
+                            transport_target_pos[transport_axis_idx] += target_axis_vel * sim_dt
+                            target_axis = float(transport_target_pos[transport_axis_idx])
                     elif args.accel_x_transport and args.accel_profile == "mpc":
                         if mpc_controller is None or mpc_filter is None or mpc_goal_x is None:
                             raise RuntimeError("MPC transport was not initialized before motion start")
@@ -2730,8 +3088,20 @@ def main() -> None:
                             "a_x_cmd_mps2": float(target_axis_accel),
                             "diagnostics": mpc_diag,
                         }
-                        transport_target_pos[transport_axis_idx] = float(mpc_goal_x)
-                        target_axis = float(mpc_goal_x)
+                        if use_ik_torque_policy:
+                            transport_target_pos[transport_axis_idx] = float(mpc_goal_x)
+                            target_axis = float(mpc_goal_x)
+                        else:
+                            accel_v_state = float(
+                                np.clip(
+                                    accel_v_state + target_axis_accel * sim_dt,
+                                    -abs(float(args.v_x_max)),
+                                    abs(float(args.v_x_max)),
+                                )
+                            )
+                            target_axis_vel = accel_v_state
+                            transport_target_pos[transport_axis_idx] += target_axis_vel * sim_dt
+                            target_axis = float(transport_target_pos[transport_axis_idx])
                     elif args.accel_x_transport and args.accel_profile == "back_and_forth_15s":
                         half_period = max(float(args.accel_square_half_period_s), 1e-6)
                         if t_move < half_period:
@@ -2813,6 +3183,10 @@ def main() -> None:
                         target_axis_vel = 0.0
                         target_axis_accel = 0.0
 
+                if args.accel_x_transport and args.hold_transport_start_pose:
+                    for idx in orth_axis_idxs:
+                        transport_target_pos[idx] = float(cartesian_hold_pos[idx])
+
                 target_x = float(transport_target_pos[0])
                 if (
                     diag_ref_step_mid
@@ -2831,6 +3205,8 @@ def main() -> None:
                 target_x_vel = 0.0 if transport_axis_idx != 0 else float(target_axis_vel)
                 target_x_accel = 0.0 if transport_axis_idx != 0 else float(target_axis_accel)
 
+                target_ee_vel = np.zeros(3, dtype=np.float64)
+                target_ee_vel[transport_axis_idx] = float(target_axis_vel)
                 state = {
                     "time": sim_time,
                     "q": q, "qd": qd,
@@ -2840,6 +3216,9 @@ def main() -> None:
                     "target_x_vel": target_x_vel,
                     "target_axis": float(target_axis),
                     "target_axis_vel": float(target_axis_vel),
+                    "transport_axis_index": int(transport_axis_idx),
+                    "target_ee_pos": np.asarray(transport_target_pos, dtype=np.float64),
+                    "target_ee_vel": target_ee_vel,
                     "jacobian": np.vstack([j_pos, j_rot]),
                 }
                 if gravity_torque is not None:
@@ -2950,12 +3329,17 @@ def main() -> None:
                         else np.asarray(tau_limit, dtype=np.float64)
                     )
                     qdot_ref = np.zeros(6, dtype=np.float64)
-                    fixed_position_ref = (
-                        np.asarray(transport_target_pos, dtype=np.float64).copy()
-                        if use_lqr_outer_policy
-                        else np.asarray(ee_pos0, dtype=np.float64)
+                    ik_task_weights = resolve_ik_transport_task_weights(
+                        transport_axis_idx,
+                        reciprocating_ik_weights,
+                        use_lqr_outer_policy=use_lqr_outer_policy,
+                        lqr_move_axis_weight=lqr_move_axis_weight,
+                        lqr_hold_axis_weight=lqr_hold_axis_weight,
+                        lqr_orientation_weight=lqr_orientation_weight,
+                        lqr_hold_axis_gain=lqr_hold_axis_gain,
                     )
-                    if sim_time >= args.settle_duration:
+                    fixed_position_ref = np.asarray(cartesian_hold_pos, dtype=np.float64)
+                    if transport_ready:
                         if (
                             use_point_to_point_ik_policy
                             or use_reciprocating_ik_policy
@@ -2998,38 +3382,27 @@ def main() -> None:
                                     else (
                                         float(fast_x_joint_speed_fraction)
                                         if use_fast_x_profile
-                                        else 1.0
+                                        else float(
+                                            ik_task_weights.get(
+                                                "joint_speed_limit_scale", 1.0
+                                            )
+                                        )
                                     )
                                 ),
-                                move_axis_weight=(
-                                    float(lqr_move_axis_weight)
-                                    if use_lqr_outer_policy
-                                    else float(
-                                        reciprocating_ik_weights.get("move_axis_weight", 120.0)
-                                    )
+                                move_axis_weight=float(ik_task_weights["move_axis_weight"]),
+                                hold_axis_weight=float(ik_task_weights["hold_axis_weight"]),
+                                orientation_weight=float(ik_task_weights["orientation_weight"]),
+                                hold_axis_gain=float(ik_task_weights["hold_axis_gain"]),
+                                fixed_axis_hold_gains=ik_task_weights.get(
+                                    "fixed_axis_hold_gains"
                                 ),
-                                hold_axis_weight=(
-                                    float(lqr_hold_axis_weight)
-                                    if use_lqr_outer_policy
-                                    else float(
-                                        reciprocating_ik_weights.get("hold_axis_weight", 160.0)
-                                    )
-                                ),
-                                orientation_weight=(
-                                    float(lqr_orientation_weight)
-                                    if use_lqr_outer_policy
-                                    else float(
-                                        reciprocating_ik_weights.get("orientation_weight", 96.0)
-                                    )
-                                ),
-                                hold_axis_gain=(
-                                    float(lqr_hold_axis_gain)
-                                    if use_lqr_outer_policy
-                                    else float(
-                                        reciprocating_ik_weights.get("hold_axis_gain", 12.0)
-                                    )
+                                fixed_axis_hold_weights=ik_task_weights.get(
+                                    "fixed_axis_hold_weights"
                                 ),
                                 posture_target=q0,
+                                joint_tau_limit_nm=np.asarray(
+                                    ik_tau_limit, dtype=np.float64
+                                ),
                             )
                             target_axis_vel = float(
                                 ik_diag.get("v_x_realized_cmd", float(target_axis_vel))
@@ -3069,19 +3442,24 @@ def main() -> None:
                                 joint_speed_limit_scale=(
                                     float(lqr_joint_speed_limit_scale)
                                     if use_lqr_outer_policy
-                                    else 1.0
+                                    else float(
+                                        ik_task_weights.get(
+                                            "joint_speed_limit_scale", 1.0
+                                        )
+                                    )
                                 ),
-                                move_axis_weight=float(
-                                    reciprocating_ik_weights.get("move_axis_weight", 120.0)
+                                move_axis_weight=float(ik_task_weights["move_axis_weight"]),
+                                hold_axis_weight=float(ik_task_weights["hold_axis_weight"]),
+                                orientation_weight=float(ik_task_weights["orientation_weight"]),
+                                hold_axis_gain=float(ik_task_weights["hold_axis_gain"]),
+                                fixed_axis_hold_gains=ik_task_weights.get(
+                                    "fixed_axis_hold_gains"
                                 ),
-                                hold_axis_weight=float(
-                                    reciprocating_ik_weights.get("hold_axis_weight", 100.0)
+                                fixed_axis_hold_weights=ik_task_weights.get(
+                                    "fixed_axis_hold_weights"
                                 ),
-                                orientation_weight=float(
-                                    reciprocating_ik_weights.get("orientation_weight", 64.0)
-                                ),
-                                hold_axis_gain=float(
-                                    reciprocating_ik_weights.get("hold_axis_gain", 8.0)
+                                joint_tau_limit_nm=np.asarray(
+                                    ik_tau_limit, dtype=np.float64
                                 ),
                             )
                             ik_axis_state = float(
@@ -3098,50 +3476,68 @@ def main() -> None:
                         target_axis = float(transport_target_pos[transport_axis_idx])
                 pre_motion_hold = bool(
                     diag_force_hold_pose
-                    or (args.accel_x_transport and sim_time < args.settle_duration)
+                    or (args.accel_x_transport and not transport_ready)
                 )
                 if not diag_passive and not diag_sinusoid_joint and pre_motion_hold:
-                    if use_ik_torque_policy:
-                        qdot_ref = np.zeros(6, dtype=np.float64)
-                        tau_pre_filter, pd_diag = ik_joint_pd_torque(
-                            q=np.asarray(q, dtype=np.float64),
-                            qd=np.asarray(qd, dtype=np.float64),
-                            q_ref=np.asarray(q0, dtype=np.float64),
-                            qdot_ref=qdot_ref,
-                            tau_limit=ik_tau_limit,
-                            kp=ik_kp,
-                            kd=ik_kd,
-                        )
+                    if use_ik_torque_policy and settle_plane_hold_controller is not None:
+                        q_arr = np.asarray(q, dtype=np.float64)
+                        qd_arr = np.asarray(qd, dtype=np.float64)
+                        q_hold_target = np.asarray(q0, dtype=np.float64)
+                        hold_kp = 300.0
+                        hold_kd = 40.0
+                        tau_pd = hold_kp * (q_hold_target - q_arr) - hold_kd * qd_arr
+                        tau_pre_filter = tau_pd.copy()
                         if gravity_torque is not None:
-                            tau_pre_filter = np.asarray(tau_pre_filter, dtype=np.float64) + gravity_torque
-                        tau_cmd, filter_diag = apply_torque_filter_step(
-                            torque_filter,
-                            tau_pre_filter,
-                            step_dt,
-                            collect_filter_diag=collect_filter_diag,
+                            tau_pre_filter = tau_pre_filter + np.asarray(
+                                gravity_torque, dtype=np.float64
+                            )
+                        cart_z_kp = float(args.cartesian_z_kp)
+                        cart_z_kd = float(args.cartesian_z_kd)
+                        if (cart_z_kp > 0 or cart_z_kd > 0) and j_pos is not None:
+                            jz_row = np.asarray(j_pos, dtype=np.float64)[2, :]
+                            z_err = float(cartesian_hold_pos[2]) - float(ee_pos_arr[2])
+                            z_vel = float(ee_lin_arr[2]) if ee_lin_arr is not None else 0.0
+                            f_z = cart_z_kp * z_err - cart_z_kd * z_vel
+                            tau_cart_z = jz_row * f_z
+                            tau_pre_filter = tau_pre_filter + tau_cart_z
+                            if step < 3:
+                                print(f"[cart-z-warmup] z_err={z_err:.4f} f_z={f_z:.2f} tau_cart_z={tau_cart_z}")
+                        elif step < 3:
+                            print(f"[cart-z-warmup] SKIPPED kp={cart_z_kp} kd={cart_z_kd} j_pos={'ok' if j_pos is not None else 'None'}")
+                        tau_cmd = np.clip(
+                            np.asarray(tau_pre_filter, dtype=np.float64),
+                            -tau_limit,
+                            tau_limit,
                         )
-                        tau_raw_for_log = np.asarray(pd_diag.get("tau_raw", tau_pre_filter), dtype=np.float64)
-                        tau_preclip_log = np.asarray(tau_pre_filter, dtype=np.float64)
+                        torque_filter._y = tau_cmd.copy()
+                        torque_filter._initialized = True
+                        filter_diag = None
+                        x_error = float(ee_pos_arr[0]) - float(cartesian_hold_pos[0])
+                        y_error = float(ee_pos_arr[1]) - float(cartesian_hold_pos[1])
+                        z_error = float(ee_pos_arr[2]) - float(cartesian_hold_pos[2])
+                        orientation_error_norm = 0.0
+                        jacobian_cond = 1.0
+                        singular_scale = 1.0
+                        tau_raw_for_log = tau_pre_filter.copy()
+                        tau_preclip_log = tau_pre_filter.copy()
                         tau_task_nominal_log = np.zeros(6, dtype=np.float64)
                         tau_task_log = np.zeros(6, dtype=np.float64)
-                        tau_posture_log = tau_raw_for_log
+                        tau_posture_log = tau_pd.copy()
                         tau_damping_log = np.zeros(6, dtype=np.float64)
-                        diag_q_des = np.asarray(q0, dtype=np.float64)
-                        diag_qd_des = qdot_ref.copy()
-                        diag_tau_p = np.asarray(pd_diag.get("tau_impedance_P", np.zeros(6)), dtype=np.float64)
-                        diag_tau_d = np.asarray(pd_diag.get("tau_impedance_D", np.zeros(6)), dtype=np.float64)
+                        diag_tau_p = tau_pd.copy()
+                        diag_tau_d = np.zeros(6, dtype=np.float64)
+                        diag_q_des = q_hold_target.copy()
+                        diag_qd_des = np.zeros(6, dtype=np.float64)
                         task_backtrack_scale = 1.0
                         task_scale = 1.0
                         task_backtrack_iters = 0
                         task_feasible = True
-                        x_error = 0.0
-                        y_error = 0.0
-                        z_error = 0.0
-                        orientation_error_norm = 0.0
-                        jacobian_cond = float(np.linalg.cond(np.vstack([j_pos, j_rot])))
-                        singular_scale = 1.0
+                        pd_diag = {}
                     else:
-                        state["hold_current_pose"] = True
+                        state["hold_current_pose"] = False
+                        state["target_ee_pos"] = np.asarray(cartesian_hold_pos, dtype=np.float64)
+                        state["target_ee_vel"] = np.zeros(3, dtype=np.float64)
+                        state["transport_axis_index"] = int(transport_axis_idx)
                         out = controller.compute(state)
                         tau_cmd, filter_diag = apply_torque_filter_step(
                             torque_filter,
@@ -3182,12 +3578,35 @@ def main() -> None:
                     )
                     if gravity_torque is not None:
                         tau_pre_filter = np.asarray(tau_pre_filter, dtype=np.float64) + gravity_torque
+                    # Cartesian Z feedback via J^T during transport
+                    cart_z_kp = float(args.cartesian_z_kp)
+                    cart_z_kd = float(args.cartesian_z_kd)
+                    cart_z_ki = float(args.cartesian_z_ki)
+                    if (cart_z_kp > 0 or cart_z_kd > 0 or cart_z_ki > 0) and j_pos is not None:
+                        jz_row = np.asarray(j_pos, dtype=np.float64)[2, :]
+                        z_target = float(cartesian_hold_pos[2])
+                        z_err = z_target - float(ee_pos_arr[2])
+                        z_vel = float(ee_lin_arr[2]) if ee_lin_arr is not None else 0.0
+                        cart_z_integral += z_err * step_dt
+                        cart_z_integral = np.clip(cart_z_integral, -0.5, 0.5)
+                        f_z = cart_z_kp * z_err - cart_z_kd * z_vel + cart_z_ki * cart_z_integral
+                        tau_cart_z = jz_row * f_z
+                        tau_pre_filter = tau_pre_filter + tau_cart_z
+                        if step < 5 or step % 200 == 0:
+                            print(f"[cart-z-transport] step={step} z_err={z_err:.4f} f_z={f_z:.2f} |tau_cz|={np.linalg.norm(tau_cart_z):.2f}")
+                    tau_hold_orth = None
                     tau_cmd, filter_diag = apply_torque_filter_step(
                         torque_filter,
                         tau_pre_filter,
                         step_dt,
                         collect_filter_diag=collect_filter_diag,
                     )
+                    if tau_hold_orth is not None:
+                        tau_cmd = np.clip(
+                            np.asarray(tau_cmd, dtype=np.float64) + tau_hold_orth,
+                            -ik_tau_limit,
+                            ik_tau_limit,
+                        )
                     tau_raw_for_log = np.asarray(pd_diag.get("tau_raw", tau_pre_filter), dtype=np.float64)
                     tau_posture_log = tau_raw_for_log
                     diag_q_des = np.asarray(ik_ctrl_ref, dtype=np.float64)
@@ -3226,7 +3645,20 @@ def main() -> None:
                 safe_st = None
                 tau_cmd_to_apply = tau_cmd
                 should_break = False
-                if sim_time >= args.settle_duration:
+                if args.accel_x_transport:
+                    if transport_ready:
+                        safe_st = safety.check(
+                            state,
+                            axis_error=axis_error,
+                            x_error=x_error,
+                            orientation_error_norm=orientation_error_norm,
+                        )
+                        if not safe_st.ok:
+                            print(f"SAFETY STOP: {safe_st.reason}")
+                            safety_stop_reason = safe_st.reason
+                            tau_cmd_to_apply = np.zeros(6, dtype=np.float64)
+                            should_break = True
+                elif sim_time >= args.settle_duration:
                     safe_st = safety.check(
                         state,
                         axis_error=axis_error,
@@ -3238,6 +3670,20 @@ def main() -> None:
                         safety_stop_reason = safe_st.reason
                         tau_cmd_to_apply = np.zeros(6, dtype=np.float64)
                         should_break = True
+
+                if (
+                    use_coppelia_calibrated_gravity
+                    and coppelia_ff_frozen is not None
+                    and sim_time >= transport_start_time
+                    and not should_break
+                    and gravity_source in ("coppelia_only_transport_ff",)
+                ):
+                    tau_cmd_to_apply = np.clip(
+                        np.asarray(tau_cmd_to_apply, dtype=np.float64)
+                        + coppelia_ff_frozen,
+                        -tau_limit,
+                        tau_limit,
+                    )
 
                 adapter.apply_torque(tau_cmd_to_apply)
                 if step == 0:
@@ -3327,6 +3773,11 @@ def main() -> None:
                     "task_feasible": task_feasible,
                     "tau_raw": tau_raw_for_log,
                     "tau_cmd": tau_cmd,
+                    "gravity_torque": (
+                        gravity_torque.tolist()
+                        if gravity_torque is not None
+                        else None
+                    ),
                     "jacobian_condition_number": jacobian_cond,
                     "singular_scale": singular_scale,
                     "outer_transport_diagnostics": outer_diag,
@@ -3387,6 +3838,24 @@ def main() -> None:
 
                 prev_sim_time = sim_time
                 sim.step()
+
+                if (
+                    args.accel_x_transport
+                    and not transport_ready
+                    and use_coppelia_calibrated_gravity
+                ):
+                    qd_post = np.asarray(qd, dtype=np.float64).reshape(6)
+                    if float(np.max(np.abs(qd_post))) < 0.25:
+                        measured_ff = adapter.read_joint_forces()
+                        if np.all(np.isfinite(measured_ff)):
+                            residual_ff = (
+                                np.asarray(measured_ff, dtype=np.float64)
+                                - np.asarray(tau_cmd_to_apply, dtype=np.float64)
+                            )
+                            coppelia_static_tau_ff = (
+                                (1.0 - coppelia_ff_ema_alpha) * coppelia_static_tau_ff
+                                + coppelia_ff_ema_alpha * residual_ff
+                            )
 
                 if (
                     not args.no_video
@@ -3600,6 +4069,16 @@ def main() -> None:
         "lua_motion_enabled": ownership_metadata["lua_motion_enabled"],
         "legacy_marker_handoff": ownership_metadata["legacy_marker_handoff"],
         "use_gravity_compensation": use_gravity_compensation,
+        "gravity_compensation_source": gravity_source,
+        "gravity_compensation_sign": float(gravity_comp_sign),
+        "gravity_compensation_scale": float(gravity_scale),
+        "use_mujoco_gravity_bias": use_mujoco_gravity,
+        "use_coppelia_calibrated_gravity": use_coppelia_calibrated_gravity,
+        "coppelia_static_tau_ff_nm": (
+            coppelia_ff_frozen.tolist()
+            if coppelia_ff_frozen is not None
+            else coppelia_static_tau_ff.tolist()
+        ),
         "accel_profile": str(args.accel_profile) if args.accel_x_transport else None,
         "reciprocating_stroke_m": (
             float(args.reciprocating_stroke_m)
@@ -3727,6 +4206,10 @@ def main() -> None:
         "startup_jacobian_comparison": jacobian_comparison,
         "duration_s": args.duration,
         "settle_duration_s": args.settle_duration,
+        "motion_hold_warmup_s": float(motion_hold_warmup_s),
+        "nominal_transport_start_time_s": float(nominal_transport_start_time),
+        "transport_start_time_s": float(transport_start_time),
+        "transport_arm_reason": transport_arm_reason,
         "warmup_steps_requested": int(args.warmup_steps),
         "warmup_steps_effective": int(effective_warmup_steps),
         "target_dx_m": args.target_dx,

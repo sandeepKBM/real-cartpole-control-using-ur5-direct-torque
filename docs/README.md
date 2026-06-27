@@ -6,6 +6,8 @@ This workspace is currently focused on one active problem:
 
 Workspace rule: CoppeliaSim is the only active runtime for current development. MuJoCo code, videos, and notes are historical reference only unless a task explicitly says otherwise.
 
+**New (2026-06-25):** RL-based Y-axis transport training via PPO — see [RL Y-Transport Controller](coppeliasim/RL_Y_TRANSPORT.md).
+
 The historical folder name is misleading. Treat this as a UR5 / UR5e control workspace with ROS 2 scaffolding and an active CoppeliaSim torque-control bring-up; MuJoCo work is archived.
 
 ## Start Here
@@ -21,8 +23,10 @@ Read these in order:
 7. [External ZMQ controller bring-up](coppeliasim/EXTERNAL_ZMQ_CONTROLLER_BRINGUP.md)
 8. [CoppeliaSim RPC Controller System](coppeliasim/RPC_CONTROLLER_SYSTEM.md)
 9. [CoppeliaSim RPC Controller TODO](coppeliasim/RPC_CONTROLLER_TODO.md)
-10. [Project Plan](PROJECT_PLAN.md)
-11. [Workspace Map](WORKSPACE_MAP.md)
+10. [RL Y-Transport Controller (PPO)](coppeliasim/RL_Y_TRANSPORT.md)
+11. [Torque diagnostics & CoppeliaSim usage (WSL)](coppeliasim/TORQUE_DIAGNOSTICS.md)
+12. [Project Plan](PROJECT_PLAN.md)
+13. [Workspace Map](WORKSPACE_MAP.md)
 
 ## Active Code Anchors
 
@@ -33,6 +37,7 @@ Read these in order:
 | ROS 2 bridge scaffold | `ros2_ws/src/ur5_x_axis_controller_ros/` | ROS wrapper, CoppeliaSim adapter, config. |
 | CoppeliaSim runtime | `third_party/coppelia_runtime/` | Repo-local CoppeliaSim install. |
 | Coppelia Python deps | `third_party/coppelia_pydeps/` | Shared Python dependency anchor for ZMQ RPC. |
+| RL training (PPO) | `rl/` | Gymnasium env, PPO trainer, eval script, `config.yaml`. |
 | Current outputs | `outputs/control_runs/` | Traces, logs, frame dumps, probe summaries. |
 | Current videos | `demonstration_videos/ur5e_coppeliasim/` | CoppeliaSim validation videos. |
 | Archived MuJoCo reference | `mujoco_menagerie/`, `simulation/run_x_acceleration_transport.py`, `controller_core/transport_lqr.py` | Historical reference only; do not use for active controller development. |

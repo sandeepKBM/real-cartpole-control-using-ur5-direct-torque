@@ -794,7 +794,10 @@ def acceleration_transport_controller(
     hold_axis_weight: float = 100.0,
     orientation_weight: float = 64.0,
     hold_axis_gain: float = 8.0,
+    fixed_axis_hold_gains: dict[int, float] | None = None,
+    fixed_axis_hold_weights: dict[int, float] | None = None,
     posture_target: np.ndarray | None = None,
+    joint_tau_limit_nm: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """
     Axis-agnostic acceleration-commanded transport in the world frame.
@@ -845,12 +848,16 @@ def acceleration_transport_controller(
 
     translation_weights = np.full(3, float(hold_axis_weight), dtype=np.float64)
     translation_weights[axis_idx] = float(move_axis_weight)
+    hold_weights = fixed_axis_hold_weights or {}
+    for idx in fixed_axes:
+        if int(idx) in hold_weights:
+            translation_weights[int(idx)] = float(hold_weights[int(idx)])
     translation_des = np.zeros(3, dtype=np.float64)
     translation_des[axis_idx] = v_axis_target
+    hold_gains = fixed_axis_hold_gains or {}
     for idx in fixed_axes:
-        translation_des[idx] = float(
-            hold_axis_gain * (fixed_position[idx] - tool_pos[idx])
-        )
+        gain = float(hold_gains.get(int(idx), hold_axis_gain))
+        translation_des[idx] = float(gain * (fixed_position[idx] - tool_pos[idx]))
 
     a_blocks: list[np.ndarray] = []
     b_blocks: list[np.ndarray] = []
@@ -895,7 +902,10 @@ def acceleration_transport_controller(
     ctrl = _apply_joint_limit_guardrails(ctrl_prev, delta, ctrl_lower, ctrl_upper)
 
     tau_est_full = SERVO_KP * (ctrl - q) - SERVO_KD * qvel
-    limit_full = SERVO_FORCE_LIMIT * float(torque_headroom)
+    if joint_tau_limit_nm is not None:
+        limit_full = np.asarray(joint_tau_limit_nm, dtype=np.float64).reshape(6)
+    else:
+        limit_full = SERVO_FORCE_LIMIT * float(torque_headroom)
     abs_tau_ratio = np.abs(tau_est_full) / np.maximum(limit_full, 1e-9)
     torque_ratio = float(np.max(abs_tau_ratio))
     scale_torque = 1.0 if torque_ratio <= 1.0 else 1.0 / torque_ratio

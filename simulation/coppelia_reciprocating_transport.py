@@ -229,6 +229,19 @@ def reciprocating_ik_task_weights() -> dict[str, float]:
     }
 
 
+def y_transport_ik_task_weights() -> dict[str, float]:
+    """World-Y (green) torque transport: stiff X/Z plane hold at ee_pos0."""
+    return {
+        "move_axis_weight": 36.0,
+        "hold_axis_weight": 820.0,
+        "orientation_weight": 340.0,
+        "hold_axis_gain": 12.0,
+        "fixed_axis_hold_gains": {0: 32.0, 2: 145.0},
+        "fixed_axis_hold_weights": {0: 820.0, 2: 2200.0},
+        "joint_speed_limit_scale": 0.88,
+    }
+
+
 def slew_axis_reference(
     prev_offset_m: float,
     target_offset_m: float,

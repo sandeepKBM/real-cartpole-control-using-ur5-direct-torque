@@ -479,6 +479,44 @@ Update it whenever a new workflow becomes reliable, a failure mode becomes clear
   or inspect the pre-motion posture torques before changing the transport solver
   sign or gains.
 
+## Gravity Compensation Calibration (2026-06-25)
+
+- **MuJoCo bias at scale=1.0 is optimal.** Multi-joint probe shows dz=+0.007m over 50 steps.
+- **Scale=1.5 is catastrophic.** Multi-joint probe shows dz=-0.754m (arm collapses).
+- Single-joint probes are misleading because other joints compensate. Always test with all 6 joints.
+- CoppeliaSim UR5.ttm total mass ≈ 41.1 kg (vs MuJoCo UR5e ≈ 21.3 kg).
+- Native RNEA gravity computation from extracted link masses was attempted and rejected (compound shapes produce incorrect torques).
+- `sim.getJointForce()` returns 0.0 in dynamic torque mode on this build. Do not use for gravity learning.
+- The runner now accepts `--gravity-scale` (default 1.0) and `--cartesian-z-kp/kd/ki` for Cartesian Z feedback via J^T.
+- The warmup hold gains are now kp=300, kd=40 (from kp=100, kd=20) to reduce steady-state gravity model offset.
+
+## WSL Y-Transport Launcher
+
+- `simulation/run_torque_y_transport_wsl.sh` is the primary launcher on WSL.
+- Key new env vars: `GRAVITY_SCALE`, `CART_Z_KP`, `CART_Z_KD`, `CART_Z_KI`.
+- The launcher uses `simulation/env_wsl_local.sh` to resolve CoppeliaSim and Python paths.
+- Documentation: `docs/coppeliasim/TORQUE_DIAGNOSTICS.md` (includes CoppeliaSim usage guide).
+
+## RL Y-Transport (PPO, 2026-06-25)
+
+- **Docs:** `docs/coppeliasim/RL_Y_TRANSPORT.md`
+- **Code:** `rl/coppelia_y_transport_env.py`, `rl/train_ppo.py`, `rl/eval_policy.py`, `rl/config.yaml`
+- **Train:** `bash simulation/launch_rl_training_wsl.sh` (env `TIMESTEPS=500000` for shorter runs)
+- **Smoke:** `bash simulation/run_rl_smoke_test.sh`
+- **Eval:** `bash simulation/run_rl_eval_wsl.sh`
+- **Deps (WSL):** `python3 -m pip install stable-baselines3 gymnasium tensorboard`
+- **CoppeliaSim launch:** Do **not** use `-h` on WSL — sim exits after ZMQ starts. Launch without scene arg (same as `run_torque_y_transport_wsl.sh`); Python loads `UR5.ttm` over ZMQ.
+- **Outputs:** `outputs/rl_logs/`, `outputs/rl_models/ppo_y_transport.zip`, `outputs/rl_eval/eval_summary.json`
+- **Why RL:** Model-based gravity + Cartesian Z PID held Z to ~34 mm but could not sustain full Y sweeps; RL learns compensation from state without explicit gravity model.
+- **Warm-start:** Residual baseline uses hold PD + MuJoCo `qfrc_bias` gravity (same as model-based path); see `rl/baseline_controller.py`.
+
+## Do Not Recreate These Gravity Bugs
+
+- Do not set `gravity_scale` to 1.5 or 1.8 based on single-joint probes. Always test multi-joint.
+- Do not use native RNEA gravity computed from `sim.getShapeMass()` + `sim.getShapeInertia()` — the CoppeliaSim UR5.ttm has compound shapes that make simple mass-weighted COM computation inaccurate.
+- Do not rely on `sim.getJointForce()` in dynamic torque mode — it returns 0.0 on this build.
+- Do not add gravity compensation twice. The QP controller adds it internally; the runner should add it only in the IK PD / warmup paths.
+
 ## Update Rule
 
 Whenever a new reliable command, launcher, env path, or failure signature is discovered, append it here before moving on.

@@ -1,60 +1,54 @@
-# Cart-pole MPC outer loop for CoppeliaSim torque transport.
+# Direct-torque preset: world-Y transport (green-on-green), locked shoulder pan.
+# Seeds and task frame match config/coppeliasim_movement_primitives.yaml.
 
 controller:
   control_rate_hz: 100
-
-  target_x_step_max_m: 0.02
-  target_x_velocity_limit_mps: 0.04
-
   use_gravity_compensation: true
-
+  gravity_compensation_source: mujoco
+  gravity_compensation_sign: -1.0
   jacobian_singular_cond_max: 100000.0
+  torque_headroom: 0.82
 
   gains:
-    kp_x: 10.0
-    kd_x: 4.0
-    kp_y: 32.0
-    kd_y: 8.0
-    kp_z: 48.0
-    kd_z: 10.0
-    kp_rot: 12.0
-    kd_rot: 3.0
-    kp_posture: 0.5
-    kd_posture: 0.15
-    kd_joint: 0.35
+    kp_x: 60.0
+    kd_x: 12.0
+    kp_y: 60.0
+    kd_y: 12.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 10.0
+    kd_rot: 2.0
+    kp_posture: 4.0
+    kd_posture: 2.0
+    kd_joint: 3.0
 
   torque_limits_initial:
     shoulder_pan_joint: 8.0
-    shoulder_lift_joint: 8.0
-    elbow_joint: 8.0
-    wrist_1_joint: 2.5
-    wrist_2_joint: 2.5
-    wrist_3_joint: 2.5
+    shoulder_lift_joint: 12.0
+    elbow_joint: 12.0
+    wrist_1_joint: 4.0
+    wrist_2_joint: 4.0
+    wrist_3_joint: 4.0
 
   torque_limits_after_stable:
-    shoulder_pan_joint: 20.0
-    shoulder_lift_joint: 20.0
-    elbow_joint: 20.0
-    wrist_1_joint: 5.0
-    wrist_2_joint: 5.0
-    wrist_3_joint: 5.0
+    shoulder_pan_joint: 30.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
 
   torque_limits_mode: "after_stable"
 
-  torque_headroom: 0.65
-
   torque_rate_limit_nm_per_sec:
-    shoulder_pan_joint: 120.0
-    shoulder_lift_joint: 120.0
-    elbow_joint: 120.0
-    wrist_1_joint: 45.0
-    wrist_2_joint: 45.0
-    wrist_3_joint: 45.0
+    shoulder_pan_joint: 500.0
+    shoulder_lift_joint: 1000.0
+    elbow_joint: 1000.0
+    wrist_1_joint: 500.0
+    wrist_2_joint: 500.0
+    wrist_3_joint: 500.0
 
-  torque_lowpass_alpha: 0.22
-
-  qp_posture_regularization: 0.35
-  qp_enforce_velocity_bounds: true
+  torque_lowpass_alpha: 0.15
 
 coppeliasim:
   host: "127.0.0.1"
@@ -62,9 +56,6 @@ coppeliasim:
 
   startup_joint_positions_rad:
     [0.0, 0.0443244063, -1.67570517, 5.09435844, -6.28345754, 5.96178335]
-
-  spawn_pendulum: true
-  pendulum_pole_length_m: 0.4
 
   ee_object_name: "/UR5/UR5_connection"
   ee_object_name_alternates:
@@ -95,18 +86,19 @@ coppeliasim:
     fallback_large_velocity_rad_s: 10.0
 
   jacobian:
-    source: "auto"
+    source: numerical
     numerical_epsilon: 1.0e-5
 
   publish_rate_hz: 100.0
   step_simulation_manually: false
 
 safety:
-  max_abs_orthogonal_drift_m: 0.10
-  max_abs_y_drift_m: 0.45
-  max_abs_z_drift_m: 0.10
-  max_orientation_error_rad: 0.35
-  max_joint_velocity_radps: 3.5
+  # Y is the transport axis; X and Z are held via max_abs_orthogonal_drift_m.
+  max_abs_orthogonal_drift_m: 0.25
+  max_abs_y_drift_m: 0.50
+  max_abs_z_drift_m: 0.25
+  max_orientation_error_rad: 1.0
+  max_joint_velocity_radps: 3.0
   max_axis_error_growth_steps: 200
   emergency_stop_on_nan: true
   emergency_stop_on_joint_limit: false

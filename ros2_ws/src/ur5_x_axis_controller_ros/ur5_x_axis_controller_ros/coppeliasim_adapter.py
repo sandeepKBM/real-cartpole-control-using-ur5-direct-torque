@@ -592,6 +592,17 @@ class CoppeliaSimURAdapter:
             },
         }
 
+    def read_joint_forces(self) -> np.ndarray:
+        """Read per-joint applied force/torque along the joint axis (Nm or N)."""
+        assert self._sim is not None
+        forces = np.zeros(len(self._joint_handles), dtype=np.float64)
+        for idx, jh in enumerate(self._joint_handles):
+            try:
+                forces[idx] = float(self._sim.getJointForce(jh.handle))
+            except Exception:
+                forces[idx] = float("nan")
+        return forces
+
     def _apply_torque_single(self, handle: int, tau: float) -> str:
         """Apply torque to one joint; return the CoppeliaSim API mode used."""
         assert self._sim is not None

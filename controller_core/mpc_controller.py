@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .cartpole_linear_model import CartPoleLinearModel
+from .box_qp import solve_box_qp
 from .controller_interfaces import CommandMode, ControllerCommand, ControllerState, NominalController
 
 
@@ -52,41 +53,6 @@ def _build_prediction_matrices(
                 a_j = a_d @ a_j
             gamma[row, j * n_input : (j + 1) * n_input] = a_j @ b_d
     return phi, gamma
-
-
-def _solve_box_qp(
-    hessian: np.ndarray,
-    linear: np.ndarray,
-    lower: np.ndarray,
-    upper: np.ndarray,
-    *,
-    max_iters: int = 80,
-    tol: float = 1e-8,
-) -> np.ndarray:
-    """Solve min 0.5 x' H x + f' x subject to lower <= x <= upper."""
-    h = 0.5 * (np.asarray(hessian, dtype=np.float64) + np.asarray(hessian, dtype=np.float64).T)
-    f = np.asarray(linear, dtype=np.float64).reshape(-1)
-    lo = np.asarray(lower, dtype=np.float64).reshape(-1)
-    hi = np.asarray(upper, dtype=np.float64).reshape(-1)
-    n = int(f.shape[0])
-    if h.shape != (n, n):
-        raise ValueError(f"Hessian shape mismatch: {h.shape} vs n={n}")
-    reg = 1.0e-8
-    h = h + reg * np.eye(n, dtype=np.float64)
-    try:
-        x = -np.linalg.solve(h, f)
-    except np.linalg.LinAlgError:
-        x = -np.linalg.lstsq(h, f, rcond=None)[0]
-    x = np.clip(x, lo, hi)
-    step = 1.0 / max(float(np.max(np.abs(h))), 1.0)
-    for _ in range(max(1, int(max_iters))):
-        grad = h @ x + f
-        x_new = np.clip(x - step * grad, lo, hi)
-        if float(np.max(np.abs(x_new - x))) <= float(tol):
-            x = x_new
-            break
-        x = x_new
-    return x
 
 
 @dataclass
@@ -209,7 +175,7 @@ class CartPoleMPCController(NominalController):
         x_free = self.phi @ x_err
         ref_stack = self._reference_stack(state)
         linear = self.gamma.T @ self.q_bar @ (x_free - ref_stack)
-        u_seq = _solve_box_qp(
+        u_seq = solve_box_qp(
             self.hessian,
             linear,
             self.input_lower,

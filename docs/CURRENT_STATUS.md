@@ -1,12 +1,17 @@
 # Current Status
 
-Last updated: 2026-06-23 (latest live probes showed the external ZMQ lane connects, seeds a known-good pose, the ROS 2 legacy positional controller can execute a real X target step, the extracted lab workspace guardrail overlay/checker is in place, and the direct impedance / `ik_joint_pd` long sweeps still fail the live safety envelope)
+Last updated: 2026-06-25 (RL PPO pipeline added for Y-axis transport; model-based Z PID still insufficient for full sweeps)
 
 ## Active Objective
 
-The current goal is to make the UR5 arm move in CoppeliaSim using the existing single-axis torque controller.
+The current goal is stable **Y-axis end-effector transport** in CoppeliaSim under direct joint torques.
 
-MuJoCo transport / LQR experiments are archived reference material only. Do not use MuJoCo simulation/controller paths for active work in this workspace unless a task explicitly asks for that.
+Primary paths:
+
+1. **RL (active development):** PPO policy trained in CoppeliaSim — `rl/`, `simulation/launch_rl_training_wsl.sh`, [RL_Y_TRANSPORT.md](coppeliasim/RL_Y_TRANSPORT.md)
+2. **Model-based (baseline / comparison):** Cartesian impedance + IK joint PD — `simulation/run_torque_y_transport_wsl.sh`, [TORQUE_DIAGNOSTICS.md](coppeliasim/TORQUE_DIAGNOSTICS.md)
+
+MuJoCo transport / LQR experiments are archived reference material only.
 
 The controller we care about right now is the portable Cartesian impedance torque controller:
 

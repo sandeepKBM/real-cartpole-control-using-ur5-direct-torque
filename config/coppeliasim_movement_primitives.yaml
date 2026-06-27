@@ -1,0 +1,46 @@
+# Locked CoppeliaSim movement primitives (validated via Lua Y full-sweep video).
+# Use for external ZMQ direct-torque runs — NOT for position-servo Lua capture.
+#
+# Reference rule: EE green axis slides parallel to base green (world Y).
+# Shoulder pan (/UR5/joint) stays fixed at 0 rad.
+
+movement_primitives:
+  transport_axis: y
+  transport_axis_label: green
+  shoulder_pan_locked_rad: 0.0
+  ee_target_z_m: 0.4
+
+  task_frame:
+    mode: mujoco_attachment_dummy
+    attachment_offset_m: [0.0, 0.0, -0.2]
+    # Same as Lua addon TASK_FRAME_ATTACHMENT_QUAT_WXYZ (normalized).
+    attachment_quat_wxyz: [-0.7071067811865475, 0.7071067811865475, 0.0, 0.0]
+
+  # Transport-plane seed from coppeliasim_ur5_wsl_y_full_sweep_summary.json
+  q_start_rad:
+    - 0.0
+    - 0.0443244063
+    - -1.67570517
+    - 5.09435844
+    - -6.28345754
+    - 5.96178335
+
+  # Torque bring-up: cart-pole MPC outer loop + qp_torque inner (box QP on tau).
+  torque_transport:
+    outer_profile: mpc
+    inner_torque_policy: ik_joint_pd
+    spawn_coppelia_pendulum: true
+    pendulum_pole_length_m: 0.4
+    mpc_horizon: 20
+    mpc_q_theta: 180.0
+    target_displacement_m: 0.04
+    settle_duration_s: 0.0
+    move_duration_s: 14.0
+    a_axis_max_mps2: 0.028
+    v_axis_max_mps: 0.022
+    config: ros2_ws/src/ur5_x_axis_controller_ros/config/controller_coppelia_mpc.yaml
+    wsl_launcher: simulation/run_torque_y_transport_wsl.sh
+
+  # Full-span visual reference (Lua position-servo only).
+  lua_reference_video: demonstration_videos/ur5e_coppeliasim/coppeliasim_ur5_wsl_y_full_sweep.mp4
+  lua_reference_axis_net_displacement_m: 0.3480875

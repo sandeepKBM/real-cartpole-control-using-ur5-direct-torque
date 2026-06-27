@@ -176,6 +176,16 @@ def quat_multiply_wxyz(q_left: np.ndarray, q_right: np.ndarray) -> np.ndarray:
     )
 
 
+def world_linear_jacobian(
+    jacobian_pos: np.ndarray,
+    tool_rot_world: np.ndarray,
+) -> np.ndarray:
+    """Map a body-frame linear Jacobian to world frame (``J_w = R @ J_b``)."""
+    jacobian_pos = np.asarray(jacobian_pos, dtype=np.float64).reshape(3, -1)
+    rot = np.asarray(tool_rot_world, dtype=np.float64).reshape(3, 3)
+    return rot @ jacobian_pos
+
+
 def orientation_error_vec_wxyz(quat_des: np.ndarray, quat_cur: np.ndarray) -> np.ndarray:
     """3-vector orientation error for PD (world-frame convention).
 

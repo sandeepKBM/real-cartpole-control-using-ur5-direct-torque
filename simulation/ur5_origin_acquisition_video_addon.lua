@@ -31,6 +31,41 @@ else
     SHOW_EE_TRIAD = SHOW_EE_TRIAD ~= '0'
 end
 local TASK_FRAME_MODE = string.lower(os.getenv('TASK_FRAME_MODE') or 'ee_object')
+local USE_MUJOCO_TARGET_ORIENTATION_RAW = os.getenv('USE_MUJOCO_TARGET_ORIENTATION')
+local USE_MUJOCO_TARGET_ORIENTATION = false
+if USE_MUJOCO_TARGET_ORIENTATION_RAW == nil or USE_MUJOCO_TARGET_ORIENTATION_RAW == '' then
+    USE_MUJOCO_TARGET_ORIENTATION = (TASK_FRAME_MODE == 'mujoco_attachment_dummy')
+else
+    USE_MUJOCO_TARGET_ORIENTATION = USE_MUJOCO_TARGET_ORIENTATION_RAW ~= '0'
+end
+-- MuJoCo attachment_site axes in world (cart-pole transport frame).
+local TARGET_SITE_ROTATION_WORLD = {
+    -1.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, -1.0, 0.0,
+    0.0, -1.0, 0.0, 0.0,
+}
+-- Attachment dummy world rotation (Coppelia UR5.ttm proxy rotated +90 deg about local Z).
+local TARGET_ATTACHMENT_ROTATION_WORLD = {
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, -1.0, 0.0,
+    -1.0, 0.0, 0.0, 0.0,
+}
+local TASK_FRAME_ATTACHMENT_OFFSET = {0.0, 0.0, -0.2}
+local TASK_FRAME_ATTACHMENT_QUAT_WXYZ = {
+    -1.0,
+    1.0,
+    0.0,
+    0.0,
+}
+local LOCK_SHOULDER_PAN_RAW = os.getenv('LOCK_SHOULDER_PAN')
+local LOCK_SHOULDER_PAN = false
+if LOCK_SHOULDER_PAN_RAW == nil or LOCK_SHOULDER_PAN_RAW == '' then
+    LOCK_SHOULDER_PAN = USE_MUJOCO_TARGET_ORIENTATION
+else
+    LOCK_SHOULDER_PAN = LOCK_SHOULDER_PAN_RAW ~= '0'
+end
+local SHOULDER_PAN_JOINT_INDEX = 1
+local shoulderPanLockedRad = 0.0
 local START_AT_TRANSPORT_PLANE = os.getenv('START_AT_TRANSPORT_PLANE') == '1'
 local MUJOCO_LIKE_X_SWEEP = os.getenv('MUJOCO_LIKE_X_SWEEP') == '1'
 local MUJOCO_LIKE_SWEEP_LEGS = math.max(1, tonumber(os.getenv('MUJOCO_LIKE_SWEEP_LEGS') or '3'))
@@ -205,6 +240,13 @@ local function applyEnvOverrides()
         Q_START = copyJointVector(Q_ORIGIN)
         Q_START_SOURCE = 'transport_plane_start_matches_origin'
     end
+
+    local panLocked = tonumber(os.getenv('SHOULDER_PAN_LOCKED_RAD'))
+    if panLocked ~= nil then
+        shoulderPanLockedRad = panLocked
+    else
+        shoulderPanLockedRad = Q_ORIGIN[SHOULDER_PAN_JOINT_INDEX]
+    end
 end
 
 local function clamp(x, lo, hi)
@@ -262,7 +304,15 @@ local function getPose()
     return {p[1], p[2], p[3]}, sim.getObjectMatrix(eeHandle, sim.handle_world)
 end
 
+local function enforceShoulderPanLock(q)
+    if LOCK_SHOULDER_PAN then
+        q[SHOULDER_PAN_JOINT_INDEX] = shoulderPanLockedRad
+    end
+    return q
+end
+
 local function setQ(q)
+    enforceShoulderPanLock(q)
     for i, h in ipairs(joints) do sim.setJointPosition(h, q[i]) end
 end
 
@@ -270,6 +320,21 @@ local function getQ()
     local q = {}
     for i, h in ipairs(joints) do q[i] = sim.getJointPosition(h) end
     return q
+end
+
+local function refreshTargetPoseFromOrigin()
+    setQ(Q_ORIGIN)
+    local p, r = getPose()
+    targetPos = {p[1], p[2], EE_TARGET_Z}
+    if USE_MUJOCO_TARGET_ORIENTATION then
+        if TASK_FRAME_MODE == 'mujoco_attachment_dummy' then
+            targetRot = TARGET_ATTACHMENT_ROTATION_WORLD
+        else
+            targetRot = TARGET_SITE_ROTATION_WORLD
+        end
+    else
+        targetRot = r
+    end
 end
 
 local function solve6(a, b)
@@ -313,21 +378,26 @@ local function solveIk(seed, pt, rt, weightsOverride, posTol, rotTol)
     local weights = weightsOverride or {1.0, 1.0, 1.0, 2.5, 2.5, 2.5}
     local pTol = posTol or 7e-4
     local rTol = rotTol or 2e-3
+    enforceShoulderPanLock(q)
     for _ = 1, 120 do
         setQ(q)
         local e, p, r = poseError(pt, rt)
         local perr, rerr = math.sqrt(e[1]^2 + e[2]^2 + e[3]^2), rotAngle(r, rt)
-        if perr < pTol and rerr < rTol then return q, true, perr, rerr end
+        if perr < pTol and rerr < rTol then return enforceShoulderPanLock(q), true, perr, rerr end
         local j = {{},{},{},{},{},{}}
         for c = 1, 6 do
-            local qp = {}
-            for k = 1, 6 do qp[k] = q[k] end
-            qp[c] = qp[c] + eps
-            setQ(qp)
-            local pp, rp = getPose()
-            local re = rotError(r, rp)
-            j[1][c], j[2][c], j[3][c] = (pp[1]-p[1])/eps, (pp[2]-p[2])/eps, (pp[3]-p[3])/eps
-            j[4][c], j[5][c], j[6][c] = re[1]/eps, re[2]/eps, re[3]/eps
+            if LOCK_SHOULDER_PAN and c == SHOULDER_PAN_JOINT_INDEX then
+                for rr = 1, 6 do j[rr][c] = 0.0 end
+            else
+                local qp = {}
+                for k = 1, 6 do qp[k] = q[k] end
+                qp[c] = qp[c] + eps
+                setQ(qp)
+                local pp, rp = getPose()
+                local re = rotError(r, rp)
+                j[1][c], j[2][c], j[3][c] = (pp[1]-p[1])/eps, (pp[2]-p[2])/eps, (pp[3]-p[3])/eps
+                j[4][c], j[5][c], j[6][c] = re[1]/eps, re[2]/eps, re[3]/eps
+            end
         end
         local a, b = {}, {}
         for c1 = 1, 6 do
@@ -347,11 +417,12 @@ local function solveIk(seed, pt, rt, weightsOverride, posTol, rotTol)
         local scale = 1.0
         if s > 0.10 then scale = 0.10 / s end
         for c = 1, 6 do q[c] = q[c] + scale*dq[c] end
+        enforceShoulderPanLock(q)
     end
     setQ(q)
     local e, _, r = poseError(pt, rt)
     local perr = math.sqrt(e[1]^2 + e[2]^2 + e[3]^2)
-    return q, false, perr, rotAngle(r, rt)
+    return enforceShoulderPanLock(q), false, perr, rotAngle(r, rt)
 end
 
 local function resolveHandles()
@@ -373,20 +444,30 @@ local function configureTaskFrame()
     local dummySize = math.max(EE_TRIAD_DUMMY_SIZE, 0.025)
     local dummy = sim.createDummy(dummySize)
     sim.setObjectAlias(dummy, 'real_cartpole_mujoco_attachment_site')
+    local quat = TASK_FRAME_ATTACHMENT_QUAT_WXYZ
+    local n = math.sqrt(quat[1]^2 + quat[2]^2 + quat[3]^2 + quat[4]^2)
+    if n > 1e-12 then
+        quat = {quat[1]/n, quat[2]/n, quat[3]/n, quat[4]/n}
+    end
     local poseSet = false
     if sim.setObjectPose ~= nil and sim.handleflag_wxyzquat ~= nil then
         poseSet = pcall(function()
             sim.setObjectParent(dummy, parentHandle, true)
             sim.setObjectPose(
                 dummy + sim.handleflag_wxyzquat,
-                {0.0, 0.0, -0.2, -0.7071067811865475, 0.7071067811865475, 0.0, 0.0},
+                {
+                    TASK_FRAME_ATTACHMENT_OFFSET[1],
+                    TASK_FRAME_ATTACHMENT_OFFSET[2],
+                    TASK_FRAME_ATTACHMENT_OFFSET[3],
+                    quat[1], quat[2], quat[3], quat[4],
+                },
                 parentHandle
             )
         end)
     end
     if not poseSet then
         sim.setObjectParent(dummy, parentHandle, true)
-        sim.setObjectPosition(dummy, parentHandle, {0.0, 0.0, -0.2})
+        sim.setObjectPosition(dummy, parentHandle, TASK_FRAME_ATTACHMENT_OFFSET)
         sim.setObjectOrientation(dummy, parentHandle, {0.0, 0.0, math.pi * 0.5})
     end
     eeHandle = dummy
@@ -395,9 +476,9 @@ local function configureTaskFrame()
         mujoco_attachment_dummy = true,
         handle = eeHandle,
         parent_handle = parentHandle,
-        local_offset_m = {0.0, 0.0, -0.2},
-        local_orientation_rad = {0.0, 0.0, math.pi * 0.5},
-        local_pose_wxyz = {0.0, 0.0, -0.2, -0.7071067811865475, 0.7071067811865475, 0.0, 0.0},
+        local_offset_m = TASK_FRAME_ATTACHMENT_OFFSET,
+        local_orientation_quat_wxyz = quat,
+        use_mujoco_target_orientation = USE_MUJOCO_TARGET_ORIENTATION,
     }
 end
 
@@ -833,6 +914,9 @@ local function writeSummary(finalP, finalR, finalQ, initialP, initialR, originRe
         '  "sweep_fixed_axis_2_label": "' .. fixedAxis2Name .. '",',
         '  "task_frame_mode": "' .. tostring(taskFrameSummary.mode or TASK_FRAME_MODE) .. '",',
         '  "task_frame_mujoco_attachment_dummy": ' .. tostring(taskFrameSummary.mujoco_attachment_dummy == true) .. ',',
+        '  "use_mujoco_target_orientation": ' .. tostring(USE_MUJOCO_TARGET_ORIENTATION) .. ',',
+        '  "lock_shoulder_pan": ' .. tostring(LOCK_SHOULDER_PAN) .. ',',
+        '  "shoulder_pan_locked_rad": ' .. string.format('%.9g', shoulderPanLockedRad) .. ',',
         '  "mujoco_like_sweep": ' .. tostring(MUJOCO_LIKE_X_SWEEP) .. ',',
         '  "start_at_transport_plane": ' .. tostring(START_AT_TRANSPORT_PLANE) .. ',',
         '  "base_on_ground": ' .. tostring(baseOnGround) .. ',',
@@ -1005,9 +1089,8 @@ local function writeSweepSummary(rows, bestIndex)
 end
 
 local function runRangeSweep()
-    setQ(Q_ORIGIN)
-    local originPos
-    originPos, targetRot = getPose()
+    refreshTargetPoseFromOrigin()
+    local originPos = {targetPos[1], targetPos[2], targetPos[3]}
     local rows, bestIndex, bestSpan = {}, 1, -1.0
     local count = math.floor((SWEEP_Z_MAX - SWEEP_Z_MIN) / math.max(SWEEP_Z_STEP, 1e-6) + 0.5)
     for i = 0, count do
@@ -1053,9 +1136,7 @@ local function qAt(u)
 end
 
 local function captureMujocoLikeSweep()
-    setQ(Q_ORIGIN)
-    targetPos, targetRot = getPose()
-    targetPos[3] = EE_TARGET_Z
+    refreshTargetPoseFromOrigin()
     if START_AT_TRANSPORT_PLANE then
         local planeQ, planeOk, planePosErr, planeRotErr = solveIk(Q_ORIGIN, targetPos, targetRot)
         Q_START = planeQ
@@ -1135,9 +1216,7 @@ local function capture()
         captureMujocoLikeSweep()
         return
     end
-    setQ(Q_ORIGIN)
-    targetPos, targetRot = getPose()
-    targetPos[3] = EE_TARGET_Z
+    refreshTargetPoseFromOrigin()
     if START_AT_TRANSPORT_PLANE then
         local planeQ, planeOk, planePosErr, planeRotErr = solveIk(Q_ORIGIN, targetPos, targetRot)
         Q_START = planeQ
