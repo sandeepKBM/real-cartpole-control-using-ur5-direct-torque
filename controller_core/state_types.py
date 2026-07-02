@@ -28,6 +28,14 @@ class RobotState(TypedDict, total=False):
         ``[w, x, y, z]`` in the world frame.
       - ``target_x`` (float): commanded world-X target for the end effector.
       - ``target_x_vel`` (float): optional desired world-X target velocity.
+      - ``target_axis`` (float): optional transport-axis target used when a
+        controller exposes a selected world-axis target rather than X-only.
+      - ``target_axis_vel`` (float): optional transport-axis target velocity.
+      - ``target_ee_pos`` (np.ndarray shape [3]): optional full target EE pose
+        in world coordinates.
+      - ``target_ee_vel`` (np.ndarray shape [3]): optional full target EE
+        velocity in world coordinates.
+      - ``transport_axis_index`` (int): selected transport axis index.
 
     Optional keys:
       - ``ee_lin_vel`` (np.ndarray shape [3]): world-frame linear velocity.
@@ -45,6 +53,12 @@ class RobotState(TypedDict, total=False):
       - ``hold_current_pose`` (bool): optional settle-phase hint that asks the
         impedance controller to zero its task-space wrench against the current
         pose before transport begins.
+      - ``reference_quat`` (np.ndarray shape [4]): optional pose reference for
+        reward/diagnostic code.
+      - ``hold_all_cartesian_axes`` (bool): optional hint for full Cartesian
+        holding.
+      - ``hold_orthogonal_axes_only`` (bool): optional hint for single-axis
+        transport with orthogonal-axis hold.
     """
 
     time: float
@@ -56,10 +70,18 @@ class RobotState(TypedDict, total=False):
     ee_ang_vel: np.ndarray
     target_x: float
     target_x_vel: float
+    target_axis: float
+    target_axis_vel: float
+    target_ee_pos: np.ndarray
+    target_ee_vel: np.ndarray
     jacobian: np.ndarray
     jacobian_pos: np.ndarray
     jacobian_rot: np.ndarray
     gravity_torque: np.ndarray
+    transport_axis_index: int
+    reference_quat: np.ndarray
+    hold_all_cartesian_axes: bool
+    hold_orthogonal_axes_only: bool
 
 
 ControlMode = Literal["torque", "cartesian_x_force"]
@@ -143,8 +165,24 @@ def as_robot_state(raw: dict[str, Any], num_joints: int = 6) -> RobotState:
         state["jacobian"] = _asarray_2d(raw["jacobian"], "jacobian", 6, num_joints)
     if "target_x_vel" in raw and raw["target_x_vel"] is not None:
         state["target_x_vel"] = float(raw["target_x_vel"])
+    if "target_axis" in raw and raw["target_axis"] is not None:
+        state["target_axis"] = float(raw["target_axis"])
+    if "target_axis_vel" in raw and raw["target_axis_vel"] is not None:
+        state["target_axis_vel"] = float(raw["target_axis_vel"])
+    if "target_ee_pos" in raw and raw["target_ee_pos"] is not None:
+        state["target_ee_pos"] = _asarray_1d(raw["target_ee_pos"], "target_ee_pos", 3)
+    if "target_ee_vel" in raw and raw["target_ee_vel"] is not None:
+        state["target_ee_vel"] = _asarray_1d(raw["target_ee_vel"], "target_ee_vel", 3)
     if "hold_current_pose" in raw and raw["hold_current_pose"] is not None:
         state["hold_current_pose"] = bool(raw["hold_current_pose"])
+    if "transport_axis_index" in raw and raw["transport_axis_index"] is not None:
+        state["transport_axis_index"] = int(raw["transport_axis_index"])
+    if "reference_quat" in raw and raw["reference_quat"] is not None:
+        state["reference_quat"] = _asarray_1d(raw["reference_quat"], "reference_quat", 4)
+    if "hold_all_cartesian_axes" in raw and raw["hold_all_cartesian_axes"] is not None:
+        state["hold_all_cartesian_axes"] = bool(raw["hold_all_cartesian_axes"])
+    if "hold_orthogonal_axes_only" in raw and raw["hold_orthogonal_axes_only"] is not None:
+        state["hold_orthogonal_axes_only"] = bool(raw["hold_orthogonal_axes_only"])
 
     return state
 
@@ -178,8 +216,24 @@ def as_impedance_robot_state(raw: dict[str, Any], num_joints: int = 6) -> RobotS
     }
     if "target_x_vel" in raw and raw["target_x_vel"] is not None:
         state["target_x_vel"] = float(raw["target_x_vel"])
+    if "target_axis" in raw and raw["target_axis"] is not None:
+        state["target_axis"] = float(raw["target_axis"])
+    if "target_axis_vel" in raw and raw["target_axis_vel"] is not None:
+        state["target_axis_vel"] = float(raw["target_axis_vel"])
+    if "target_ee_pos" in raw and raw["target_ee_pos"] is not None:
+        state["target_ee_pos"] = _asarray_1d(raw["target_ee_pos"], "target_ee_pos", 3)
+    if "target_ee_vel" in raw and raw["target_ee_vel"] is not None:
+        state["target_ee_vel"] = _asarray_1d(raw["target_ee_vel"], "target_ee_vel", 3)
     if "gravity_torque" in raw and raw["gravity_torque"] is not None:
         state["gravity_torque"] = _asarray_1d(raw["gravity_torque"], "gravity_torque", num_joints)
     if "hold_current_pose" in raw and raw["hold_current_pose"] is not None:
         state["hold_current_pose"] = bool(raw["hold_current_pose"])
+    if "transport_axis_index" in raw and raw["transport_axis_index"] is not None:
+        state["transport_axis_index"] = int(raw["transport_axis_index"])
+    if "reference_quat" in raw and raw["reference_quat"] is not None:
+        state["reference_quat"] = _asarray_1d(raw["reference_quat"], "reference_quat", 4)
+    if "hold_all_cartesian_axes" in raw and raw["hold_all_cartesian_axes"] is not None:
+        state["hold_all_cartesian_axes"] = bool(raw["hold_all_cartesian_axes"])
+    if "hold_orthogonal_axes_only" in raw and raw["hold_orthogonal_axes_only"] is not None:
+        state["hold_orthogonal_axes_only"] = bool(raw["hold_orthogonal_axes_only"])
     return state
