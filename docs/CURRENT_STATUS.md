@@ -1,35 +1,47 @@
 # Current Status
 
-Last updated: 2026-06-25 (RL PPO pipeline added for Y-axis transport; model-based Z PID still insufficient for full sweeps)
+Last updated: 2026-07-02 (added pointer to 2026-07-01 diagnostic-only failure analysis)
+
+## Latest diagnostic (read this first)
+
+A diagnosis-only investigation on 2026-07-01 (no controller/code changes) produced
+[../DIAGNOSTIC_real_cartpole_torque_control_questions.md](../DIAGNOSTIC_real_cartpole_torque_control_questions.md).
+Leading hypothesis (high confidence; gravity-sign, unit, and joint-order bugs were
+ruled out with high/medium confidence): the impedance controller is structurally too
+simple (no mass matrix, no Coriolis compensation, no inverse dynamics), combined with
+safety envelopes (`|qd| > 1.5 rad/s`, drift/axis-error guards) tight enough to trip
+before the controller can settle. The report's own proposed next steps (not yet run):
+
+1. `tools/audit_ur5e_mujoco_gravity_torque.py` — static gravity-hold check at the
+   transport start pose to confirm/rule out model mismatch as the drift source.
+2. `tools/ur5e_move_hold_transport.py` — separate move-phase vs. hold-phase metrics
+   to test whether the *hold* phase specifically is what destabilizes.
 
 ## Active Objective
 
-The current goal is stable **Y-axis end-effector transport** in CoppeliaSim under direct joint torques.
-
-Primary paths:
-
-1. **RL (active development):** PPO policy trained in CoppeliaSim — `rl/`, `simulation/launch_rl_training_wsl.sh`, [RL_Y_TRANSPORT.md](coppeliasim/RL_Y_TRANSPORT.md)
-2. **Model-based (baseline / comparison):** Cartesian impedance + IK joint PD — `simulation/run_torque_y_transport_wsl.sh`, [TORQUE_DIAGNOSTICS.md](coppeliasim/TORQUE_DIAGNOSTICS.md)
-
-MuJoCo transport / LQR experiments are archived reference material only.
-
-The controller we care about right now is the portable Cartesian impedance torque controller:
+The current goal on this server copy is **MuJoCo UR5e gravity-compensated
+residual-torque transport tuning** in simulation. The active lane is:
 
 ```text
-controller_core/x_axis_cartesian_impedance.py
+tools/ur5e_mujoco_torque_experiments.py
+tools/compare_ur5e_mujoco_controllers.py
+tools/ur5e_x_frame_envelope.py
+tools/tune_ur5e_residual_impedance_transport.py
+tools/ur5e_move_hold_transport.py
+simulation/ur5e_mujoco_torque.py
 ```
 
-The active CoppeliaSim runner is:
+This phase is strictly simulation-only. It validates that the UR5e MJCF is
+truly torque-actuated, reuses the existing controller-core torque laws, and
+develops the impedance controller under gravity-compensated residual torque
+(`tau_controller + tau_gravity -> tau_applied`). Raw mode remains available
+only for validation and anti-cheating sanity checks. The residual impedance
+tuner now stages hold diagnostics, small X transport, envelope extension, and
+move-and-hold transport without touching RL.
 
-```text
-simulation/run_coppeliasim_x_axis_headless.py
-```
-
-The active launcher is:
-
-```text
-simulation/launch_coppeliasim_x_axis_headless.sh
-```
+CoppeliaSim transport / torque work remains in the tree as a separate
+historical/reference path for other tasks, but it is not the active objective
+for the current branch work.
 
 ## What Is Done
 
@@ -46,6 +58,11 @@ simulation/launch_coppeliasim_x_axis_headless.sh
 - The MuJoCo-like Coppelia sweep can now run along the green axis (`MUJOCO_LIKE_SWEEP_AXIS=y`) with a visible RGB triad on the grounded base as well as the end effector.
 - The Coppelia X-range height sweep command works and reports the best fixed-Z height for reachable world-X span under the current fixed Y/reference-orientation guardrails.
 - The fixed-Z acceleration-transport visible-video path is now guarded against false positives. It captures frames and writes metrics, but the Coppelia port is not accepted unless `success=true` with the base on the ground.
+- The simulation-only MuJoCo UR5e torque lane now has true-torque validation:
+  - the torque scene loads with six torque motors and no position/velocity actuators
+  - the zero-torque-gravity anti-cheating probe reports gravity-driven motion rather than a hidden servo hold
+  - gravity-compensated residual-torque rollouts log `tau_controller`, `tau_gravity`, and `tau_applied`
+  - the residual-impedance tuner and move-and-hold runner stage hold diagnostics, small X transport, envelope extension, and move-and-hold transport under `outputs/ur5e_mujoco_torque_transport/`
 - The Lua add-on can load the UR5 model and create a camera.
 - The portable torque controller exists and has small unit/smoke tests.
 - The CoppeliaSim adapter exists and can resolve joints, read state, read Jacobian, and apply torque commands.

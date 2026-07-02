@@ -56,6 +56,21 @@ The current Coppelia video runners also accept optional `--draw-guardrails`,
 `--guardrail-config`, `--guardrail-margin-m`, and `--show-boundary-labels`
 flags to draw the same guardrail inset on rendered frames.
 
+## UR5e MuJoCo Torque Experiments
+
+The repo now also contains a dedicated simulation-only MuJoCo torque-control
+lane for UR5e controller experiments:
+
+- [`docs/simulation/ur5e_mujoco_torque_control.md`](ur5e_mujoco_torque_control.md)
+- `tools/ur5e_mujoco_torque_experiments.py`
+- `tools/ur5e_x_frame_envelope.py`
+- `simulation/ur5e_mujoco_torque.py`
+- `tools/ur5e_move_hold_transport.py`
+- `assets/ur5e_torque/ur5e_torque.xml`
+
+This path is separate from the active CoppeliaSim bring-up work and is only
+for MuJoCo torque validation / logging.
+
 ## Important CoppeliaSim Files
 
 | File | Role |

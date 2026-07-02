@@ -7,11 +7,11 @@ Update it whenever a new workflow becomes reliable, a failure mode becomes clear
 ## Project Reality
 
 - The folder name is historical. This is primarily a UR5 / UR5e control workspace, not an active cartpole project.
-- Current active work is CoppeliaSim only. Do not use MuJoCo simulation/controller paths for active debugging or development in this workspace.
-  - make the UR5 arm move in CoppeliaSim using the existing single-axis torque controller.
-  - the render-only CoppeliaSim video smoke path is done and should remain a separate baseline.
-  - the controller-driven CoppeliaSim motion path is still in progress.
-  - MuJoCo-related code, videos, and notes are historical reference only unless a task explicitly says otherwise.
+- Current active work on this server copy is the simulation-only MuJoCo UR5e true-torque evaluation lane, with gravity-compensated residual torque as the primary controller-development environment.
+  - use `simulation/ur5e_mujoco_torque.py`, `tools/ur5e_mujoco_torque_experiments.py`, `tools/ur5e_x_frame_envelope.py`, `tools/tune_ur5e_residual_impedance_transport.py`, `tools/compare_ur5e_mujoco_controllers.py`, `assets/ur5e_torque/`, and `config/ur5e_mujoco_torque.yaml` for that lane.
+  - keep raw torque mode as validation/sanity only: true-torque verification, zero-torque anti-cheating, and pulse checks.
+  - keep this lane isolated from hardware, RTDE, URScript, and CoppeliaSim controller debugging.
+  - the CoppeliaSim controller work remains in the tree as a separate historical / reference path unless a task explicitly asks for it.
 - The most important current paths are:
   - `controller_core/`
   - `simulation/`

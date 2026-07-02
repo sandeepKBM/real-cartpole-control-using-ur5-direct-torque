@@ -4,11 +4,11 @@ This workspace is currently focused on one active problem:
 
 **make the UR5 arm move in CoppeliaSim using the existing single-axis torque controller.**
 
-Workspace rule: CoppeliaSim is the only active runtime for current development. MuJoCo code, videos, and notes are historical reference only unless a task explicitly says otherwise.
+Workspace rule: CoppeliaSim remains the primary active runtime for the lab bring-up path. MuJoCo code, videos, and notes are historical reference unless a task explicitly says otherwise, but this repo also carries a dedicated simulation-only UR5e MuJoCo residual-torque transport lane, including move-and-hold tuning.
 
 **New (2026-06-25):** RL-based Y-axis transport training via PPO — see [RL Y-Transport Controller](coppeliasim/RL_Y_TRANSPORT.md).
 
-The historical folder name is misleading. Treat this as a UR5 / UR5e control workspace with ROS 2 scaffolding and an active CoppeliaSim torque-control bring-up; MuJoCo work is archived.
+The historical folder name is misleading. Treat this as a UR5 / UR5e control workspace with ROS 2 scaffolding and an active CoppeliaSim torque-control bring-up; the MuJoCo residual-torque lane is active for simulation-only transport tuning and move-and-hold checks.
 
 ## Start Here
 
@@ -19,14 +19,15 @@ Read these in order:
 3. [UR5 controller, from first principles](coppeliasim/CONTROLLER_FIRST_PRINCIPLES.md)
 4. [MuJoCo acceleration controller guardrails](coppeliasim/MUJOCO_ACCELERATION_GUARDRAILS.md) (historical reference only)
 5. [Lab workspace guardrails extracted from MuJoCo](simulation/lab_workspace_guardrails.md) (diagnostic only)
-6. [CoppeliaSim vision API notes (handle → get, buffers)](coppeliasim/COPPELIASIM_VISION_NOTES.md)
-7. [External ZMQ controller bring-up](coppeliasim/EXTERNAL_ZMQ_CONTROLLER_BRINGUP.md)
-8. [CoppeliaSim RPC Controller System](coppeliasim/RPC_CONTROLLER_SYSTEM.md)
-9. [CoppeliaSim RPC Controller TODO](coppeliasim/RPC_CONTROLLER_TODO.md)
-10. [RL Y-Transport Controller (PPO)](coppeliasim/RL_Y_TRANSPORT.md)
-11. [Torque diagnostics & CoppeliaSim usage (WSL)](coppeliasim/TORQUE_DIAGNOSTICS.md)
-12. [Project Plan](PROJECT_PLAN.md)
-13. [Workspace Map](WORKSPACE_MAP.md)
+6. [UR5e MuJoCo torque control](simulation/ur5e_mujoco_torque_control.md) (simulation-only torque experimentation lane)
+7. [CoppeliaSim vision API notes (handle → get, buffers)](coppeliasim/COPPELIASIM_VISION_NOTES.md)
+8. [External ZMQ controller bring-up](coppeliasim/EXTERNAL_ZMQ_CONTROLLER_BRINGUP.md)
+9. [CoppeliaSim RPC Controller System](coppeliasim/RPC_CONTROLLER_SYSTEM.md)
+10. [CoppeliaSim RPC Controller TODO](coppeliasim/RPC_CONTROLLER_TODO.md)
+11. [RL Y-Transport Controller (PPO)](coppeliasim/RL_Y_TRANSPORT.md)
+12. [Torque diagnostics & CoppeliaSim usage (WSL)](coppeliasim/TORQUE_DIAGNOSTICS.md)
+13. [Project Plan](PROJECT_PLAN.md)
+14. [Workspace Map](WORKSPACE_MAP.md)
 
 ## Active Code Anchors
 
