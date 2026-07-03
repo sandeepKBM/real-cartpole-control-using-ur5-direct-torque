@@ -131,6 +131,11 @@ Do-not-recreate (gravity/dynamics bugs, still relevant):
 - Do not let one simulator's dynamics model silently feed another's control loop (the
   archived CoppeliaSim lane defaulted `gravity_compensation_source="mujoco"` — that
   cross-lane coupling is the canonical example).
+- Do not `abs()` a signed target before comparing it to a signed achieved value in
+  `transport_metrics.py` (fixed 2026-07-03 in `compute_valid_move_hold_metrics`:
+  `abs(achieved - abs(target))` silently failed every negative-direction transport run).
+  `abs()` is only correct where the result is used purely as a tolerance *magnitude*
+  (e.g. `_move_hold_tolerances`'s own local copy), never in a signed subtraction.
 
 ## 5. Testing
 
