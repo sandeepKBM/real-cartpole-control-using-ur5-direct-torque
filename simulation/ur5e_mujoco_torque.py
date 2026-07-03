@@ -140,6 +140,11 @@ class MujocoUR5eTorqueAdapterConfig:
     # bias; "pinocchio" uses controller_core.model_dynamics.PinocchioUR5eDynamics
     # (verified <1e-8 Nm parity against the MuJoCo source on this MJCF).
     gravity_source: Literal["mujoco_qfrc", "pinocchio"] = "mujoco_qfrc"
+    # Adds C(q, qd) @ qd feedforward on top of gravity compensation. Historical
+    # behavior never compensated velocity-product dynamics, so this defaults off.
+    # Computed from the configured gravity_source's engine (MuJoCo: live bias minus
+    # static bias on a scratch MjData; Pinocchio: rnea-based coriolis()).
+    coriolis_feedforward: bool = False
     transport_axis_index: int = 0
 
     def validate(self) -> None:
@@ -385,6 +390,26 @@ class MujocoUR5eTorqueAdapter:
             self._pin_dynamics = PinocchioUR5eDynamics()
         return self._pin_dynamics
 
+    def _coriolis_torque(self, state: MujocoUR5eState) -> np.ndarray:
+        if not self.cfg.coriolis_feedforward or self.cfg.gravity_mode != "gravity_comp":
+            return np.zeros(6, dtype=np.float64)
+        q = np.asarray(state.q, dtype=np.float64).reshape(6)
+        qd = np.asarray(state.qd, dtype=np.float64).reshape(6)
+        if self.cfg.gravity_source == "pinocchio":
+            return self._pinocchio_dynamics().coriolis(q, qd)
+        # MuJoCo-native: C(q,qd)qd = qfrc_bias(q,qd) - qfrc_bias(q,0), on scratch data.
+        scratch = self._gravity_scratch
+        scratch.qpos[:] = 0.0
+        scratch.qpos[: q.shape[0]] = q
+        scratch.qvel[:] = 0.0
+        scratch.qvel[: qd.shape[0]] = qd
+        mujoco.mj_forward(self.model, scratch)
+        bias_live = np.asarray(scratch.qfrc_bias, dtype=np.float64)[:6].copy()
+        scratch.qvel[:] = 0.0
+        mujoco.mj_forward(self.model, scratch)
+        bias_static = np.asarray(scratch.qfrc_bias, dtype=np.float64)[:6].copy()
+        return bias_live - bias_static
+
     def apply_torque_components(
         self,
         *,
@@ -398,7 +423,8 @@ class MujocoUR5eTorqueAdapter:
         tau_controller_clipped = np.clip(tau_controller, -self.torque_limit_nm, +self.torque_limit_nm)
         controller_saturated = np.abs(tau_controller_clipped - tau_controller) > 1e-9
         tau_gravity = self._gravity_torque(state)
-        tau_applied = tau_controller + tau_gravity
+        tau_coriolis = self._coriolis_torque(state)
+        tau_applied = tau_controller + tau_gravity + tau_coriolis
         tau, torque_diag = self.shape_torque(tau_applied, dt_s=state.dt_s)
         axis_idx = int(np.clip(self.cfg.transport_axis_index, 0, 2))
         axis_err = float(state.target_x - state.ee_pos[axis_idx]) if axis_idx == 0 else (
@@ -424,6 +450,8 @@ class MujocoUR5eTorqueAdapter:
             "tau_controller_clip_fraction": float(np.mean(controller_saturated.astype(np.float64))),
             "controller_torque_clip_fraction": float(np.mean(controller_saturated.astype(np.float64))),
             "tau_gravity": tau_gravity.tolist(),
+            "tau_coriolis": tau_coriolis.tolist(),
+            "coriolis_feedforward_active": bool(self.cfg.coriolis_feedforward and self.cfg.gravity_mode == "gravity_comp"),
             "tau_applied": tau_applied.tolist(),
             "tau_applied_clipped": tau.tolist(),
             "tau_raw": tau_controller.tolist(),

@@ -99,6 +99,17 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
+        "--gravity-source",
+        choices=("mujoco_qfrc", "pinocchio"),
+        default=None,
+        help="Forwarded to the child experiment (default: child's own default).",
+    )
+    p.add_argument(
+        "--coriolis-feedforward",
+        action="store_true",
+        help="Forwarded to the child experiment: add C(q,qd)qd feedforward.",
+    )
+    p.add_argument(
         "--gravity-mode",
         choices=("raw", "gravity_comp"),
         default="gravity_comp",
@@ -327,6 +338,10 @@ def _run_child_experiment(
         cmd.extend(["--scene", str(args.scene)])
     if args.start_q_rad is not None:
         cmd.extend(["--start-q-rad", *[str(float(v)) for v in args.start_q_rad]])
+    if getattr(args, "gravity_source", None):
+        cmd.extend(["--gravity-source", str(args.gravity_source)])
+    if getattr(args, "coriolis_feedforward", False):
+        cmd.append("--coriolis-feedforward")
     if args.no_plot:
         cmd.append("--no-plot")
 

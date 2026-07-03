@@ -126,6 +126,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Gravity-compensation source (default mujoco_qfrc; overrides mujoco.gravity_source).",
     )
+    p.add_argument(
+        "--coriolis-feedforward",
+        action="store_true",
+        help="Add C(q,qd)qd feedforward on top of gravity compensation (default off; overrides mujoco.coriolis_feedforward).",
+    )
     p.add_argument("--joint-index", type=int, default=0)
     p.add_argument("--torque-nm", type=float, default=1.0)
     p.add_argument("--torque-amp-nm", type=float, default=1.0)
@@ -190,6 +195,12 @@ def _choose_gravity_source(explicit: str | None, mujoco_cfg: dict[str, Any]) -> 
     if configured in ("mujoco_qfrc", "pinocchio"):
         return str(configured)
     return "mujoco_qfrc"
+
+
+def _choose_coriolis_feedforward(cli_flag: bool, mujoco_cfg: dict[str, Any]) -> bool:
+    if cli_flag:
+        return True
+    return bool(mujoco_cfg.get("coriolis_feedforward", False))
 
 
 def _choose_trajectory_profile(mode: str, explicit: str | None, mujoco_cfg: dict[str, Any]) -> str:
@@ -298,6 +309,7 @@ def _initial_state(
     force_hold_current_pose: bool,
     gravity_mode: str,
     gravity_source: str = "mujoco_qfrc",
+    coriolis_feedforward: bool = False,
     torque_limit_scale: float,
 ) -> tuple[MujocoUR5eState, MujocoUR5eTorqueAdapter]:
     mujoco.mj_forward(model, data)
@@ -338,6 +350,7 @@ def _initial_state(
             lowpass_alpha=1.0,
             gravity_mode=str(gravity_mode),
             gravity_source=str(gravity_source),
+            coriolis_feedforward=bool(coriolis_feedforward),
             transport_axis_index=transport_axis_index,
         ),
     )
@@ -683,6 +696,7 @@ def run() -> int:
     controller_kind = _choose_controller_kind(args.mode, args.controller_kind)
     gravity_mode = _choose_gravity_mode(args.mode, args.gravity_mode, mujoco_cfg)
     gravity_source = _choose_gravity_source(args.gravity_source, mujoco_cfg)
+    coriolis_feedforward = _choose_coriolis_feedforward(bool(args.coriolis_feedforward), mujoco_cfg)
     trajectory_profile = _choose_trajectory_profile(args.mode, args.trajectory_profile, mujoco_cfg)
     move_duration_s, move_duration_source = _resolve_move_duration(mujoco_cfg, args.move_duration)
     run_dir = _make_run_dir(output_dir, args.mode, controller_kind if args.mode != "model-load" else None)
@@ -695,6 +709,7 @@ def run() -> int:
         "output_dir": str(run_dir),
         "gravity_mode": gravity_mode,
         "gravity_source": gravity_source,
+        "coriolis_feedforward": coriolis_feedforward,
         "trajectory_profile": trajectory_profile,
         "move_duration_s": float(move_duration_s) if move_duration_s is not None else None,
         "move_duration_source": move_duration_source,
@@ -790,6 +805,7 @@ def run() -> int:
         force_hold_current_pose=bool(args.mode in _HOLD_MODES),
         gravity_mode=gravity_mode,
         gravity_source=gravity_source,
+        coriolis_feedforward=coriolis_feedforward,
         torque_limit_scale=float(args.torque_limit_scale),
     )
     dt = float(model.opt.timestep)
