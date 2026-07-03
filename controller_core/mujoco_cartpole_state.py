@@ -36,7 +36,7 @@ class MuJoCoCartPoleHandles:
 
 
 def default_cartpole_scene_candidates(repo_root: Path) -> tuple[Path, ...]:
-    menagerie = repo_root / "mujoco_menagerie" / "universal_robots_ur5e"
+    menagerie = repo_root / "vendor" / "mujoco_menagerie" / "universal_robots_ur5e"
     return (
         menagerie / "scene_ur5e_cartpole.xml",
         menagerie / "scene.xml",
