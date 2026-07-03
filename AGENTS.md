@@ -72,11 +72,20 @@ an MP4 or a bare exit code as success evidence — read the run record.
   - Alternate torque law: `controller_core/torque_task_qp.py` (+ `box_qp.py`).
 - MuJoCo adapter: `simulation/ur5e_mujoco_torque.py` — steps the sim, currently adds
   `tau_applied = tau_controller + tau_gravity` with `tau_gravity` = MuJoCo `qfrc_bias`.
-- **Known structural gap**: no mass matrix, no Coriolis term, no inverse dynamics anywhere —
-  gravity(+Coriolis) compensation is purely `qfrc_bias` pass-through. The Pinocchio
-  model-based upgrade (dynamics provider in `controller_core/model_dynamics.py`, staged
-  gravity → Coriolis → operational-space) is the active development effort; each stage is
-  flag-gated in config with old behavior as default.
+- **Model-based dynamics (landed 2026-07-03, all flag-gated, defaults = legacy behavior)**:
+  - `controller_core/model_dynamics.py` — `DynamicsProvider` + `PinocchioUR5eDynamics`
+    (loads the active MJCF; parity vs MuJoCo <1e-8 Nm gravity, <1e-6 bias, <1e-8 mass matrix).
+  - Gravity source: `mujoco.gravity_source: pinocchio` / `--gravity-source` (P1).
+  - Coriolis feedforward: `mujoco.coriolis_feedforward: true` / `--coriolis-feedforward` (P2 —
+    historical lane never compensated C(q,qd)qd; measured negligible below ~0.5 rad/s).
+  - Operational-space (P3): `controller.task_space_inertia_shaping` (Λ(q) wrench weighting;
+    gains become task-acceleration gains) + `controller.nullspace_posture` (dynamically
+    consistent projection; note a full-rank 6D task has no nullspace, so this zeroes posture
+    except near singularities). Needs `mass_matrix` in the state dict (`build_mujoco_state`
+    supplies it). Named config: `config/ur5e_mujoco_torque_osc.yaml`.
+  - P3 evidence (8-point move-hold grid, untuned gains): OSC 6/8 vs baseline 5/8; the
+    dx=0.02/hold=2 orientation failure fixed (0.350→0.031 rad); dx≥0.03/hold=2 still fails —
+    gain retuning for the acceleration-gain semantics is the known next step.
 
 ## 4. Safety & guardrails (hardware — do not weaken)
 

@@ -85,6 +85,7 @@ class MujocoUR5eState:
     ee_ang_vel: np.ndarray
     jacobian: np.ndarray
     gravity_torque: np.ndarray | None = None
+    mass_matrix: np.ndarray | None = None
     target_x: float = 0.0
     target_x_vel: float = 0.0
     target_axis: float | None = None
@@ -121,6 +122,8 @@ class MujocoUR5eState:
             out["target_ee_vel"] = np.asarray(self.target_ee_vel, dtype=np.float64).reshape(3)
         if self.reference_quat is not None:
             out["reference_quat"] = np.asarray(self.reference_quat, dtype=np.float64).reshape(4)
+        if self.mass_matrix is not None:
+            out["mass_matrix"] = np.asarray(self.mass_matrix, dtype=np.float64).reshape(6, 6)
         return out
 
 
@@ -254,6 +257,9 @@ def build_mujoco_state(
     ee_lin_vel = jacp[:, :6] @ qd
     ee_ang_vel = jacr[:, :6] @ qd
     gravity_torque = compute_gravity_torque(model, data, joint_ids) if gravity_compensation else None
+    mass_full = np.zeros((model.nv, model.nv), dtype=np.float64)
+    mujoco.mj_fullM(model, mass_full, data.qM)
+    mass_matrix = mass_full[:6, :6].copy()
     return MujocoUR5eState(
         time_s=float(time_s),
         dt_s=float(dt_s),
@@ -265,6 +271,7 @@ def build_mujoco_state(
         ee_ang_vel=ee_ang_vel,
         jacobian=jacobian,
         gravity_torque=gravity_torque,
+        mass_matrix=mass_matrix,
         target_x=float(target_x),
         target_x_vel=float(target_x_vel),
         target_axis=None if target_axis is None else float(target_axis),

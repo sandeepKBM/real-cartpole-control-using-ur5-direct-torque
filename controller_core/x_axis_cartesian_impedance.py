@@ -47,6 +47,16 @@ class CartesianImpedanceConfig:
     task_resample_factor: float = 0.5
     task_resample_min_scale: float = 1.0 / 16384.0
     task_resample_max_iters: int = 14
+    # Operational-space upgrades (P3). Both default off = historical behavior.
+    # With shaping on, the PD wrench is interpreted as a desired task-space
+    # acceleration and premultiplied by Lambda(q) = (J M^-1 J^T + eps I)^-1.
+    # With nullspace_posture on, the posture PD torque is projected into the
+    # task nullspace via the dynamically consistent pseudoinverse so it cannot
+    # disturb the end-effector. Both need ``mass_matrix`` in the state dict;
+    # if absent, M falls back to identity (kinematic pseudoinverse).
+    task_space_inertia_shaping: bool = False
+    nullspace_posture: bool = False
+    lambda_regularization: float = 1.0e-6
 
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianImpedanceConfig":
@@ -80,6 +90,9 @@ class CartesianImpedanceConfig:
             task_resample_factor=float(ctrl.get("task_resample_factor", 0.5)),
             task_resample_min_scale=float(ctrl.get("task_resample_min_scale", 1.0 / 16384.0)),
             task_resample_max_iters=int(ctrl.get("task_resample_max_iters", 14)),
+            task_space_inertia_shaping=bool(ctrl.get("task_space_inertia_shaping", False)),
+            nullspace_posture=bool(ctrl.get("nullspace_posture", False)),
+            lambda_regularization=float(ctrl.get("lambda_regularization", 1.0e-6)),
         )
 
 
@@ -105,6 +118,9 @@ class CartesianImpedanceOutput:
     z_error: float
     orientation_error_vec: np.ndarray
     orientation_error_norm: float
+    inertia_shaping_active: bool = False
+    nullspace_posture_active: bool = False
+    mass_matrix_provided: bool = False
 
 
 class XAxisCartesianImpedanceController:
@@ -233,15 +249,42 @@ class XAxisCartesianImpedanceController:
 
         wrench = np.array([Fx, Fy, Fz, M[0], M[1], M[2]], dtype=np.float64)
 
+        # Operational-space terms (P3, flag-gated; default off).
+        use_shaping = bool(self.cfg.task_space_inertia_shaping)
+        use_nullspace = bool(self.cfg.nullspace_posture)
+        mass_matrix_provided = "mass_matrix" in st and st["mass_matrix"] is not None
+        lambda_mat: np.ndarray | None = None
+        m_inv: np.ndarray | None = None
+        if use_shaping or use_nullspace:
+            if mass_matrix_provided:
+                m_mat = np.asarray(st["mass_matrix"], dtype=np.float64).reshape(6, 6)
+            else:
+                m_mat = np.eye(6, dtype=np.float64)
+            m_inv = np.linalg.inv(m_mat)
+            eps = max(float(self.cfg.lambda_regularization), 0.0)
+            lambda_mat = np.linalg.inv(J @ m_inv @ J.T + eps * np.eye(6))
+
         # Jacobian conditioning: scale wrench down near singularities.
         cond = float(np.linalg.cond(J))
         singular_scale = 1.0
         if cond > self.cfg.jacobian_singular_cond_max > 0.0:
             singular_scale = float(self.cfg.jacobian_singular_cond_max / cond)
-        wrench_scaled = wrench * singular_scale
+        if use_shaping and lambda_mat is not None:
+            # Wrench is treated as a desired task acceleration; Lambda maps it
+            # to a dynamically consistent task force.
+            wrench_effective = lambda_mat @ wrench
+        else:
+            wrench_effective = wrench
+        wrench_scaled = wrench_effective * singular_scale
         tau_task_nominal = J.T @ wrench_scaled
         tau_damping = -self.cfg.kd_joint * qd
         tau_posture = self.cfg.kp_posture * (self._q_rest - q) - self.cfg.kd_posture * qd
+        if use_nullspace and lambda_mat is not None and m_inv is not None:
+            # Dynamically consistent nullspace projector: posture torques can
+            # no longer produce task-space acceleration.
+            j_bar = m_inv @ J.T @ lambda_mat
+            nullspace_proj = np.eye(6) - J.T @ j_bar.T
+            tau_posture = nullspace_proj @ tau_posture
 
         g = np.zeros(6, dtype=np.float64)
         if "gravity_torque" in st and st["gravity_torque"] is not None:
@@ -291,4 +334,7 @@ class XAxisCartesianImpedanceController:
             z_error=float(z_err),
             orientation_error_vec=e_rot,
             orientation_error_norm=ori_norm,
+            inertia_shaping_active=use_shaping,
+            nullspace_posture_active=use_nullspace,
+            mass_matrix_provided=bool(mass_matrix_provided),
         )

@@ -78,6 +78,7 @@ class RobotState(TypedDict, total=False):
     jacobian_pos: np.ndarray
     jacobian_rot: np.ndarray
     gravity_torque: np.ndarray
+    mass_matrix: np.ndarray
     transport_axis_index: int
     reference_quat: np.ndarray
     hold_all_cartesian_axes: bool
@@ -226,6 +227,8 @@ def as_impedance_robot_state(raw: dict[str, Any], num_joints: int = 6) -> RobotS
         state["target_ee_vel"] = _asarray_1d(raw["target_ee_vel"], "target_ee_vel", 3)
     if "gravity_torque" in raw and raw["gravity_torque"] is not None:
         state["gravity_torque"] = _asarray_1d(raw["gravity_torque"], "gravity_torque", num_joints)
+    if "mass_matrix" in raw and raw["mass_matrix"] is not None:
+        state["mass_matrix"] = _asarray_2d(raw["mass_matrix"], "mass_matrix", num_joints, num_joints)
     if "hold_current_pose" in raw and raw["hold_current_pose"] is not None:
         state["hold_current_pose"] = bool(raw["hold_current_pose"])
     if "transport_axis_index" in raw and raw["transport_axis_index"] is not None:
