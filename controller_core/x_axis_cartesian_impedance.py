@@ -57,6 +57,16 @@ class CartesianImpedanceConfig:
     task_space_inertia_shaping: bool = False
     nullspace_posture: bool = False
     lambda_regularization: float = 1.0e-6
+    # Posture re-anchoring (default off = historical behavior). In move+hold
+    # trajectories ``_q_rest`` stays the reset pose, so during the hold the
+    # posture anchor fights the task force; at a task singularity that force
+    # couple pumps unbounded self-motion drift. With this flag on, ``_q_rest``
+    # is re-captured once when the x target is reached and the arm has settled
+    # (|x_err| <= reanchor_x_tol_m and max|qd| <= reanchor_qd_tol_radps), and
+    # re-armed whenever the x target moves on by more than the tolerance.
+    posture_reanchor_on_settle: bool = False
+    reanchor_x_tol_m: float = 2.0e-3
+    reanchor_qd_tol_radps: float = 0.05
 
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianImpedanceConfig":
@@ -93,6 +103,9 @@ class CartesianImpedanceConfig:
             task_space_inertia_shaping=bool(ctrl.get("task_space_inertia_shaping", False)),
             nullspace_posture=bool(ctrl.get("nullspace_posture", False)),
             lambda_regularization=float(ctrl.get("lambda_regularization", 1.0e-6)),
+            posture_reanchor_on_settle=bool(ctrl.get("posture_reanchor_on_settle", False)),
+            reanchor_x_tol_m=float(ctrl.get("reanchor_x_tol_m", 2.0e-3)),
+            reanchor_qd_tol_radps=float(ctrl.get("reanchor_qd_tol_radps", 0.05)),
         )
 
 
@@ -121,6 +134,7 @@ class CartesianImpedanceOutput:
     inertia_shaping_active: bool = False
     nullspace_posture_active: bool = False
     mass_matrix_provided: bool = False
+    posture_reanchored: bool = False
 
 
 class XAxisCartesianImpedanceController:
@@ -140,6 +154,8 @@ class XAxisCartesianImpedanceController:
         self._z0 = 0.0
         self._quat0 = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         self._q_rest = np.zeros(6, dtype=np.float64)
+        self._posture_reanchored = False
+        self._x_des_at_anchor = 0.0
 
     def reset_from_state(self, state: dict[str, Any]) -> None:
         st = as_impedance_robot_state(state)
@@ -150,6 +166,8 @@ class XAxisCartesianImpedanceController:
         self._quat0 = np.asarray(st["ee_quat"], dtype=np.float64).reshape(4).copy()
         self._q_rest = np.asarray(st["q"], dtype=np.float64).reshape(6).copy()
         self._hold_reference_initialized = False
+        self._posture_reanchored = False
+        self._x_des_at_anchor = float(np.asarray(st["ee_pos"], dtype=np.float64).reshape(3)[0])
         self._initialized = True
 
     @property
@@ -238,6 +256,20 @@ class XAxisCartesianImpedanceController:
         x_err = x_des - float(p[0])
         y_err = y_des - float(p[1])
         z_err = z_des - float(p[2])
+
+        if self.cfg.posture_reanchor_on_settle:
+            x_tol = float(self.cfg.reanchor_x_tol_m)
+            if self._posture_reanchored and abs(float(x_des) - self._x_des_at_anchor) > x_tol:
+                # The x target moved on to a new plateau: re-arm.
+                self._posture_reanchored = False
+            if (
+                not self._posture_reanchored
+                and abs(x_err) <= x_tol
+                and float(np.max(np.abs(qd))) <= float(self.cfg.reanchor_qd_tol_radps)
+            ):
+                self._q_rest = q.copy()
+                self._x_des_at_anchor = float(x_des)
+                self._posture_reanchored = True
 
         Fx = self.cfg.kp_x * x_err + self.cfg.kd_x * (x_vel_des - float(v[0]))
         Fy = self.cfg.kp_y * y_err - self.cfg.kd_y * float(v[1])
@@ -337,4 +369,5 @@ class XAxisCartesianImpedanceController:
             inertia_shaping_active=use_shaping,
             nullspace_posture_active=use_nullspace,
             mass_matrix_provided=bool(mass_matrix_provided),
+            posture_reanchored=bool(self._posture_reanchored),
         )

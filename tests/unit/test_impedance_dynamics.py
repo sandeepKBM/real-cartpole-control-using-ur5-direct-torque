@@ -166,3 +166,77 @@ def test_yaml_section_parses_flags():
     )
     assert default_cfg.task_space_inertia_shaping is False
     assert default_cfg.nullspace_posture is False
+
+
+def test_reanchor_off_keeps_q_rest_fixed():
+    ctl = _controller(kp_posture=10.0, kd_posture=0.0)
+    q_rest_before = ctl._q_rest.copy()
+    # Settled state at the target: x_err ~ 0, qd = 0.
+    ctl.compute(_make_state(q=np.full(6, 0.3), ee_pos=(0.4, 0.1, 0.5), target_x=0.4))
+    np.testing.assert_allclose(ctl._q_rest, q_rest_before)
+
+
+def test_reanchor_fires_once_on_settle():
+    ctl = _controller(posture_reanchor_on_settle=True, kp_posture=10.0, kd_posture=0.0)
+    # Not settled: large x error -> no re-anchor.
+    out = ctl.compute(_make_state(q=np.full(6, 0.3), ee_pos=(0.35, 0.1, 0.5), target_x=0.4))
+    assert not out.posture_reanchored
+    # Not settled: at target but still moving -> no re-anchor.
+    out = ctl.compute(_make_state(q=np.full(6, 0.3), qd=np.full(6, 0.2), ee_pos=(0.4, 0.1, 0.5), target_x=0.4))
+    assert not out.posture_reanchored
+    # Settled at target -> re-anchor to the current q.
+    q_settled = np.full(6, 0.3)
+    out = ctl.compute(_make_state(q=q_settled, ee_pos=(0.4, 0.1, 0.5), target_x=0.4))
+    assert out.posture_reanchored
+    np.testing.assert_allclose(ctl._q_rest, q_settled)
+    # Posture torque is now zero at the settled configuration.
+    np.testing.assert_allclose(out.tau_posture, np.zeros(6), atol=1e-12)
+    # A later drifted q is pulled back toward the settled anchor, not the reset pose.
+    q_drift = q_settled + np.array([0.0, 0.0, 0.0, 0.05, 0.05, 0.0])
+    out2 = ctl.compute(_make_state(q=q_drift, ee_pos=(0.4, 0.1, 0.5), target_x=0.4))
+    assert out2.posture_reanchored  # anchor stays latched
+    np.testing.assert_allclose(ctl._q_rest, q_settled)  # not re-captured at the drifted q
+    expected = 10.0 * (q_settled - q_drift)
+    np.testing.assert_allclose(out2.tau_posture, expected, atol=1e-12)
+
+
+def test_reanchor_rearms_when_target_moves_on():
+    ctl = _controller(posture_reanchor_on_settle=True, kp_posture=10.0, kd_posture=0.0)
+    out = ctl.compute(_make_state(q=np.full(6, 0.3), ee_pos=(0.4, 0.1, 0.5), target_x=0.4))
+    assert out.posture_reanchored
+    # New plateau beyond the tolerance: re-arms, then re-anchors at the new settle.
+    out = ctl.compute(_make_state(q=np.full(6, 0.3), qd=np.full(6, 0.3), ee_pos=(0.41, 0.1, 0.5), target_x=0.43))
+    assert not out.posture_reanchored
+    q_new = np.full(6, 0.35)
+    out = ctl.compute(_make_state(q=q_new, ee_pos=(0.43, 0.1, 0.5), target_x=0.43))
+    assert out.posture_reanchored
+    np.testing.assert_allclose(ctl._q_rest, q_new)
+
+
+def test_reanchor_yaml_parsing():
+    ctrl_section = {
+        "gains": {},
+        "torque_limits_mode": "initial",
+        "torque_limits_initial": {
+            name: 100.0
+            for name in (
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            )
+        },
+        "posture_reanchor_on_settle": True,
+        "reanchor_x_tol_m": 0.004,
+        "reanchor_qd_tol_radps": 0.1,
+    }
+    cfg = CartesianImpedanceConfig.from_controller_yaml_section(ctrl_section)
+    assert cfg.posture_reanchor_on_settle is True
+    assert cfg.reanchor_x_tol_m == 0.004
+    assert cfg.reanchor_qd_tol_radps == 0.1
+    default_cfg = CartesianImpedanceConfig.from_controller_yaml_section(
+        {k: v for k, v in ctrl_section.items() if not k.startswith(("posture_re", "reanchor"))}
+    )
+    assert default_cfg.posture_reanchor_on_settle is False
