@@ -1,5 +1,11 @@
 # real_Cartpole Dependency / Bloat Diagnosis
 
+> **SUPERSEDED / HISTORICAL** — moved to `docs/archive/` 2026-07-03. Most concrete
+> recommendations here were executed the same day: `mujoco_menagerie/` full checkout deleted,
+> unused deps dropped from `environment.yml`, CoppeliaSim/RL scripts archived, tuner
+> duplication resolved (`tools/tuning_common.py`). Size/structure claims below are stale;
+> treat this as a historical diagnosis, not a current-state document.
+
 Diagnosis only — nothing in this report has been executed. Method note: this was a grep/find-based
 heuristic pass over declared manifests vs. actual `import` usage, not a full AST/import-graph
 analysis. It's reliable for clear-cut cases (zero hits, single-purpose duplicate files) but can

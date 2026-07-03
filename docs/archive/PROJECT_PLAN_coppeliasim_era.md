@@ -1,4 +1,9 @@
-# Project Plan
+# Project Plan (CoppeliaSim era)
+
+> **SUPERSEDED / HISTORICAL** — moved to `docs/archive/` 2026-07-03 (renamed from
+> `PROJECT_PLAN.md`). Entirely a CoppeliaSim bring-up milestone plan; CoppeliaSim is now fully
+> archived (`archive/coppelia/`). There is no current replacement "project plan" document —
+> `docs/CURRENT_STATUS.md` + `AGENTS.md` together serve that role for the active MuJoCo lane.
 
 Last updated: 2026-04-27
 

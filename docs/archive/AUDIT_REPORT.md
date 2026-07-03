@@ -1,5 +1,12 @@
 # real_Cartpole Repo Status Audit
 
+> **SUPERSEDED / HISTORICAL** — moved to `docs/archive/` 2026-07-03. Written before the
+> CoppeliaSim archival and `mujoco_menagerie/` full-checkout deletion; describes `simulation/`,
+> `ros2_ws/.../ur5_x_axis_controller_ros/`, and `mujoco_menagerie/` as they existed then, not as
+> they exist now (see `AGENTS.md` for current state). Its central lesson — don't let one
+> simulator's dynamics silently feed another's control loop — is already generalized in
+> `AGENTS.md` §4's do-not-recreate list. Kept for its detailed point-in-time engineering record.
+
 Generated as a report-only diagnostic pass. No controller code, configs, or gains were changed as
 part of this audit. All file:line citations below were verified by reading the actual source, not
 inferred from filenames.

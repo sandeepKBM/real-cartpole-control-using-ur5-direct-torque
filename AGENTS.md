@@ -142,7 +142,8 @@ Do-not-recreate (gravity/dynamics bugs, still relevant):
 - Root `pytest.ini`; suite layout: `tests/unit/` (pure numpy controller_core),
   `tests/mujoco/` (needs mujoco), `tests/hardware/` (mocked RTDE). Markers auto-applied by
   directory: `pytest -m unit`, `-m mujoco`, `-m hardware`, `-m "not slow"`.
-- Full suite: `python -m pytest -q` (94 passing as of 2026-07-03).
+- Full suite: `python -m pytest -q` (116 passing as of 2026-07-03; this count drifts as tests
+  are added — don't treat it as a gate, just a sanity baseline).
 - Before long training/sweeps, run the tiny smoke first (`tests/mujoco/test_ur5e_mujoco_torque.py`
   covers model-load and a tiny move-hold subprocess run).
 
@@ -153,9 +154,20 @@ Do-not-recreate (gravity/dynamics bugs, still relevant):
   Not runnable in place; resurrect notes + removed deps in `archive/coppelia/README.md`.
   The vendored simulator runtime remains at `third_party/coppelia_runtime/` (gitignored).
 - `archive/legacy_mujoco/` — pre-torque-lane MuJoCo cartpole diagnostics, including four
-  scripts whose names sound CoppeliaSim-related but are pure MuJoCo.
+  scripts whose names sound CoppeliaSim-related but are pure MuJoCo. Design rationale and
+  a per-controller reference for that lane: `docs/archive/CONTROL_DESIGN_NOTEBOOK.md`
+  (implementation reference), `docs/archive/SLSQP_CONTROLLER_REFERENCE.md`
+  (controller/solver/runner index), `docs/archive/FIRST_PRINCIPLES_CODE_FLOW.md`
+  (onboarding walkthrough).
 - `archive/superseded/` — replaced drivers (old impedance tuner).
-- Historical operational lore and per-date findings: `docs/archive/AGENTS_HISTORY.md`.
+- Historical operational lore and per-date findings: `docs/archive/AGENTS_HISTORY.md`. The
+  full pre-2026-07 documentation set (project origin, legacy workspace/singularity studies,
+  the original CoppeliaSim-port bring-up plan) also lives under `docs/archive/` — browse it
+  for anything not covered by the pointers above.
+- Superseded root-level reports, now archived: `docs/archive/AUDIT_REPORT.md` (pre-archival
+  bloat/dynamics audit), `docs/archive/BLOAT_REPORT.md` (bloat diagnosis, mostly executed),
+  `docs/archive/DIAGNOSTIC_real_cartpole_torque_control_questions.md` (the diagnostic that
+  motivated the Pinocchio P0-P3 work in §3 — read that section for the current answer).
 
 ## 7. Working rules for this repo
 

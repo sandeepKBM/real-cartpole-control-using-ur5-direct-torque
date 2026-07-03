@@ -4,11 +4,15 @@ Start here. The authoritative operating guide is the root `AGENTS.md` (symlinked
 `CLAUDE.md`); this directory holds supporting docs.
 
 - `CURRENT_STATUS.md` — active objective, latest diagnosis, what's done, what's next.
-- `PROJECT_PLAN.md` — longer-horizon plan notes.
 - `controller_core/`, `simulation/`, `hardware/`, `ros2/` — subsystem notes (verify against
   code; some predate the 2026-07-03 consolidation).
-- `archive/` — historical docs, including `archive/AGENTS_HISTORY.md` (the full pre-2026-07-03
-  AGENTS.md operational log).
+- `archive/` — historical docs: `archive/AGENTS_HISTORY.md` (the full pre-2026-07-03 AGENTS.md
+  operational log), `archive/PROJECT_PLAN_coppeliasim_era.md` (superseded — CoppeliaSim is
+  archived and there's no current replacement plan doc; `CURRENT_STATUS.md` + `AGENTS.md`
+  serve that role now), `archive/{AUDIT,BLOAT}_REPORT.md` and
+  `archive/DIAGNOSTIC_real_cartpole_torque_control_questions.md` (superseded point-in-time
+  reports, each banner-marked with what superseded them), plus the pre-torque-lane legacy
+  MuJoCo documentation set.
 
 ## Layout after the 2026-07-03 consolidation
 

@@ -1,44 +1,39 @@
 # Simulation Scripts
 
-The active CoppeliaSim scripts live in `simulation/`.
+`simulation/` now contains exactly two files: `ur5e_mujoco_torque.py` (the active MuJoCo
+adapter) and `workspace_guardrails.py` (diagnostic-only, see below). Everything CoppeliaSim
+(launchers, RPC runner, Lua add-ons, trace plotting) is archived to `archive/coppelia/` and
+is not runnable in place — see `archive/coppelia/README.md` for resurrect notes.
 
-## Known-Good Render Smoke
-
-```bash
-bash simulation/launch_coppeliasim_video_smoke.sh
-```
-
-This launches CoppeliaSim, loads the UR5 model, captures upright PNG frames, and writes:
+## UR5e MuJoCo Torque Experiments (the active lane)
 
 ```text
-demonstration_videos/ur5e_coppeliasim/coppeliasim_ur5_video_smoke.mp4
+tools/ur5e_mujoco_torque_experiments.py   # single-run rollout engine (owns the step loop)
+tools/audit_ur5e_mujoco_gravity_torque.py # gravity-sign / hold-quality audit
+tools/ur5e_move_hold_transport.py         # move+hold sweep driver
+tools/ur5e_x_frame_envelope.py            # X-frame transport envelope sweep
+simulation/ur5e_mujoco_torque.py          # MuJoCo adapter
+assets/ur5e_torque/scene.xml              # the custom torque-actuated UR5e model
 ```
 
-Use this first when display/rendering behavior is uncertain.
+Full walkthrough: [`docs/simulation/ur5e_mujoco_torque_control.md`](ur5e_mujoco_torque_control.md).
+Controller architecture (impedance law, Pinocchio dynamics, tuned OSC gains): `AGENTS.md` §3.
 
-## Active Controller/RPC Runner
-
+Verified short commands:
 ```bash
-bash simulation/launch_coppeliasim_x_axis_headless.sh
+python tools/audit_ur5e_mujoco_gravity_torque.py --poses active_origin --durations 1.0 2.0 --seed 0 --no-plot
+python tools/ur5e_move_hold_transport.py --target-x-deltas 0.01 0.02 --move-durations 1.0 --hold-durations 1.0 2.0 --torque-limit-scales 1.0 --seed 0 --no-plot
 ```
-
-This launches CoppeliaSim and runs:
-
-```text
-simulation/run_coppeliasim_x_axis_headless.py
-```
-
-The controller/RPC path is still in progress. Its current weakness is startup/bootstrap, not the existence of the controller code.
 
 ## Lab Workspace Guardrails
 
-The simulation stack now includes a diagnostic-only workspace guardrail model
-extracted from the external MuJoCo visualization repo. It is used for offline
-trajectory checking and optional video overlays, not for real robot safety.
+`simulation/workspace_guardrails.py` is a diagnostic-only workspace guardrail model, used for
+offline trajectory checking and optional overlays — **never wire it into real-arm e-stop
+logic** (see `AGENTS.md` §2).
 
 ```bash
-python3 tools/check_trajectory_guardrails.py \
-  --log outputs/control_runs/your_log.json \
+python3 tools/diagnostics/check_trajectory_guardrails.py \
+  --log outputs/ur5e_mujoco_torque_transport/some_run/trace.jsonl \
   --guardrail-config config/lab_workspace_guardrails.yaml \
   --output logs/guardrail_report.json
 ```
@@ -46,37 +41,18 @@ python3 tools/check_trajectory_guardrails.py \
 Optional overlay rendering:
 
 ```bash
-python3 tools/render_guardrail_overlay.py \
-  --log outputs/control_runs/your_log.json \
+python3 tools/diagnostics/render_guardrail_overlay.py \
+  --log outputs/ur5e_mujoco_torque_transport/some_run/trace.jsonl \
   --guardrail-config config/lab_workspace_guardrails.yaml \
   --output logs/guardrail_overlay.png
 ```
 
-The current Coppelia video runners also accept optional `--draw-guardrails`,
-`--guardrail-config`, `--guardrail-margin-m`, and `--show-boundary-labels`
-flags to draw the same guardrail inset on rendered frames.
+(Both tools moved from bare `tools/` to `tools/diagnostics/` during the 2026-07-03
+consolidation.)
 
-## UR5e MuJoCo Torque Experiments
+## Archived: CoppeliaSim scripts
 
-The repo now also contains a dedicated simulation-only MuJoCo torque-control
-lane for UR5e controller experiments:
-
-- [`docs/simulation/ur5e_mujoco_torque_control.md`](ur5e_mujoco_torque_control.md)
-- `tools/ur5e_mujoco_torque_experiments.py`
-- `tools/ur5e_x_frame_envelope.py`
-- `simulation/ur5e_mujoco_torque.py`
-- `tools/ur5e_move_hold_transport.py`
-- `assets/ur5e_torque/ur5e_torque.xml`
-
-This path is separate from the active CoppeliaSim bring-up work and is only
-for MuJoCo torque validation / logging.
-
-## Important CoppeliaSim Files
-
-| File | Role |
-| --- | --- |
-| `launch_coppeliasim_video_smoke.sh` | Known-good render-only smoke launcher. |
-| `launch_coppeliasim_x_axis_headless.sh` | Active controller/RPC launcher. |
-| `run_coppeliasim_x_axis_headless.py` | Direct Python runner for controller/RPC testing. |
-| `ur5_video_smoke_addon.lua` | Auto-loaded Lua add-on, currently shared by smoke and RPC bootstrap. |
-| `plot_coppeliasim_trace.py` | Trace plotting helper. |
+The CoppeliaSim lane (render smoke, controller/RPC runner, ZMQ probes, WSL bring-up) is
+fully archived to `archive/coppelia/simulation/` — not runnable in place. See
+`archive/coppelia/README.md` for the full file inventory and resurrect notes (dependencies to
+reinstall, the `mujoco_menagerie` re-clone SHA if needed for the legacy scene files).

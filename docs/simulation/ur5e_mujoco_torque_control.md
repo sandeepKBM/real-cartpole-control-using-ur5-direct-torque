@@ -11,7 +11,10 @@ hardware bring-up, or CoppeliaSim controller code.
 The checked-in torque variant is based on the vendored MuJoCo Menagerie UR5e
 model:
 
-- base robot XML: `mujoco_menagerie/universal_robots_ur5e/ur5e.xml`
+- base robot XML: `vendor/mujoco_menagerie/universal_robots_ur5e/ur5e.xml` (the full
+  Menagerie zoo checkout this was originally cloned from was deleted 2026-07-03 to save
+  space; `vendor/mujoco_menagerie/` is the tracked subset that's actually used, and is the
+  sole remaining copy)
 - torque variant: `assets/ur5e_torque/ur5e_torque.xml`
 - scene wrapper: `assets/ur5e_torque/scene.xml`
 
@@ -237,6 +240,28 @@ The low-Z seed from the acceleration transport lane is still available via
 canonical active-origin pose used by the existing torque transport lane,
 which is the more stable baseline for this controller family.
 
+## Phase 5: Model-Based Dynamics + Operational-Space Upgrade (Pinocchio)
+
+Landed 2026-07-03, all flag-gated with legacy behavior as the default — this section is a
+short pointer, not a duplicate of the full write-up: see `AGENTS.md` §3 for the mechanism
+detail and validation evidence.
+
+- `controller_core/model_dynamics.py` adds a `PinocchioUR5eDynamics` provider that loads the
+  same MJCF the sim uses and computes gravity, Coriolis, and the mass matrix directly (parity
+  vs MuJoCo: gravity <1e-8 Nm, bias <1e-6 Nm, mass matrix <1e-8).
+- `mujoco.gravity_source: pinocchio` (P1) and `mujoco.coriolis_feedforward: true` (P2) swap
+  the adapter's gravity/Coriolis terms onto the Pinocchio provider; default is unchanged
+  (`mujoco_qfrc`, no Coriolis feedforward — the historical behavior this whole document
+  describes above).
+- `controller.task_space_inertia_shaping` + `controller.nullspace_posture` (P3) add an
+  operational-space upgrade to `x_axis_cartesian_impedance.py`: Λ(q) task-inertia weighting
+  and dynamically-consistent nullspace posture projection. Named config:
+  `config/ur5e_mujoco_torque_osc.yaml` (flags on, untuned gains).
+- **Tuned config**: `config/ur5e_mujoco_torque_osc_tuned.yaml` — extensively validated
+  (canonical grid, long holds to 30s, displacements to 20cm, torque-scale robustness to 10%,
+  both transport directions), zero safety-guard trips throughout. This is the current
+  best-performing config for the transport start pose used throughout this document.
+
 ## Why This Is Torque-Controlled
 
 MuJoCo torque control should use `<motor>` actuators with `gear="1"` and an
@@ -382,5 +407,7 @@ CoppeliaSim and MuJoCo are both simulation tools, but they are not equivalent:
 - MuJoCo `<motor>` actuators are the correct place to test torque policies in
   this branch
 
-This branch keeps the CoppeliaSim work intact and adds a separate MuJoCo torque
-experimentation lane for algorithm checks, logging, and small rollouts.
+Update 2026-07-03: the CoppeliaSim work described above is no longer live in the tree — it
+was fully archived to `archive/coppelia/` (not runnable in place) once the MuJoCo torque lane
+became the sole active lane. The `controller_core/` reuse described in this section still
+holds true; only the CoppeliaSim-side simulation/adapter/ROS2 code moved.

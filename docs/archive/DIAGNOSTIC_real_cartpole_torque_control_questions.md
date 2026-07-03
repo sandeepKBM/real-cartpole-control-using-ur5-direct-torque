@@ -1,5 +1,12 @@
 # Diagnostic: real_Cartpole torque-control questions
 
+> **SUPERSEDED / HISTORICAL** — moved to `docs/archive/` 2026-07-03. This diagnostic's own
+> recommended next steps (Pinocchio parity check → gravity source swap → Coriolis feedforward
+> → operational-space upgrade) have since been implemented in full (P0-P3, see `AGENTS.md`
+> §3) and the resulting controller was tuned and extensively validated. Read `AGENTS.md` §3
+> for the current answer to the question this document asks; kept as the origin story for
+> that work.
+
 Scope: code/log inspection only. No controller changes, no safety-limit changes, no hardware execution, no RL, no CoppeliaSim runtime changes.
 
 Evidence sources used:

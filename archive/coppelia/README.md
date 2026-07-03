@@ -28,5 +28,5 @@ time; the active lane uses only `vendor/mujoco_menagerie/` (tracked). To restore
 checkout 959cabcdfb464cee47e0fbda807371f8d93a4f4c`.
 
 The historical AGENTS.md operational lore for this lane (verified commands, RPC guardrails,
-Xvfb caveats, per-date findings) will be relocated here / to `docs/archive/AGENTS_HISTORY.md`
-during the AGENTS.md rewrite.
+Xvfb caveats, per-date findings) was relocated to `docs/archive/AGENTS_HISTORY.md` during the
+AGENTS.md rewrite.

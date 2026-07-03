@@ -70,11 +70,13 @@ Those unresolved items were not explicitly encoded in the external repo files in
 Run the offline checker on a JSON log that contains trajectory points:
 
 ```bash
-python3 tools/check_trajectory_guardrails.py \
-  --log outputs/control_runs/your_log.json \
+python3 tools/diagnostics/check_trajectory_guardrails.py \
+  --log outputs/ur5e_mujoco_torque_transport/some_run/trace.jsonl \
   --guardrail-config config/lab_workspace_guardrails.yaml \
   --output logs/guardrail_report.json
 ```
+
+(Moved from bare `tools/` to `tools/diagnostics/` during the 2026-07-03 consolidation.)
 
 Optional outputs:
 
