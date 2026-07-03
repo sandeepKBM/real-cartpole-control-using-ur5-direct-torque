@@ -86,18 +86,24 @@ an MP4 or a bare exit code as success evidence — read the run record.
   - P3 evidence (8-point move-hold grid, untuned gains): OSC 6/8 vs baseline 5/8; the
     dx=0.02/hold=2 orientation failure fixed (0.350→0.031 rad); dx≥0.03/hold=2 still fails —
     gain retuning for the acceleration-gain semantics is the known next step.
-  - **Tuned OSC gains (landed 2026-07-03)**: `config/ur5e_mujoco_torque_osc_tuned.yaml` —
-    kp_x 400/kd_x 40, kp_rot 5/kd_rot 10, kp_posture 25/kd_posture 6, kd_joint 4,
-    lambda_regularization 0.1, `posture_reanchor_on_settle: true`. Validation: canonical
-    grid (dx 0.01–0.04 × hold 1/2 s, move 1 s) 8/8 valid, worst orientation 0.042 rad;
-    4 s holds at dx 0.03/0.05 2/2 valid (0.060 rad); off-grid 6/8 with zero guard trips
-    anywhere; zero saturation (untuned OSC: 1/8 valid, 2 guard trips, |qd| 1.7 rad/s).
-    Two root causes found and fixed by tuning: (1) the transport start pose sits at the UR
-    wrist singularity (wrist_2=0) — orientation drifts along a task-unactuatable direction,
-    held only by the joint-space posture anchor + kd_joint damping (the nullspace projector
-    passes posture exactly there); (2) the task rotation PD is *unstable* at that pose
-    (positive feedback through the eps-regularized Λ; drift rate scales with kp_rot, so it
-    is set near zero and posture re-anchoring holds orientation during holds instead).
+  - **Tuned OSC gains (landed 2026-07-03, ~250 evaluation runs)**:
+    `config/ur5e_mujoco_torque_osc_tuned.yaml` — kp_x 400/kd_x 40, kp_rot 0/kd_rot 10,
+    kp_posture 25/kd_posture 6, kd_joint 4, lambda_regularization 0.1,
+    `posture_reanchor_on_settle: true`. Validated envelope, 0 guard trips throughout:
+    canonical grid (dx 0.01–0.04 m × hold 1/2 s) 8/8, worst orientation 0.040 rad; long
+    holds (dx 0.03/0.06 m, hold up to 30 s) 8/8, worst 0.067 rad; large displacements
+    (dx up to 0.20 m) 16/16, worst 0.205 rad (dx=0.25 m breaks via Z-drift — a genuine
+    workspace/reach limit, not a controller defect); torque-scale robustness down to 10%
+    14/14. Untuned OSC on the canonical grid: 1/8 valid, 2 guard trips, |qd| 1.7 rad/s.
+    Two root causes found and fixed: (1) the transport start pose sits at the UR wrist
+    singularity (wrist_2=0) — orientation drifts along a task-unactuatable direction, held
+    only by the joint-space posture anchor + kd_joint damping (the nullspace projector
+    passes posture exactly there); (2) the task rotation PD is *unstable* at that pose —
+    positive feedback through the eps-regularized Λ regardless of kp_rot magnitude, only
+    slower as it shrinks (kp_rot=30 trips the guard at ~3.5 s, 5 at ~27 s, 0 never — clean
+    to 30 s). Fix: kp_rot=0 (damping-only), posture re-anchoring holds orientation instead.
+    Known, out-of-scope boundary: moves faster than ~0.5 s undershoot (closed-loop
+    bandwidth limit at kp_x=400, not saturation — irrelevant for 1 s+ transport moves).
   - Posture re-anchoring: `controller.posture_reanchor_on_settle` (+`reanchor_x_tol_m`,
     `reanchor_qd_tol_radps`) — one-shot q_rest re-capture at settle, flag-gated, default off.
 
