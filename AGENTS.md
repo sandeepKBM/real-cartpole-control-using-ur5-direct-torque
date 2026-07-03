@@ -86,6 +86,16 @@ an MP4 or a bare exit code as success evidence — read the run record.
   - P3 evidence (8-point move-hold grid, untuned gains): OSC 6/8 vs baseline 5/8; the
     dx=0.02/hold=2 orientation failure fixed (0.350→0.031 rad); dx≥0.03/hold=2 still fails —
     gain retuning for the acceleration-gain semantics is the known next step.
+  - **Tuned OSC gains (landed 2026-07-03)**: `config/ur5e_mujoco_torque_osc_tuned.yaml` —
+    kp_x 400/kd_x 40, kp_posture 25/kd_posture 6, kd_joint 4, lambda_regularization 0.1.
+    8/8 valid_move_and_hold on the canonical grid (dx 0.01–0.04 × hold 1/2 s, move 1 s),
+    0 guard trips, worst orientation 0.173 rad, max |qd| 0.18 rad/s, zero saturation
+    (untuned OSC: 1/8 valid, 2 guard trips, elbow flung at 1.7 rad/s). Root cause of the
+    old failures: the transport start pose sits at the UR wrist singularity (wrist_2=0);
+    orientation drifts along a task-unactuatable direction, so only the joint-space posture
+    anchor + kd_joint damping (passed by the nullspace projector exactly there) can hold it.
+    Known limitation: holds ≥ 4 s still drift (q_rest stays the pre-move pose; anchor-vs-task
+    force pumps self-motion) — structural fix is settle-time posture re-anchoring, flag-gated.
 
 ## 4. Safety & guardrails (hardware — do not weaken)
 
