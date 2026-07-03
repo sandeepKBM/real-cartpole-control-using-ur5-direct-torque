@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from controller_core.kinematics_utils import rotmat_to_quat  # noqa: E402
 from mujoco_ur5e_tools import UR5E_JOINT_ORDER, UR5E_TORQUE_ACTUATOR_SPECS  # noqa: E402
@@ -37,7 +37,7 @@ from tools.ur5e_mujoco_torque_experiments import _x_profile_target  # noqa: E402
 from transport_metrics import compute_valid_move_hold_metrics, compute_valid_transport_metrics, move_hold_ranking_key, summarize_move_hold_trace  # noqa: E402
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = REPO_ROOT / "config" / "ur5e_mujoco_torque.yaml"
 TRANSPORT_CONFIG_PATH = REPO_ROOT / "config" / "ur5e_mujoco_torque_transport.yaml"
 SCENE_PATH = REPO_ROOT / "assets" / "ur5e_torque" / "scene.xml"

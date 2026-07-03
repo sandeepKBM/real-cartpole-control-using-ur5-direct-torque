@@ -44,7 +44,7 @@ BASELINE_GAINS: dict[str, float] = {
     "kd_joint": 0.8,
 }
 
-from tools.tune_ur5e_impedance_transport import (  # noqa: E402
+from tools.tuning_common import (  # noqa: E402
     _candidate_config_payload,
     _candidate_config_path,
     _fmt_token,
