@@ -391,6 +391,41 @@ def test_move_hold_summary_and_metric_reject_overshoot_and_accept_clean() -> Non
     assert move_hold_ranking_key(clean_summary) > move_hold_ranking_key(overshoot_summary)
 
 
+def test_move_hold_metrics_accept_clean_negative_x_transport() -> None:
+    # Regression test: compute_valid_move_hold_metrics used to abs() the target
+    # before comparing it against the signed achieved delta, so every clean
+    # negative-direction transport was reported invalid regardless of tracking
+    # quality. -0.005 mirrors the clean positive-delta case above exactly.
+    clean_rows = _make_move_hold_trace(
+        target_x_delta=-0.005,
+        move_duration_s=0.05,
+        move_positions=[0.0, -0.005],
+        hold_positions=[-0.0051, -0.0050, -0.0052],
+        hold_orientations=[0.01, 0.01, 0.01],
+    )
+    clean_summary = summarize_move_hold_trace(
+        clean_rows,
+        initial_ee_pos=[0.0, 0.0, 0.0],
+        move_duration_s=0.05,
+        total_duration_s=0.15,
+        transport_axis_index=0,
+    )
+    clean_summary.update(
+        {
+            "success": True,
+            "termination_reason": "duration_complete",
+            "target_x_delta": -0.005,
+            "velocity_guard_ok": True,
+            "joint_limit_guard_ok": True,
+            "torque_saturation_percentage": 0.0,
+        }
+    )
+    clean_metrics = compute_valid_move_hold_metrics(clean_summary)
+    assert clean_metrics["valid_move_phase"] is True
+    assert clean_metrics["valid_hold_phase"] is True
+    assert clean_metrics["valid_move_and_hold"] is True
+
+
 def test_min_jerk_move_hold_duration_guard_fails_clearly(tmp_path: Path) -> None:
     completed, run_dir = _run_experiment_cli_raw(
         tmp_path,

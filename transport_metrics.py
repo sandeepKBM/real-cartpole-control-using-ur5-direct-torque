@@ -723,7 +723,7 @@ def compute_valid_move_hold_metrics(run_summary: Mapping[str, Any], strict: bool
     failure_reason = str(data.get("failure_reason", "") or "")
     safety_reason = str(data.get("safety_reason", "") or "")
     combined_reason = " ".join([termination_reason, failure_reason, safety_reason]).strip()
-    target_x_delta = abs(_as_float(data.get("target_x_delta", 0.0)))
+    target_x_delta = _as_float(data.get("target_x_delta", 0.0))
     move_duration_s = max(_as_float(data.get("move_duration_s", data.get("move_duration", 0.0))), 0.0)
     total_duration_s = max(_as_float(data.get("total_duration_s", data.get("duration_s", move_duration_s))), move_duration_s)
     hold_duration_s = max(_as_float(data.get("hold_duration_s", total_duration_s - move_duration_s)), 0.0)
