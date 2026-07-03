@@ -135,6 +135,11 @@ class MujocoUR5eTorqueAdapterConfig:
     lowpass_alpha: float = 1.0
     gravity_mode: Literal["raw", "gravity_comp"] = "raw"
     gravity_compensation: bool | None = None
+    # Where the gravity-compensation vector comes from when gravity_mode ==
+    # "gravity_comp". "mujoco_qfrc" is the historical static qd=0 inverse-dynamics
+    # bias; "pinocchio" uses controller_core.model_dynamics.PinocchioUR5eDynamics
+    # (verified <1e-8 Nm parity against the MuJoCo source on this MJCF).
+    gravity_source: Literal["mujoco_qfrc", "pinocchio"] = "mujoco_qfrc"
     transport_axis_index: int = 0
 
     def validate(self) -> None:
@@ -166,6 +171,10 @@ class MujocoUR5eTorqueAdapterConfig:
             self.gravity_mode = legacy_mode
         if self.gravity_mode not in ("raw", "gravity_comp"):
             raise ValueError(f"gravity_mode must be 'raw' or 'gravity_comp'; got {self.gravity_mode!r}")
+        if self.gravity_source not in ("mujoco_qfrc", "pinocchio"):
+            raise ValueError(
+                f"gravity_source must be 'mujoco_qfrc' or 'pinocchio'; got {self.gravity_source!r}"
+            )
 
 
 def load_model(scene_xml: str | Path) -> tuple[mujoco.MjModel, mujoco.MjData, int, list[int], list[int]]:
@@ -304,6 +313,7 @@ class MujocoUR5eTorqueAdapter:
             )
         )
         self._gravity_scratch = mujoco.MjData(model)
+        self._pin_dynamics = None
         self._initialized = False
         self._initial_pos: np.ndarray | None = None
         self._initial_quat: np.ndarray | None = None
@@ -363,7 +373,17 @@ class MujocoUR5eTorqueAdapter:
             return np.zeros(6, dtype=np.float64)
         if state.gravity_torque is not None:
             return np.asarray(state.gravity_torque, dtype=np.float64).reshape(6)
-        return compute_gravity_torque(self.model, np.asarray(state.q, dtype=np.float64).reshape(6), self.joint_ids, scratch_data=self._gravity_scratch)
+        q = np.asarray(state.q, dtype=np.float64).reshape(6)
+        if self.cfg.gravity_source == "pinocchio":
+            return self._pinocchio_dynamics().gravity(q)
+        return compute_gravity_torque(self.model, q, self.joint_ids, scratch_data=self._gravity_scratch)
+
+    def _pinocchio_dynamics(self):
+        if self._pin_dynamics is None:
+            from controller_core.model_dynamics import PinocchioUR5eDynamics
+
+            self._pin_dynamics = PinocchioUR5eDynamics()
+        return self._pin_dynamics
 
     def apply_torque_components(
         self,
@@ -395,6 +415,7 @@ class MujocoUR5eTorqueAdapter:
             **torque_diag,
             "gravity_mode": self.cfg.gravity_mode,
             "gravity_mode_used": self.cfg.gravity_mode,
+            "gravity_source": self.cfg.gravity_source,
             "gravity_compensation_active": bool(self.cfg.gravity_mode == "gravity_comp"),
             "raw_mode_used": bool(self.cfg.gravity_mode == "raw"),
             "tau_controller": tau_controller.tolist(),

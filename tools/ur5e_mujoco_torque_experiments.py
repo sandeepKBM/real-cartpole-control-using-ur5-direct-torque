@@ -120,6 +120,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Torque application mode for controller-rollout experiments.",
     )
+    p.add_argument(
+        "--gravity-source",
+        choices=("mujoco_qfrc", "pinocchio"),
+        default=None,
+        help="Gravity-compensation source (default mujoco_qfrc; overrides mujoco.gravity_source).",
+    )
     p.add_argument("--joint-index", type=int, default=0)
     p.add_argument("--torque-nm", type=float, default=1.0)
     p.add_argument("--torque-amp-nm", type=float, default=1.0)
@@ -175,6 +181,15 @@ def _choose_gravity_mode(mode: str, explicit: str | None, mujoco_cfg: dict[str, 
     if bool(mujoco_cfg.get("use_gravity_comp", False)):
         return "gravity_comp"
     return "raw"
+
+
+def _choose_gravity_source(explicit: str | None, mujoco_cfg: dict[str, Any]) -> str:
+    if explicit is not None:
+        return explicit
+    configured = mujoco_cfg.get("gravity_source")
+    if configured in ("mujoco_qfrc", "pinocchio"):
+        return str(configured)
+    return "mujoco_qfrc"
 
 
 def _choose_trajectory_profile(mode: str, explicit: str | None, mujoco_cfg: dict[str, Any]) -> str:
@@ -282,6 +297,7 @@ def _initial_state(
     controller_kind: str,
     force_hold_current_pose: bool,
     gravity_mode: str,
+    gravity_source: str = "mujoco_qfrc",
     torque_limit_scale: float,
 ) -> tuple[MujocoUR5eState, MujocoUR5eTorqueAdapter]:
     mujoco.mj_forward(model, data)
@@ -321,6 +337,7 @@ def _initial_state(
             rate_limit_nm_per_sec=np.array([800.0, 800.0, 800.0, 160.0, 160.0, 160.0], dtype=np.float64),
             lowpass_alpha=1.0,
             gravity_mode=str(gravity_mode),
+            gravity_source=str(gravity_source),
             transport_axis_index=transport_axis_index,
         ),
     )
@@ -665,6 +682,7 @@ def run() -> int:
     output_dir = _resolve_path(args.output_dir if args.output_dir is not None else mujoco_cfg["output_dir"])
     controller_kind = _choose_controller_kind(args.mode, args.controller_kind)
     gravity_mode = _choose_gravity_mode(args.mode, args.gravity_mode, mujoco_cfg)
+    gravity_source = _choose_gravity_source(args.gravity_source, mujoco_cfg)
     trajectory_profile = _choose_trajectory_profile(args.mode, args.trajectory_profile, mujoco_cfg)
     move_duration_s, move_duration_source = _resolve_move_duration(mujoco_cfg, args.move_duration)
     run_dir = _make_run_dir(output_dir, args.mode, controller_kind if args.mode != "model-load" else None)
@@ -676,6 +694,7 @@ def run() -> int:
         "config_path": str(args.config),
         "output_dir": str(run_dir),
         "gravity_mode": gravity_mode,
+        "gravity_source": gravity_source,
         "trajectory_profile": trajectory_profile,
         "move_duration_s": float(move_duration_s) if move_duration_s is not None else None,
         "move_duration_source": move_duration_source,
@@ -770,6 +789,7 @@ def run() -> int:
         controller_kind=controller_kind,
         force_hold_current_pose=bool(args.mode in _HOLD_MODES),
         gravity_mode=gravity_mode,
+        gravity_source=gravity_source,
         torque_limit_scale=float(args.torque_limit_scale),
     )
     dt = float(model.opt.timestep)
