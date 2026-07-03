@@ -29,7 +29,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 EXPERIMENT_SCRIPT = REPO_ROOT / "tools" / "ur5e_mujoco_torque_experiments.py"
 
-from tools.tune_ur5e_impedance_transport import (  # noqa: E402
+from tools.tuning_common import (  # noqa: E402
     _candidate_config_payload,
     _candidate_config_path,
     _candidate_label,
