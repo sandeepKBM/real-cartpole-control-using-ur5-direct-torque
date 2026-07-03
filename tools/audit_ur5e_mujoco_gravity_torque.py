@@ -46,6 +46,7 @@ from simulation.ur5e_mujoco_torque import (  # noqa: E402
     compute_joint_limit_proximity,
     load_model,
 )
+from observability.run_logger import RunLogger  # noqa: E402
 from transport_metrics import controller_gain_summary, summarize_residual_torque_trace  # noqa: E402
 
 
@@ -803,6 +804,7 @@ def _run_audit() -> int:
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "per_run_traces").mkdir(parents=True, exist_ok=True)
     (output_root / "plots").mkdir(parents=True, exist_ok=True)
+    run_logger = RunLogger(output_root=output_root, source_script=Path(__file__).name)
 
     model, data, site_id, joint_ids, actuator_ids = load_model(scene_xml)
     summary = {
@@ -927,6 +929,13 @@ def _run_audit() -> int:
                     raw_zero_baselines[(pose.name, duration_s)] = summary_variant
                 variant_results[variant_name] = summary_variant
                 rows.append(summary_variant)
+                run_logger.log_run(
+                    summary_variant,
+                    run_dir=run_dir,
+                    seed=int(args.seed),
+                    config_path=args.config,
+                    run_label=run_label,
+                )
             sign_audit["poses"][pose_key][str(duration_s)] = variant_results
 
             # Hold audit variants.
@@ -1024,6 +1033,11 @@ def _run_audit() -> int:
                             "summary_path": str(run_dir / "summary.json"),
                         }
                     )
+                    # This branch is a fixed-duration hold with no early exit, but its
+                    # rows never stamp a termination reason, which left success=False.
+                    if not summary_variant.get("termination_reason"):
+                        summary_variant["termination_reason"] = "duration_complete"
+                        summary_variant["success"] = True
                     summary_variant.update(_hold_validity_metrics(summary_variant))
                     summary_variant["hold_quality_score"] = float(_hold_quality_score(summary_variant))
                     summary_variant["mean_abs_tau_controller_nm"] = 0.0
@@ -1055,6 +1069,13 @@ def _run_audit() -> int:
                     )
                 hold_results[variant_name] = summary_variant
                 rows.append(summary_variant)
+                run_logger.log_run(
+                    summary_variant,
+                    run_dir=run_dir,
+                    seed=int(args.seed),
+                    config_path=args.config,
+                    run_label=run_label,
+                )
             hold_audit["poses"][pose_key][str(duration_s)] = hold_results
 
     # Cross-run comparisons.
@@ -1241,6 +1262,7 @@ def _run_audit() -> int:
     ):
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     _write_csv(all_rows, csv_path)
+    run_logger.write_sweep_csv_snapshot()
 
     readme = output_root / "README.md"
     readme.write_text(

@@ -44,6 +44,7 @@ BASELINE_GAINS: dict[str, float] = {
     "kd_joint": 0.8,
 }
 
+from observability.run_logger import RunLogger  # noqa: E402
 from tools.tuning_common import (  # noqa: E402
     _candidate_config_payload,
     _candidate_config_path,
@@ -549,6 +550,7 @@ def run() -> int:
     (output_root / "candidate_configs").mkdir(parents=True, exist_ok=True)
     (output_root / "per_run_traces").mkdir(parents=True, exist_ok=True)
     (output_root / "plots").mkdir(parents=True, exist_ok=True)
+    run_logger = RunLogger(output_root=output_root, source_script=Path(__file__).name)
 
     base_cfg, base_gains = _load_base_cfg(args)
     candidate_gains = dict(base_gains)
@@ -583,11 +585,19 @@ def run() -> int:
                         torque_limit_scale=float(torque_limit_scale),
                     )
                     rows.append(summary)
+                    run_logger.log_run(
+                        summary,
+                        run_dir=Path(summary["summary_path"]).parent,
+                        seed=int(args.seed),
+                        config_path=candidate_config_path,
+                        run_label=run_label,
+                    )
 
     csv_path = output_root / "summary.csv"
     summary_path = output_root / "summary.json"
     best_path = output_root / "best_settings.json"
     _write_csv(rows, csv_path)
+    run_logger.write_sweep_csv_snapshot()
 
     valid_rows = [row for row in rows if bool(row.get("valid_move_and_hold", False))]
     strict_valid_rows = [row for row in rows if bool(row.get("valid_move_and_hold", False)) and bool(compute_valid_move_hold_metrics(row, strict=True)["valid_move_and_hold"])]
