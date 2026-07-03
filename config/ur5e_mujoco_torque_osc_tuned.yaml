@@ -1,24 +1,28 @@
 # Tuned operational-space (P3) config — gain retune of config/ur5e_mujoco_torque_osc.yaml.
-# Tuned 2026-07-03 (osc_gain_retune rounds 1-3, move-hold grid dx 0.01-0.04 x hold 1/2s,
-# move 1.0s, scale 1.0, seed 0): 8/8 valid_move_and_hold, 0 safety-guard trips,
-# worst orientation error 0.173 rad, worst hold x error 0.3 mm, max |qd| 0.18 rad/s,
-# zero torque saturation. Untuned OSC scored 1/8 valid with 2 guard trips on the same grid.
+# Tuned 2026-07-03 (osc_gain_retune rounds 1-6 + rot-instability probe, seed 0).
+# Final validation:
+#   - canonical grid (dx 0.01-0.04 x hold 1/2s, move 1.0s, scale 1.0): 8/8 valid,
+#     0 guard trips, worst orientation 0.042 rad, worst hold x error < 0.1 mm.
+#   - long holds (dx 0.03/0.05, hold 4s): 2/2 valid, worst orientation 0.060 rad.
+#   - off-grid (dx 0.02/0.05 x move 0.5/1.0s x hold 4s x scale 0.75/1.0): 6/8 valid,
+#     0 guard trips; the two misses are move=0.5s tracking lag (envelope edge).
+#   Untuned OSC on the canonical grid: 1/8 valid, 2 guard trips, |qd| up to 1.7 rad/s.
 #
 # Under task_space_inertia_shaping the gains are task-ACCELERATION gains (wrench = Lambda @ PD),
 # not stiffnesses — do not copy them into non-OSC configs.
-# Key mechanism (why these values): the transport start pose [0, -pi/2, 0, -pi/2, 0, 0] is at
-# the UR wrist singularity (wrist_2 = 0), so orientation drifts along a direction the task
-# Jacobian cannot actuate. The fixes are joint-space: kp/kd_posture 25/6 anchors the arm
-# through the nullspace projector (which passes posture exactly in task-singular directions),
-# kd_joint 4.0 damps the singular-direction coasting, lambda_regularization 0.1 lets enough
-# posture through near the singularity, and kp_x 400 gives the task authority to out-pull the
-# anchor (fixes small-dx settling lag).
-#
-# Validated envelope: move 1.0s, dx 0.01-0.04, holds <= 2s (8/8 valid). Known limitation:
-# holds >= 4s still drift in the singular direction (guard trip ~3.5-4.5s) because q_rest
-# stays the pre-move pose, so anchor-vs-task forces pump the self-motion drift; kd_joint 8.0
-# passes 4s holds at dx <= 0.05 but makes 1cm moves settle ~1s late. The structural fix is
-# posture re-anchoring at hold start (flag-gated controller change, tracked separately).
+# Why these values: the transport start pose [0, -pi/2, 0, -pi/2, 0, 0] is at the UR wrist
+# singularity (wrist_2 = 0). Two findings drive the gain set:
+#   1. Orientation drifts along a direction the task Jacobian cannot actuate — only the
+#      joint-space posture anchor (kp/kd_posture 25/6, passed by the nullspace projector
+#      exactly in task-singular directions) and kd_joint 4.0 damping act there;
+#      lambda_regularization 0.1 lets enough posture through, kp_x 400 gives the task
+#      authority to out-pull the anchor (fixes small-dx settling lag).
+#   2. The task rotation PD is UNSTABLE at this pose: through the eps-regularized Lambda it
+#      feeds back positively along the near-singular direction (hold-phase orientation error
+#      doubling every ~0.9s; rate scales with kp_rot — 30 trips the guard at ~3.5s, 10 is
+#      bounded, 0 is exactly still). Hence kp_rot 5 / kd_rot 10: minimal restoring authority,
+#      ~10x stability margin. posture_reanchor_on_settle re-anchors q_rest at hold start so
+#      posture holds orientation instead.
 #
 # NOTE: tools/ur5e_move_hold_transport.py overrides config gains with its BASELINE_GAINS;
 # to evaluate THIS gain set through that driver pass:
@@ -72,12 +76,13 @@ controller:
     kd_y: 15.0
     kp_z: 120.0
     kd_z: 20.0
-    kp_rot: 30.0
-    kd_rot: 8.0
+    kp_rot: 5.0
+    kd_rot: 10.0
     kp_posture: 25.0
     kd_posture: 6.0
     kd_joint: 4.0
   task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
   nullspace_posture: true
   lambda_regularization: 0.1
   torque_headroom: 0.9
