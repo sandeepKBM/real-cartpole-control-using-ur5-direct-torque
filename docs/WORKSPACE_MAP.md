@@ -1,116 +1,37 @@
 # Workspace Map
 
-This is a quick orientation map for `/common/users/ss5772/real_Cartpole`.
+Quick orientation map for `/common/users/ss5772/real_Cartpole` (post-2026-07-03 layout).
 
-## Important Reality Check
+## Reality check
 
-- The root folder is not a git repository.
-- `mujoco_menagerie/` is a nested git repository.
-- The folder name is historical. Current work is UR5 / UR5e control, especially CoppeliaSim torque control.
-- Root `AGENTS.md` is the agent playbook and intentionally remains outside `docs/`.
+- The root folder **is** a git repository (branch `feature/ur5e-mujoco-torque-control`).
+  `outputs/`, `reports/`, `third_party/` are gitignored.
+- The folder name is historical: this is a UR5e torque-control workspace. The active lane is
+  **MuJoCo true-torque simulation**; CoppeliaSim is archived.
+- Root `AGENTS.md` (= `CLAUDE.md`) is the agent playbook and stays outside `docs/`.
 
-## Active Source Areas
+## Active areas
 
-### `controller_core/`
+| Path | Purpose |
+|---|---|
+| `controller_core/` | Simulator-independent controller library (impedance law, QP torque law, safety monitor, kinematics, logging utils). Numpy only. |
+| `simulation/` | `ur5e_mujoco_torque.py` (MuJoCo adapter) and `workspace_guardrails.py` (viz-only lab guardrails). |
+| `tools/` | Active MuJoCo entrypoints (rollout engine, gravity audit, move-hold sweep, envelope sweep, residual tuner) + hardware operator scripts; `tools/diagnostics/` for secondary analysis. |
+| `observability/` | `RunLogger` — unified per-run/sweep JSON records. |
+| `assets/ur5e_torque/` | The custom torque-actuated UR5e MJCF (the centerpiece model). |
+| `vendor/mujoco_menagerie/` | Tracked UR5e/UR10e mesh + scene assets (the only menagerie copy on disk). |
+| `config/` | `ur5e_mujoco_torque*.yaml` (lane configs), `lab_workspace_guardrails.yaml`. |
+| `tests/` | `unit/` (pure numpy), `mujoco/`, `hardware/` — markers auto-applied; root `pytest.ini`. |
+| `hardware/` | Real-UR5e RTDE staging lane, guardrails per AGENTS.md §4. |
+| `ros2_ws/` | Hardware pipeline node + description/moveit packages (CoppeliaSim nodes archived). |
+| `outputs/` | Run artifacts (gitignored). Sweep dirs carry `run_log.jsonl`/`run_log.csv`. |
+| `docs/` | This documentation tree. |
 
-Portable controller code.
+## Archived areas
 
-Important files:
-
-- `x_axis_cartesian_impedance.py`
-- `filters.py`
-- `safety.py`
-- `logging_utils.py`
-- `tests/test_impedance.py`
-
-### `simulation/`
-
-Simulator launchers and direct runner scripts.
-
-Important files:
-
-- `launch_coppeliasim_video_smoke.sh`
-- `launch_coppeliasim_x_axis_headless.sh`
-- `launch_coppeliasim_x_axis_offscreen_capture.sh`
-- `run_coppeliasim_video_smoke.py`
-- `run_coppeliasim_x_axis_headless.py`
-- `ur5_video_smoke_addon.lua`
-- `ur5_external_controller_capture_addon.lua`
-- `plot_coppeliasim_trace.py`
-
-### `ros2_ws/src/ur5_x_axis_controller_ros/`
-
-ROS 2 package and CoppeliaSim adapter.
-
-Important files:
-
-- `config/controller.yaml`
-- `ur5_x_axis_controller_ros/coppeliasim_adapter.py`
-- `ur5_x_axis_controller_ros/controller_node.py`
-- `ur5_x_axis_controller_ros/coppeliasim_bridge_node.py`
-
-### `third_party/coppelia_runtime/`
-
-Repo-local CoppeliaSim runtime.
-
-Expected anchor:
-
-```text
-third_party/coppelia_runtime/CoppeliaSim_Edu_V4_10_0_rev0_Ubuntu24_04
-```
-
-Expected official model:
-
-```text
-models/robots/non-mobile/UR5.ttm
-```
-
-### `third_party/coppelia_pydeps/`
-
-Repo-local Python dependency anchor for CoppeliaSim ZMQ RPC.
-
-### `outputs/control_runs/`
-
-Runtime artifacts:
-
-- logs,
-- JSONL traces,
-- summary JSON files,
-- frame dumps,
-- bootstrap marker/state files.
-
-### `demonstration_videos/`
-
-Rendered validation videos.
-
-Current CoppeliaSim output area:
-
-```text
-demonstration_videos/ur5e_coppeliasim/
-```
-
-## Documentation Areas
-
-### `docs/`
-
-Current documentation landing page and active status docs.
-
-### `docs/coppeliasim/`
-
-Active CoppeliaSim controller/RPC docs.
-
-### `docs/archive/`
-
-Historical notes from earlier MuJoCo, MoveIt, SLSQP, and workspace studies.
-
-### `docs/ros2/`
-
-Moved ROS 2 package documentation.
-
-### `docs/controller_core/`
-
-Moved portable controller documentation.
-
-### `docs/simulation/`
-
-Simulation-script documentation.
+| Path | Contents |
+|---|---|
+| `archive/coppelia/` | Entire CoppeliaSim lane: orchestrator + Lua + launchers + ZMQ probes + WSL bring-up, RL PPO stack, ROS2 controller/bridge nodes, configs, tests, docs. |
+| `archive/legacy_mujoco/` | Pre-torque-lane MuJoCo cartpole diagnostics. |
+| `archive/superseded/` | Replaced drivers (old impedance tuner). |
+| `third_party/` | Vendored CoppeliaSim runtime + pydeps (gitignored, kept on disk). |
