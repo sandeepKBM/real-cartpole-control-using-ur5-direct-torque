@@ -15,7 +15,7 @@ import math
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 
 import mujoco
 import numpy as np
@@ -26,20 +26,19 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from controller_core.logging_utils import JsonlTraceWriter, json_dumps_safe  # noqa: E402
 from controller_core.kinematics_utils import orientation_error_vec_wxyz, rotmat_to_quat  # noqa: E402
-from mujoco_ur5e_tools import torque_limit_vector  # noqa: E402
 from mujoco_ur5e_tools import get_compiled_ur5e_torque_model_diagnostics  # noqa: E402
 from mujoco_ur5e_tools import validate_ur5e_torque_xml_source_tree  # noqa: E402
 from simulation.ur5e_mujoco_torque import (  # noqa: E402
     DEFAULT_OUTPUT_DIR,
-    MujocoUR5eState,
-    MujocoUR5eTorqueAdapter,
-    MujocoUR5eTorqueAdapterConfig,
-    build_controller,
+    apply_start_q,
+    build_initial_state_and_adapter,
     build_mujoco_state,
     compute_joint_limit_proximity,
     compute_reward_terms,
     load_model,
+    resolve_start_q,
     write_trace_plot,
+    x_profile_target,
 )
 from transport_metrics import compute_valid_move_hold_metrics, controller_gain_summary, summarize_move_hold_trace, summarize_residual_torque_trace, summarize_transport_trace  # noqa: E402
 
@@ -223,139 +222,6 @@ def _resolve_move_duration(mujoco_cfg: dict[str, Any], explicit: float | None) -
     if legacy is not None:
         return float(legacy), "config"
     return None, "unset"
-
-
-def _x_profile_target(
-    profile: str,
-    x0: float,
-    target_x_delta: float,
-    t_s: float,
-    duration_s: float,
-    move_duration_s: float | None = None,
-) -> tuple[float, float]:
-    duration_s = max(float(duration_s), 1.0e-9)
-    a = float(np.clip(float(t_s) / duration_s, 0.0, 1.0))
-    if profile == "step":
-        return float(x0 + target_x_delta), 0.0
-    if profile == "ramp":
-        return float(x0 + target_x_delta * a), float(target_x_delta / duration_s if t_s < duration_s else 0.0)
-    if profile == "min_jerk":
-        s = 10.0 * a**3 - 15.0 * a**4 + 6.0 * a**5
-        ds_da = 30.0 * a**2 - 60.0 * a**3 + 30.0 * a**4
-        x_vel = float(target_x_delta * ds_da / duration_s if 0.0 <= t_s < duration_s else 0.0)
-        return float(x0 + target_x_delta * s), x_vel
-    if profile == "min_jerk_move_hold":
-        if move_duration_s is None:
-            raise ValueError("min_jerk_move_hold requires move_duration_s")
-        move_duration_s = max(float(move_duration_s), 1.0e-9)
-        if move_duration_s > duration_s:
-            raise ValueError("move_duration_s must not exceed duration_s for min_jerk_move_hold")
-        if t_s <= move_duration_s:
-            move_a = float(np.clip(float(t_s) / move_duration_s, 0.0, 1.0))
-            s = 10.0 * move_a**3 - 15.0 * move_a**4 + 6.0 * move_a**5
-            ds_da = 30.0 * move_a**2 - 60.0 * move_a**3 + 30.0 * move_a**4
-            x_vel = float(target_x_delta * ds_da / move_duration_s if 0.0 <= t_s < move_duration_s else 0.0)
-            return float(x0 + target_x_delta * s), x_vel
-        return float(x0 + target_x_delta), 0.0
-    raise ValueError(f"Unsupported trajectory profile: {profile!r}")
-
-
-def _coerce_start_q(start_q: Sequence[float], *, source: str) -> np.ndarray:
-    arr = np.asarray(start_q, dtype=np.float64).reshape(-1)
-    if arr.shape[0] != 6:
-        raise ValueError(f"{source} must have 6 joint values; got {arr.shape[0]}")
-    if not np.all(np.isfinite(arr)):
-        raise ValueError(f"{source} must contain finite values")
-    return arr
-
-
-def _resolve_start_q(mujoco_cfg: dict[str, Any], explicit: Sequence[float] | None) -> tuple[np.ndarray | None, str]:
-    if explicit is not None:
-        return _coerce_start_q(explicit, source="--start-q-rad"), "cli"
-    if mujoco_cfg.get("start_q") is not None:
-        return _coerce_start_q(mujoco_cfg["start_q"], source="mujoco.start_q"), "config:start_q"
-    if bool(mujoco_cfg.get("use_home_qpos_as_start", False)) and mujoco_cfg.get("home_qpos") is not None:
-        return _coerce_start_q(mujoco_cfg["home_qpos"], source="mujoco.home_qpos"), "config:home_qpos"
-    return None, "model_default"
-
-
-def _apply_start_q(model: mujoco.MjModel, data: mujoco.MjData, start_q: Sequence[float]) -> np.ndarray:
-    q_start = _coerce_start_q(start_q, source="start_q")
-    data.qpos[:] = 0.0
-    data.qvel[:] = 0.0
-    if hasattr(data, "qacc"):
-        data.qacc[:] = 0.0
-    if hasattr(data, "ctrl"):
-        data.ctrl[:] = 0.0
-    if hasattr(data, "qfrc_applied"):
-        data.qfrc_applied[:] = 0.0
-    if hasattr(data, "xfrc_applied"):
-        data.xfrc_applied[:] = 0.0
-    data.qpos[: q_start.shape[0]] = q_start
-    mujoco.mj_forward(model, data)
-    return q_start
-
-
-def _initial_state(
-    model: mujoco.MjModel,
-    data: mujoco.MjData,
-    site_id: int,
-    joint_ids: list[int],
-    *,
-    controller_cfg: dict[str, Any],
-    transport_axis_index: int,
-    target_x_delta: float,
-    controller_kind: str,
-    force_hold_current_pose: bool,
-    gravity_mode: str,
-    gravity_source: str = "mujoco_qfrc",
-    coriolis_feedforward: bool = False,
-    torque_limit_scale: float,
-) -> tuple[MujocoUR5eState, MujocoUR5eTorqueAdapter]:
-    mujoco.mj_forward(model, data)
-    ee_pos = np.asarray(data.site_xpos[site_id], dtype=np.float64).copy()
-    ee_rot = np.asarray(data.site_xmat[site_id], dtype=np.float64).reshape(3, 3).copy()
-    reference_quat = rotmat_to_quat(ee_rot)
-    target_ee_pos = ee_pos.copy()
-    target_ee_pos[0] = float(ee_pos[0] + target_x_delta)
-    state = build_mujoco_state(
-        model,
-        data,
-        site_id=site_id,
-        joint_ids=joint_ids,
-        time_s=float(data.time),
-        dt_s=float(model.opt.timestep),
-        target_x=float(target_ee_pos[0]),
-        target_x_vel=0.0,
-        target_axis=float(target_ee_pos[transport_axis_index]),
-        target_axis_vel=0.0,
-        target_ee_pos=target_ee_pos,
-        target_ee_vel=np.zeros(3, dtype=np.float64),
-        reference_quat=reference_quat,
-        hold_current_pose=bool(force_hold_current_pose or (controller_kind == "impedance" and abs(target_x_delta) < 1e-12)),
-        transport_axis_index=transport_axis_index,
-        gravity_compensation=bool(gravity_mode == "gravity_comp"),
-    )
-    controller = build_controller(controller_kind, controller_cfg)
-    adapter = MujocoUR5eTorqueAdapter(
-        model=model,
-        site_id=site_id,
-        joint_ids=joint_ids,
-        controller=controller,
-        config=MujocoUR5eTorqueAdapterConfig(
-            controller_kind=controller_kind,
-            torque_limit_nm=torque_limit_vector() * float(torque_limit_scale),
-            torque_limit_scale=float(torque_limit_scale),
-            rate_limit_nm_per_sec=np.array([800.0, 800.0, 800.0, 160.0, 160.0, 160.0], dtype=np.float64),
-            lowpass_alpha=1.0,
-            gravity_mode=str(gravity_mode),
-            gravity_source=str(gravity_source),
-            coriolis_feedforward=bool(coriolis_feedforward),
-            transport_axis_index=transport_axis_index,
-        ),
-    )
-    adapter.reset(state)
-    return state, adapter
 
 
 def _direct_torque_profile(mode: str, args: argparse.Namespace, t: float) -> np.ndarray:
@@ -759,9 +625,9 @@ def run() -> int:
     summary["compiled_model_diagnostics"] = get_compiled_ur5e_torque_model_diagnostics(model, site_name="attachment_site")
     summary["true_torque_verified"] = True
     summary.update(controller_gain_summary(ctrl_cfg))
-    start_q, start_q_source = _resolve_start_q(mujoco_cfg, args.start_q_rad)
+    start_q, start_q_source = resolve_start_q(mujoco_cfg, args.start_q_rad)
     if start_q is not None:
-        _apply_start_q(model, data, start_q)
+        apply_start_q(model, data, start_q)
     summary["start_q_source"] = start_q_source
     summary["start_q_rad"] = start_q.tolist() if start_q is not None else None
 
@@ -793,7 +659,7 @@ def run() -> int:
     summary["transport_axis_index"] = int(args.transport_axis_index)
     if trajectory_profile == "min_jerk_move_hold":
         summary["hold_duration_s"] = float(args.duration) - float(move_duration_s if move_duration_s is not None else 0.0)
-    state0, adapter = _initial_state(
+    state0, adapter = build_initial_state_and_adapter(
         model,
         data,
         site_id,
@@ -833,7 +699,7 @@ def run() -> int:
 
     with JsonlTraceWriter(trace_path) as trace_writer:
         for step_idx in range(steps):
-            target_x_now, target_x_vel_now = _x_profile_target(
+            target_x_now, target_x_vel_now = x_profile_target(
                 trajectory_profile,
                 float(state0.ee_pos[0]),
                 float(target_x_delta),

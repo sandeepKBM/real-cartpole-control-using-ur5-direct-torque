@@ -24,6 +24,7 @@ from simulation.ur5e_mujoco_torque import (  # noqa: E402
     build_mujoco_state,
     compute_joint_limit_proximity,
     load_model,
+    x_profile_target,
 )
 from tools.audit_ur5e_mujoco_gravity_torque import (  # noqa: E402
     GRAVITY_SIGN_VARIANTS,
@@ -33,7 +34,6 @@ from tools.audit_ur5e_mujoco_gravity_torque import (  # noqa: E402
     compute_bias_torque_static,
     compute_gravity_torque_static,
 )
-from tools.ur5e_mujoco_torque_experiments import _x_profile_target  # noqa: E402
 from transport_metrics import compute_valid_move_hold_metrics, compute_valid_transport_metrics, move_hold_ranking_key, summarize_move_hold_trace  # noqa: E402
 
 
@@ -320,8 +320,8 @@ def _make_move_hold_trace(
 
 
 def test_min_jerk_move_hold_profile_reaches_target_and_holds() -> None:
-    x_at_move_end, vel_at_move_end = _x_profile_target("min_jerk_move_hold", 0.0, 0.02, 0.05, 0.1, move_duration_s=0.05)
-    x_after_hold, vel_after_hold = _x_profile_target("min_jerk_move_hold", 0.0, 0.02, 0.075, 0.1, move_duration_s=0.05)
+    x_at_move_end, vel_at_move_end = x_profile_target("min_jerk_move_hold", 0.0, 0.02, 0.05, 0.1, move_duration_s=0.05)
+    x_after_hold, vel_after_hold = x_profile_target("min_jerk_move_hold", 0.0, 0.02, 0.075, 0.1, move_duration_s=0.05)
     assert x_at_move_end == pytest.approx(0.02, abs=1e-9)
     assert vel_at_move_end == pytest.approx(0.0, abs=1e-9)
     assert x_after_hold == pytest.approx(0.02, abs=1e-9)

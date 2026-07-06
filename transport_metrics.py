@@ -669,6 +669,13 @@ def _move_hold_tolerances(run_summary: Mapping[str, Any], *, strict: bool) -> di
     }
 
 
+#: Public alias for external callers (e.g. the RL gain-scheduling reward code)
+#: that want the same tolerance constants used to score a completed rollout,
+#: without reaching into a "private" name. No behavior change vs. the
+#: underlying function.
+move_hold_tolerances = _move_hold_tolerances
+
+
 def _ensure_move_hold_fields(run_summary: Mapping[str, Any]) -> dict[str, Any]:
     data = dict(run_summary)
     trace_rows = _load_trace_rows(data.get("trace_path"))
