@@ -392,8 +392,20 @@ class GainSchedulingEnv(gym.Env):
         })
         if self._lightweight_trace:
             run_summary["max_abs_qd_radps"] = float(np.max(np.abs([row["qd"] for row in self._lightweight_trace])))
+        # RunLogger reads these bare (non-phase-prefixed) names; derive them
+        # from the phase-prefixed fields summarize_move_hold_trace already
+        # computed, so RunLogger records for env-driven runs are as complete
+        # as the CLI's (which populates both).
+        run_summary.setdefault("achieved_x_delta_m", run_summary.get("hold_phase_achieved_x_delta_m", run_summary.get("move_phase_achieved_x_delta_m", 0.0)))
+        run_summary.setdefault("final_x_error_m", run_summary.get("hold_phase_final_x_error_m", 0.0))
+        run_summary.setdefault("max_abs_x_error_m", max(run_summary.get("move_phase_max_abs_x_error_m", 0.0), run_summary.get("hold_phase_max_abs_x_error_m", 0.0)))
+        run_summary.setdefault("max_abs_y_drift_m", max(run_summary.get("move_phase_max_abs_y_drift_m", 0.0), run_summary.get("hold_phase_max_abs_y_drift_m", 0.0)))
+        run_summary.setdefault("max_abs_z_drift_m", max(run_summary.get("move_phase_max_abs_z_drift_m", 0.0), run_summary.get("hold_phase_max_abs_z_drift_m", 0.0)))
+        run_summary.setdefault("max_abs_orientation_error_rad", max(run_summary.get("move_phase_max_abs_orientation_error_rad", 0.0), run_summary.get("hold_phase_max_abs_orientation_error_rad", 0.0)))
+        run_summary.setdefault("final_orientation_error_rad", run_summary.get("hold_phase_max_abs_orientation_error_rad", 0.0))
         run_summary.update(compute_valid_move_hold_metrics(run_summary, strict=False))
         if self._output_dir is not None:
+            run_summary["summary_path"] = str(self._output_dir / "summary.json")
             (self._output_dir / "summary.json").write_text(json_dumps_safe(run_summary), encoding="utf-8")
         self._trace_writer = None
 
