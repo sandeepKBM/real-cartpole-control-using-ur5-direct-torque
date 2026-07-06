@@ -876,10 +876,16 @@ def run() -> int:
                     - post_state.ee_pos[int(args.transport_axis_index)]
                 )
             )
+            post_axis_target_vel = float(
+                post_state.target_x_vel
+                if int(args.transport_axis_index) == 0
+                else (post_state.target_axis_vel if post_state.target_axis_vel is not None else post_state.target_x_vel)
+            )
             post_safety = adapter.safety_monitor.check(
                 post_state.as_robot_state(),
                 axis_error=post_axis_err,
                 orientation_error_norm=post_orient_err,
+                axis_target_moving=bool(abs(post_axis_target_vel) > 1e-9),
             )
             joint_prox = compute_joint_limit_proximity(model, post_state.q, joint_ids)
             joint_limit_min_fraction = float(min(joint_prox.values())) if joint_prox else 0.0

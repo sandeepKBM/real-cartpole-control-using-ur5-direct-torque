@@ -437,11 +437,15 @@ class MujocoUR5eTorqueAdapter:
         axis_err = float(state.target_x - state.ee_pos[axis_idx]) if axis_idx == 0 else (
             float((state.target_axis if state.target_axis is not None else state.target_x) - state.ee_pos[axis_idx])
         )
+        axis_target_vel = float(state.target_x_vel) if axis_idx == 0 else (
+            float(state.target_axis_vel if state.target_axis_vel is not None else state.target_x_vel)
+        )
         orient_err_vec = orientation_error_vec_wxyz(self._initial_quat if self._initial_quat is not None else state.ee_quat, state.ee_quat)
         safety = self.safety_monitor.check(
             state.as_robot_state(),
             axis_error=axis_err,
             orientation_error_norm=float(np.linalg.norm(orient_err_vec)),
+            axis_target_moving=bool(abs(axis_target_vel) > 1e-9),
         )
         diag = {
             **(controller_diag or {}),

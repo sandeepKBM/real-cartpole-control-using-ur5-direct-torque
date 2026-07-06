@@ -73,6 +73,7 @@ class ImpedanceSafetyMonitor:
         axis_error: float | None = None,
         x_error: float | None = None,
         orientation_error_norm: float,
+        axis_target_moving: bool = False,
     ) -> ImpedanceSafetyStatus:
         reasons: list[str] = []
         q = np.asarray(state["q"], dtype=np.float64).reshape(-1)
@@ -116,7 +117,15 @@ class ImpedanceSafetyMonitor:
         if axis_err is not None:
             abs_axis_err = abs(float(axis_err))
             if self._move_axis is not None:
-                if self._prev_abs_axis_err is not None:
+                if axis_target_moving:
+                    # The transport target is actively ramping (e.g. a
+                    # min-jerk move profile): the tracking error growing
+                    # while chasing a moving target is expected dynamics,
+                    # not divergence. Don't accumulate the growth streak
+                    # here, but keep the reference current so growth from
+                    # this point is detected once the target settles.
+                    self._axis_err_grow_count = 0
+                elif self._prev_abs_axis_err is not None:
                     if abs_axis_err > self._prev_abs_axis_err + 1e-9:
                         self._axis_err_grow_count += 1
                     else:
@@ -127,7 +136,9 @@ class ImpedanceSafetyMonitor:
                         )
                 self._prev_abs_axis_err = abs_axis_err
             else:
-                if self._prev_abs_x_err is not None:
+                if axis_target_moving:
+                    self._x_err_grow_count = 0
+                elif self._prev_abs_x_err is not None:
                     if abs_axis_err > self._prev_abs_x_err + 1e-9:
                         self._x_err_grow_count += 1
                     else:
