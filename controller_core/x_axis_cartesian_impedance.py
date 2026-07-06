@@ -145,6 +145,14 @@ class XAxisCartesianImpedanceController:
     torque limits.
     """
 
+    #: Gain fields a gain-scheduling policy (or any other caller) may update
+    #: mid-episode via ``set_gains()``. Must stay in sync with
+    #: ``transport_metrics.GAIN_FIELDS`` -- a cross-module test asserts this.
+    _SCHEDULABLE_GAIN_FIELDS: tuple[str, ...] = (
+        "kp_x", "kd_x", "kp_y", "kd_y", "kp_z", "kd_z",
+        "kp_rot", "kd_rot", "kp_posture", "kd_posture", "kd_joint",
+    )
+
     def __init__(self, config: CartesianImpedanceConfig) -> None:
         self.cfg = config
         self._initialized = False
@@ -173,6 +181,26 @@ class XAxisCartesianImpedanceController:
     @property
     def initialized(self) -> bool:
         return self._initialized
+
+    def set_gains(self, gains: dict[str, float]) -> None:
+        """Overwrite a subset of the 11 scheduled gain fields on ``self.cfg`` in place.
+
+        For a gain-scheduling policy that calls this every step. Does not
+        touch ``tau_max_nm``, the P3 flags, or any instance state (``_q_rest``,
+        posture-reanchor bookkeeping, hold reference) -- a gain change must
+        never reset the posture anchor or hold reference mid-episode.
+        """
+        unknown = set(gains) - set(self._SCHEDULABLE_GAIN_FIELDS)
+        if unknown:
+            raise ValueError(f"set_gains got unknown gain field(s): {sorted(unknown)}")
+        validated: dict[str, float] = {}
+        for key, value in gains.items():
+            value = float(value)
+            if not np.isfinite(value):
+                raise ValueError(f"set_gains: {key} must be finite, got {value!r}")
+            validated[key] = value
+        for key, value in validated.items():
+            setattr(self.cfg, key, value)
 
     @staticmethod
     def _torque_within_limits(tau: np.ndarray, limit: np.ndarray) -> bool:

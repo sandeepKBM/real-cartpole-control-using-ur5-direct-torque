@@ -13,6 +13,7 @@ from controller_core.x_axis_cartesian_impedance import (  # noqa: E402
     CartesianImpedanceConfig,
     XAxisCartesianImpedanceController,
 )
+from transport_metrics import GAIN_FIELDS  # noqa: E402
 
 
 def _state(t, x, vx, y, vy, z, vz, quat, wx, wy, wz, q, qd, target_x, J):
@@ -202,10 +203,89 @@ def test_hold_current_pose_reanchors_controller_state() -> None:
     assert np.allclose(ctrl._quat0, quat1)
 
 
+def _default_controller() -> XAxisCartesianImpedanceController:
+    cfg = CartesianImpedanceConfig(tau_max_nm=np.array([1.0e6] * 6))
+    ctrl = XAxisCartesianImpedanceController(cfg)
+    J = np.eye(6)
+    quat = np.array([1.0, 0.0, 0.0, 0.0])
+    st0 = _state(0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, quat, 0, 0, 0, np.zeros(6), np.zeros(6), 0.0, J)
+    ctrl.reset_from_state(st0)
+    return ctrl
+
+
+def test_set_gains_updates_only_selected_fields() -> None:
+    ctrl = _default_controller()
+    before = {name: getattr(ctrl.cfg, name) for name in ctrl._SCHEDULABLE_GAIN_FIELDS}
+    ctrl.set_gains({"kp_x": 999.0})
+    assert ctrl.cfg.kp_x == 999.0
+    for name in ctrl._SCHEDULABLE_GAIN_FIELDS:
+        if name == "kp_x":
+            continue
+        assert getattr(ctrl.cfg, name) == before[name]
+    # Non-gain fields untouched.
+    assert np.array_equal(ctrl.cfg.tau_max_nm, np.array([1.0e6] * 6))
+    assert ctrl.cfg.task_space_inertia_shaping is False
+    assert ctrl.cfg.nullspace_posture is False
+
+
+def test_set_gains_rejects_unknown_key() -> None:
+    ctrl = _default_controller()
+    for bad_key in ("tau_max_nm", "bogus_field"):
+        try:
+            ctrl.set_gains({bad_key: 1.0})
+            assert False, f"expected ValueError for {bad_key!r}"
+        except ValueError:
+            pass
+
+
+def test_set_gains_rejects_non_finite_atomically() -> None:
+    ctrl = _default_controller()
+    before = {name: getattr(ctrl.cfg, name) for name in ctrl._SCHEDULABLE_GAIN_FIELDS}
+    for bad_value in (float("nan"), float("inf"), float("-inf")):
+        try:
+            ctrl.set_gains({"kp_x": 1.0, "kp_y": bad_value})
+            assert False, f"expected ValueError for {bad_value!r}"
+        except ValueError:
+            pass
+        # No partial apply: kp_x must NOT have been updated to 1.0 either.
+        for name in ctrl._SCHEDULABLE_GAIN_FIELDS:
+            assert getattr(ctrl.cfg, name) == before[name]
+
+
+def test_set_gains_changes_next_compute_and_preserves_hold_state() -> None:
+    ctrl = _default_controller()
+    J = np.eye(6)
+    quat = np.array([1.0, 0.0, 0.0, 0.0])
+    q1 = np.array([0.1, -0.2, 0.3, -0.4, 0.5, -0.6], dtype=np.float64)
+    st_hold = _state(0.1, 0.05, 0.0, 0.0, 0.0, 0.5, 0.0, quat, 0, 0, 0, q1, np.zeros(6), 0.0, J)
+    st_hold["hold_current_pose"] = True
+    ctrl.compute(st_hold)
+    q_rest_before = ctrl._q_rest.copy()
+    hold_ref_before = ctrl._hold_reference_initialized
+
+    st_move = _state(0.2, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, quat, 0, 0, 0, np.zeros(6), np.zeros(6), 1.0, J)
+    baseline = ctrl.compute(st_move)
+    ctrl.set_gains({"kp_x": ctrl.cfg.kp_x * 4.0})
+    scaled = ctrl.compute(st_move)
+    assert np.isclose(scaled.wrench[0], baseline.wrench[0] * 4.0)
+    # Hold/anchor instance state must survive the gain change untouched.
+    assert np.allclose(ctrl._q_rest, q_rest_before)
+    assert ctrl._hold_reference_initialized == hold_ref_before
+
+
+def test_gain_field_tuple_matches_transport_metrics() -> None:
+    assert set(XAxisCartesianImpedanceController._SCHEDULABLE_GAIN_FIELDS) == set(GAIN_FIELDS)
+
+
 if __name__ == "__main__":
     test_hold_at_goal_zero_wrench_components()
     test_x_error_produces_positive_fx()
     test_torque_backtracking_shrinks_task_scale_under_tight_limits()
     test_bias_only_saturation_backtracks_full_torque_candidate()
     test_hold_current_pose_reanchors_controller_state()
+    test_set_gains_updates_only_selected_fields()
+    test_set_gains_rejects_unknown_key()
+    test_set_gains_rejects_non_finite_atomically()
+    test_set_gains_changes_next_compute_and_preserves_hold_state()
+    test_gain_field_tuple_matches_transport_metrics()
     print("impedance tests OK")
