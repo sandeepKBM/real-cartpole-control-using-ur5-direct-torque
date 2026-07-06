@@ -42,7 +42,9 @@ chronological logs here — that pattern was retired 2026-07-03; the old log is 
   - `python tools/audit_ur5e_mujoco_gravity_torque.py --poses active_origin --durations 1.0 2.0 --seed 0 --no-plot`
   - `python tools/ur5e_move_hold_transport.py --target-x-deltas 0.01 0.02 --move-durations 1.0 --hold-durations 1.0 2.0 --torque-limit-scales 1.0 --seed 0 --no-plot`
 - Secondary analysis lives in `tools/diagnostics/` (guardrail trajectory check/overlay,
-  torque-QP smoke). The lab workspace-guardrail workflow
+  torque-QP smoke, `render_trace_video.py` — kinematic replay of a `trace.jsonl` to MP4 via
+  `mujoco.Renderer`; needs `MUJOCO_GL=egl` on this headless host, camera defaults tuned for
+  the active-origin transport pose). The lab workspace-guardrail workflow
   (`config/lab_workspace_guardrails.yaml`, `simulation/workspace_guardrails.py`) is
   simulation/visualization only — never wire it into real-arm e-stop logic.
 
