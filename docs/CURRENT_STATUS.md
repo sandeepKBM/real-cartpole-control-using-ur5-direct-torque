@@ -1,6 +1,6 @@
 # Current Status
 
-Last updated: 2026-07-03 (post Pinocchio P0-P3 + OSC gain tuning + transport_metrics sign-bug fix).
+Last updated: 2026-07-07 (hardware lane rewrite + RL gain-scheduling training/eval).
 
 ## Active Objective
 
@@ -85,10 +85,62 @@ bandwidth limit at the tuned `kp_x`, not saturation).
 - Refreshed `docs/controller_core/`, `docs/simulation/`, `docs/ros2/` subsystem docs to match
   the current (post-archival, post-Pinocchio/OSC) code layout.
 
+## 2026-07-07: hardware lane rewrite
+
+`hardware/` was rewritten from scratch (audited for architecture bugs first — see
+`AGENTS.md` §4 for the real stale-state bug found in the old ROS2 pipeline node, and the
+missing e-stop-latch-implementation claim that turned out to be false). New lane:
+`hardware/{safety,link,motion}.py` + `tools/ur5e_{connect,move}.py`. Direct torque control is
+confirmed out of scope (no working torque API in the installed `rtde_control`, no Jacobian/FK
+path off MuJoCo) — motion uses Cartesian `servoL` instead, IK done robot-side. Old lane
+archived whole to `archive/superseded/hardware_rtde_v1/`. 46 new tests (fake-RTDE-object
+pattern), full suite 167 passing.
+
+Additionally validated against the *real* Universal Robots `URControl` binary (via a local
+URSim instance, not a mock — see session notes): confirmed `RTDEReceiveInterface` really has
+`getSafetyStatusBits` (not `getSafetyStatus`) and `RTDEControlInterface.servoL`'s real
+signature is exactly `(pose, speed, acceleration, time, lookahead_time, gain)` — both match
+this code's assumptions exactly. `hardware/link.py`'s `read_state()` was also confirmed to
+correctly reject a degenerate (not-fully-powered-on) real-server response rather than
+accepting bad data. Full detail: `docs/hardware/README.md`.
+
+Not verifiable without the real robot: actual `servoL` motion, 125Hz streaming under real
+network conditions, real TCP orientation-vector convention, and whether the physical mount
+makes the chosen `--axis` argument correspond to true left/right.
+
+## 2026-07-06/07: RL gain-scheduling — unresolved, do not treat any checkpoint as "the good one"
+
+`rl_gain_scheduling/` trains a PPO policy to schedule the tuned OSC controller's gains live
+(vs. the fixed-gain baseline config). Four training runs so far, **none has beaten the fixed
+baseline on the full comparative eval grid** (`rl_gain_scheduling/eval_gain_scheduler.py`,
+5 heights × 4 displacements = 20 cells, `valid_move_and_hold` + quality score):
+
+- `run1_200k` / `run2_continued_2.2M` (original reward config): collapsed to "never move" —
+  0/20 valid, near-zero X displacement in 19/20 cells (diagnosed via commit `c52043a`).
+- `reward_v2_2M` (`config/rl_gain_scheduling_reward_v2.yaml`, alive-bonus cut 25x,
+  terminal-quality-weight raised 4x to fix the above): stopped the "do nothing" collapse but
+  converged to a different pathological corner instead — evaluated 2026-07-07, **0/20 valid**,
+  quality 0.013-0.111 across the whole grid vs. baseline's 0.14-0.66. See
+  `outputs/rl_gain_scheduling/eval/reward_v2_2M_first_eval/`.
+- `reward_v3_2M` (`config/rl_gain_scheduling_reward_v3.yaml`, tightened `kp_rot` upper bound
+  and raised damping-gain lower bounds to fix the max-stiffness/zero-damping instability
+  diagnosed in v2): evaluated 2026-07-07, **1/20 valid** (only alpha=0, dx=0.05), quality
+  0.014-0.195 in the 19 failing cells. See
+  `outputs/rl_gain_scheduling/eval/reward_v3_2M_first_eval/`.
+
+Baseline comparison (fixed-gain tuned OSC config, same grid, both eval runs): 100% valid at
+height 0.0/0.25/0.5, 75% at 0.75, 50% at 1.0 — this is the actually-working controller.
+**No RL checkpoint currently in this repo should be presented as a working/trained model.**
+The gain-scheduling approach itself is not disproven — the reward shaping and/or training
+budget (2M steps) may simply be insufficient — but that's an open problem, not a solved one.
+Next step if this is picked back up: inspect `reward_v3_2M`'s per-step gain traces the same
+way `reward_v2`'s collapse was diagnosed (`outputs/rl_gain_scheduling/eval/reward_v3_2M_first_eval/learned/runs/*/trace.jsonl`)
+before trying another reward/bound iteration blind.
+
 ## Next
 
-Nothing is currently blocking or in-progress on the controller/tuning side. Open items, none
-urgent:
+Nothing is currently blocking or in-progress on the MuJoCo controller/tuning side (OSC config
+above). Open items, none urgent:
 - `outputs/` still holds the pre-purge `outputs/PURGE_LIST.md` DELETE-list directories plus a
   large volume of OSC-tuning-campaign sweep output generated the same day — regenerate the
   purge list to cover them, then the user needs to run the `rm -rf` themselves (blocked from
@@ -98,11 +150,14 @@ urgent:
 - Gain retuning for `y`/`z`/reanchor-tolerance dimensions was evaluated and found to have no
   meaningful headroom to improve (150-4000x safety margin already) — don't re-open without a
   concrete reason.
+- RL gain-scheduling policy is unresolved (see section above) — next session should diagnose
+  `reward_v3_2M`'s failure mode from its own traces before another blind reward iteration.
+- Hardware lane is code-complete and unit-tested but has never touched a real robot — first
+  physical contact is the next real-world milestone, not further code changes.
 
 ## Historical status
 
 The CoppeliaSim bring-up era (headless video smoke, RPC/ZMQ controller, ROS2 bridge probes,
 RL Y-transport) is documented in `docs/archive/AGENTS_HISTORY.md`,
 `docs/archive/PROJECT_PLAN_coppeliasim_era.md`, and `archive/coppelia/docs/`. The hardware
-lane status is unchanged: receive-only staging with multi-layer guardrails; no nonzero torque
-path enabled.
+lane described there is fully superseded by the 2026-07-07 rewrite above.
