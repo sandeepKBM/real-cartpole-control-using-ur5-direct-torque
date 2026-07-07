@@ -86,6 +86,15 @@ def main() -> int:
 
     if args.resume is not None:
         model = PPO.load(str(args.resume), env=vec_env, tensorboard_log=str(tb_dir), device=device)
+        # --total-timesteps means "how many more steps to run" regardless of
+        # resume. reset_num_timesteps=False keeps the loaded step count so
+        # TensorBoard/checkpoint numbering continues rather than restarting
+        # at 0 (SB3's learn() defaults reset_num_timesteps=True, which would
+        # otherwise silently discard the checkpoint's own step count here).
+        # Do NOT add model.num_timesteps to total_timesteps here: SB3's own
+        # _setup_learn() already does `total_timesteps += self.num_timesteps`
+        # whenever reset_num_timesteps=False, so total_timesteps must stay
+        # as the raw increment or it gets added twice.
     else:
         model = PPO(
             training_cfg["policy"],
@@ -111,7 +120,12 @@ def main() -> int:
     )
 
     try:
-        model.learn(total_timesteps=total_timesteps, callback=checkpoint_callback, progress_bar=False)
+        model.learn(
+            total_timesteps=total_timesteps,
+            callback=checkpoint_callback,
+            progress_bar=False,
+            reset_num_timesteps=(args.resume is None),
+        )
     except KeyboardInterrupt:
         print("Training interrupted -- saving current model before exit.")
 
