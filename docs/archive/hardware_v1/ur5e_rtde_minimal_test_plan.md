@@ -1,5 +1,12 @@
 # UR5e RTDE Minimal Test Plan
 
+> **SUPERSEDED / HISTORICAL** — moved to `docs/archive/` 2026-07-07. Describes the pre-rewrite
+> `hardware/` lane (`ur5e_rtde_bridge.py`, `ur5e_control_session.py`, the staged `tools/ur5e_*.py`
+> scripts, the ROS2 pipeline node) — all archived whole to
+> `archive/superseded/hardware_rtde_v1/`. The current hardware lane is
+> `hardware/{safety,link,motion}.py` + `tools/ur5e_{connect,move}.py`; see `AGENTS.md` §4 for the
+> current guardrails and `docs/hardware/README.md` for the current test sequence.
+
 This plan is intentionally conservative. It keeps the default path at receive-only / no motion until each prior stage passes.
 
 ## Stage 0: Dry-run, no robot

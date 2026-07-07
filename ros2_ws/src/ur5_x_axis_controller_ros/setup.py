@@ -9,7 +9,6 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{PKG}"]),
         (f"share/{PKG}", ["package.xml"]),
-        (f"share/{PKG}/launch", ["launch/run_ur5e_hardware_pipeline.launch.py"]),
     ],
     install_requires=[
         "setuptools",
@@ -20,14 +19,13 @@ setup(
     maintainer="ss5772",
     maintainer_email="ss5772@users.noreply",
     description=(
-        "UR5e hardware pipeline ROS 2 node. "
-        "The CoppeliaSim controller/bridge nodes were archived to archive/coppelia/ros2/."
+        "UR5e ROS 2 package. The CoppeliaSim controller/bridge nodes were archived to "
+        "archive/coppelia/ros2/; the hardware pipeline node (ur5e_hardware_pipeline_node) "
+        "was superseded by the plain-Python hardware/ lane rewrite and archived to "
+        "archive/superseded/hardware_rtde_v1/ros2/ -- no ROS2 node is currently active "
+        "in this package."
     ),
     license="TODO",
     tests_require=["pytest"],
-    entry_points={
-        "console_scripts": [
-            f"ur5e_hardware_pipeline_node = {PKG}.ur5e_hardware_pipeline_node:main",
-        ],
-    },
+    entry_points={"console_scripts": []},
 )

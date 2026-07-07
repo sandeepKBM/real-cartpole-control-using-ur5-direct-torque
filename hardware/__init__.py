@@ -1,66 +1,57 @@
-"""Hardware-facing helpers for staged UR5e RTDE bring-up.
+"""Real-UR5e hardware lane: connect, read state, and one bounded Cartesian move.
 
-This package is intentionally separate from the simulator controller stack.
-The modules provide safe-by-default RTDE wrappers, timing helpers, logging
-helpers, and optional ROS visualization publishers for receive-only and
-very small motion tests.
+Three modules, one job each:
+- ``hardware.safety`` -- every numeric limit and safety decision.
+- ``hardware.link`` -- RTDE connection and live state (``UR5eLink``).
+- ``hardware.motion`` -- the one bounded Cartesian move
+  (``move_cartesian_bounded``).
+
+See ``tools/ur5e_connect.py`` (connect + monitor) and ``tools/ur5e_move.py``
+(the move) for the CLI entrypoints. Direct torque control is out of scope in
+this lane -- see AGENTS.md section 4 for why.
 """
 
+from __future__ import annotations
+
+from .link import RTDELinkError, RTDEStateError, UR5eLink, UR5eState
 from .logging import JsonlWriter, json_dumps_safe, write_json
-from .safety_limits import (
-    MotionCommandGuard,
+from .motion import MoveResult, move_cartesian_bounded, peak_velocity_mps, plan_waypoints
+from .safety import (
+    CartesianMoveLimits,
+    CartesianMoveMonitor,
+    ConnectionHealth,
+    EStopLatch,
+    EStopTripped,
     SafetyDecision,
     UR5eSafetyLimits,
-    UR5eStateGuard,
-    check_finite_array,
     check_joint_state,
     check_tcp_pose,
 )
-from .ros_topics import AsyncGuardrailPublisher, AsyncRosVisualizer, GuardrailStatusSample, RosTopicSample
 from .timing import TimingSample, TimingTracker, compute_stats_ns, period_from_frequency
-from .ur5e_control_session import (
-    UR5eCommandResult,
-    UR5eConnectionSnapshot,
-    UR5eHardwareSession,
-    UR5eHardwareSessionConfig,
-)
-from .ur5e_rtde_bridge import UR5eRTDEBridge, UR5eState
-from .ur5e_stages import (
-    StageResult,
-    run_direct_torque_probe,
-    run_receive_only,
-    run_servoj_tiny_motion,
-    run_servoj_zero_hold,
-)
 
 __all__ = [
+    "RTDELinkError",
+    "RTDEStateError",
+    "UR5eLink",
+    "UR5eState",
     "JsonlWriter",
     "json_dumps_safe",
     "write_json",
-    "MotionCommandGuard",
+    "MoveResult",
+    "move_cartesian_bounded",
+    "peak_velocity_mps",
+    "plan_waypoints",
+    "CartesianMoveLimits",
+    "CartesianMoveMonitor",
+    "ConnectionHealth",
+    "EStopLatch",
+    "EStopTripped",
     "SafetyDecision",
     "UR5eSafetyLimits",
-    "UR5eStateGuard",
-    "AsyncGuardrailPublisher",
-    "AsyncRosVisualizer",
-    "GuardrailStatusSample",
-    "RosTopicSample",
-    "check_finite_array",
     "check_joint_state",
     "check_tcp_pose",
     "TimingSample",
     "TimingTracker",
     "compute_stats_ns",
     "period_from_frequency",
-    "UR5eCommandResult",
-    "UR5eConnectionSnapshot",
-    "UR5eHardwareSession",
-    "UR5eHardwareSessionConfig",
-    "UR5eRTDEBridge",
-    "UR5eState",
-    "StageResult",
-    "run_direct_torque_probe",
-    "run_receive_only",
-    "run_servoj_tiny_motion",
-    "run_servoj_zero_hold",
 ]

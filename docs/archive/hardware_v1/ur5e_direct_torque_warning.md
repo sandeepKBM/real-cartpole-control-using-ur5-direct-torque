@@ -1,5 +1,10 @@
 # UR5e Direct Torque Warning
 
+> **SUPERSEDED / HISTORICAL** — moved to `docs/archive/` 2026-07-07. The conclusion (direct
+> torque is out of scope) still holds and is restated in `AGENTS.md` §4, with the added, more
+> specific finding that the installed `rtde_control` library has no working torque API at all —
+> this file's "future checklist" framing undersold how firmly closed that door currently is.
+
 Direct torque on a real UR5e is high risk. It should not be the default and it should not be exercised from a generic external Python loop.
 
 ## Current repo position

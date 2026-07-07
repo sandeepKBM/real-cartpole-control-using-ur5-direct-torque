@@ -9,7 +9,6 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from hardware.ros_topics import AsyncGuardrailPublisher, GuardrailStatusSample
 from simulation.workspace_guardrails import (
     _quat_wxyz_to_rot,
     boundary_summary,
@@ -101,18 +100,3 @@ def test_guardrail_overlay_corner_changes_render_location() -> None:
     assert overlay_top_left.shape == frame.shape
     assert overlay_bottom_right.shape == frame.shape
     assert not np.array_equal(overlay_top_left, overlay_bottom_right)
-
-
-def test_guardrail_publisher_queue_is_nonblocking() -> None:
-    pub = AsyncGuardrailPublisher(queue_size=1)
-    pub._enabled = True  # type: ignore[attr-defined]
-    sample = GuardrailStatusSample(
-        stamp_ns=123,
-        state="inside",
-        frame="mujoco_world",
-        margin_m=0.02,
-        message="ok",
-    )
-    assert pub.submit(sample) is True
-    assert pub.submit(sample) is True
-    assert pub.dropped_samples == 1

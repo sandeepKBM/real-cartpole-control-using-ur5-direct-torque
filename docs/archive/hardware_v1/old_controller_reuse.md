@@ -1,5 +1,11 @@
 # Old Controller Reuse
 
+> **SUPERSEDED / HISTORICAL** — moved to `docs/archive/` 2026-07-07. Written for the pre-rewrite
+> `hardware/` lane; the rewrite kept the same conclusion (reuse `controller_core/`'s pure math and
+> safety helpers, never send simulator torque output straight to the real arm) but the actual
+> motion mechanism changed to Cartesian `servoL` in `hardware/motion.py`. See `AGENTS.md` §4 for
+> the current architecture.
+
 This repo already contains useful controller math, but only some of it is appropriate for the new UR5e hardware staging lane.
 
 ## Reused
