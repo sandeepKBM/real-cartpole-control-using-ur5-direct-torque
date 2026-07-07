@@ -195,6 +195,24 @@ def load_model(scene_xml: str | Path) -> tuple[mujoco.MjModel, mujoco.MjData, in
     return model, data, site_id, joint_ids, actuator_ids
 
 
+def build_safety_config(ctrl_cfg: dict[str, Any]) -> ImpedanceSafetyConfig:
+    """Build an ImpedanceSafetyConfig from the YAML `controller: safety:` section.
+
+    Falls back to the same values MujocoUR5eTorqueAdapter previously hardcoded
+    when no safety_cfg was passed, for any key not present in the YAML --
+    existing configs with no `safety:` block (or a partial one) behave exactly
+    as before this function existed.
+    """
+    safety_section = ctrl_cfg.get("safety", {}) or {}
+    return ImpedanceSafetyConfig(
+        max_abs_y_drift_m=float(safety_section.get("max_abs_y_drift_m", 0.03)),
+        max_abs_z_drift_m=float(safety_section.get("max_abs_z_drift_m", 0.03)),
+        max_abs_orthogonal_drift_m=float(safety_section.get("max_abs_orthogonal_drift_m", 0.03)),
+        max_orientation_error_rad=float(safety_section.get("max_orientation_error_rad", 0.35)),
+        max_joint_velocity_radps=float(safety_section.get("max_joint_velocity_radps", 3.0)),
+    )
+
+
 def build_controller(kind: ControllerKind, ctrl_cfg: dict[str, Any]) -> Any:
     """Instantiate one of the reusable controller_core torque laws."""
     if kind == "torque_qp":
@@ -711,6 +729,7 @@ def build_initial_state_and_adapter(
         site_id=site_id,
         joint_ids=joint_ids,
         controller=controller,
+        safety_cfg=build_safety_config(controller_cfg),
         config=MujocoUR5eTorqueAdapterConfig(
             controller_kind=controller_kind,
             torque_limit_nm=torque_limit_vector() * float(torque_limit_scale),
