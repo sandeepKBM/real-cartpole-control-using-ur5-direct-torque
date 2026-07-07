@@ -94,9 +94,13 @@ def _run_baseline(
         "--no-plot",
         "--output-dir", str(output_dir),
     ]
+    # NOTE: the CLI script's own exit code is 1 whenever safety_pass=false --
+    # that's a normal "ran to completion, but didn't validate" outcome (e.g.
+    # this exact dx/height combo genuinely fails the transport envelope), not
+    # a crash. Only treat it as a real crash if summary.json wasn't written.
     completed = subprocess.run(cmd, cwd=str(REPO_ROOT), check=False, text=True, capture_output=True)
-    if completed.returncode != 0:
-        raise RuntimeError(f"baseline CLI run failed: {completed.stderr}")
+    if not list(output_dir.rglob("summary.json")):
+        raise RuntimeError(f"baseline CLI run produced no summary.json (exit {completed.returncode}): {completed.stderr}")
     run_dir = max((p.parent for p in output_dir.rglob("summary.json")), key=lambda p: p.stat().st_mtime)
     return json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
 
