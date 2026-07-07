@@ -133,9 +133,27 @@ height 0.0/0.25/0.5, 75% at 0.75, 50% at 1.0 — this is the actually-working co
 **No RL checkpoint currently in this repo should be presented as a working/trained model.**
 The gain-scheduling approach itself is not disproven — the reward shaping and/or training
 budget (2M steps) may simply be insufficient — but that's an open problem, not a solved one.
-Next step if this is picked back up: inspect `reward_v3_2M`'s per-step gain traces the same
-way `reward_v2`'s collapse was diagnosed (`outputs/rl_gain_scheduling/eval/reward_v3_2M_first_eval/learned/runs/*/trace.jsonl`)
-before trying another reward/bound iteration blind.
+
+**Important nuance, checked 2026-07-07 after the grid eval above**: the accel-then-reverse
+stress test that originally motivated the v3 gain-bounds fix
+(`rl_gain_scheduling/_scratch_accel_profile_demo.py`, mid-height, 1s forward + 4s reverse
+constant-acceleration target, no hold phase) was re-run against `reward_v3_2M` and **passes
+cleanly** — full 5s, no safety-guard trip, max position error 7.7mm, final error 2.1mm, max
+orientation error 0.062 rad (well under the 0.35 rad guard that killed `reward_v2` on this same
+test at ~1.2s). Gains settle to `kp_x=800, kd_x=5.0, kp_rot=0.2, kd_rot=11.3` — a stable
+non-degenerate point, not a guard-avoidance trick. See
+`outputs/rl_gain_scheduling/eval/reward_v3_2M_accel_reverse_stress_test/`. **So the v3
+gain-bounds fix did work for the specific instability it targeted** — this narrows the open
+problem from "the policy is broken" to "the policy tracks a smoothly-varying mid-height target
+well but does not reliably settle-and-hold at a static target and/or does not generalize across
+height," which is what the grid eval actually exercises and the stress test does not (no hold
+phase, single height only).
+
+Next step if this is picked back up: inspect `reward_v3_2M`'s per-step gain traces from the
+grid eval itself (`outputs/rl_gain_scheduling/eval/reward_v3_2M_first_eval/learned/runs/*/trace.jsonl`)
+to see specifically what breaks during the hold phase and/or at other heights, now that the
+mid-height/no-hold tracking behavior is confirmed sound — before trying another reward/bound
+iteration blind.
 
 ## Next
 
