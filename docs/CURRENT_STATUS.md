@@ -155,6 +155,59 @@ to see specifically what breaks during the hold phase and/or at other heights, n
 mid-height/no-hold tracking behavior is confirmed sound — before trying another reward/bound
 iteration blind.
 
+**2026-07-07, later the same day -- user narrowed scope to height_alpha=0.5 only, found and
+fixed a real environment bug, root problem still unresolved:**
+
+New config `config/rl_gain_scheduling_reward_v4_height0.5.yaml` (height_alpha_range pinned to
+`[0.5, 0.5]`, everything else identical to v3) trained fresh (2M steps, n_envs=8, ~34 min
+wall-clock) to isolate whether height generalization was the obstacle. **It was not** --
+evaluated at alpha=0.5 only, still 0/4 valid, with the identical "frozen during move phase,
+violent correction during hold phase, guard trip" signature seen in the v3 grid eval (per-cell
+`move_phase_achieved_x_delta_m` ~0, `move_phase_max_abs_tau_controller_nm` ~1e-10, then
+`hold_phase_max_abs_qd_radps` 2.4-3.2 rad/s tripping the velocity or Z-drift guard).
+
+Root-caused from there, not guessed: `GainSchedulingEnv.step()` computes
+`t_s = float(self.data.time)` and feeds it into the `min_jerk_move_hold` target generator as
+"elapsed time since episode start." But `GainSchedulingEnv.reset()` calls `apply_start_q()`
+(which resets qpos/qvel/qacc/ctrl/qfrc_applied/xfrc_applied) and never reset `data.time` itself
+-- every other current caller of `apply_start_q` (the sim's rollout tools, the accel-reverse
+stress test script) only runs one episode per process, so this was never triggered before. A
+live training/eval loop resets thousands of times per process. Confirmed directly: before the
+fix, a second `reset()` in the same process left `data.time` at whatever the first episode
+ended on (e.g. 1.2s); after, it correctly reads 0.0. Practical effect: from the *second*
+episode onward in every one of the `n_envs` parallel workers -- i.e. nearly all of training and
+of every eval grid cell after the first -- `t_s` was already past `move_duration_s` (often past
+`max_episode_seconds` entirely) at episode start, so the target generator returned the
+already-settled final value from step 0. The policy never saw a real ramping move-phase target
+during nearly all of training. Fixed in `rl_gain_scheduling/gain_scheduling_env.py` (`reset()`
+now sets `self.data.time = 0.0` after `apply_start_q()`). Full test suite unaffected: 167
+passed (there was no existing coverage of this reset path, which is why the bug went unnoticed).
+
+Retrained from scratch with the fix (`reward_v5_height0.5_timefix_2M`, same config otherwise).
+The violent hold-phase guard-trips are **gone** -- every eval episode now runs to
+`termination_reason: "duration_complete"`, confirming the target-timing bug was real and the
+fix works. But **the original "never move" collapse from `run1`/`run2` (commit `c52043a`) is
+back**: `achieved_x_delta_m` ~0 (float noise) in 3 of 4 cells, a small partial move (0.046 of a
+0.2m target) in the 4th, `explained_variance=1.0` at end of training (the value function easily
+fits a very low-variance "sit still" policy -- the same signature `c52043a` originally
+diagnosed). Still 0/4 valid at height=0.5. See
+`outputs/rl_gain_scheduling/eval/reward_v5_height0.5_timefix_first_eval/`.
+
+**Conclusion:** the `alive_bonus`/`terminal_quality_weight` rebalance from `c52043a` (carried
+unchanged through v2/v3/v4/v5) was never actually a robust fix for the never-move collapse --
+it appears to have changed the *symptom* while training was still running on the broken,
+already-settled target signal from the `data.time` bug. Now that the environment is correct,
+the same degenerate "survive by doing nothing" optimum reappears. This is a genuine
+reward-shaping/exploration problem, not a quick config tweak, and **two full training cycles
+with different structural fixes have not resolved it** -- further blind iteration is not
+recommended without first designing a stronger positive incentive for the move phase
+specifically (e.g. a progress-based reward term rather than pure accumulated `abs(x_error)`
+penalty, which does not obviously reward attempting a fast move over sitting still) or
+revisiting exploration/entropy settings. **Recommendation: use the fixed-gain baseline
+controller (`config/ur5e_mujoco_torque_osc_tuned.yaml`) for real-world testing now** -- it
+already validates 100% at height_alpha=0.5 across the full displacement range on this same eval
+grid. Treat RL gain-scheduling as a longer-term improvement track, not a near-term dependency.
+
 ## Next
 
 Nothing is currently blocking or in-progress on the MuJoCo controller/tuning side (OSC config
@@ -168,8 +221,11 @@ above). Open items, none urgent:
 - Gain retuning for `y`/`z`/reanchor-tolerance dimensions was evaluated and found to have no
   meaningful headroom to improve (150-4000x safety margin already) — don't re-open without a
   concrete reason.
-- RL gain-scheduling policy is unresolved (see section above) — next session should diagnose
-  `reward_v3_2M`'s failure mode from its own traces before another blind reward iteration.
+- RL gain-scheduling policy is unresolved (see section above) — the `data.time` reset bug is
+  fixed and confirmed real, but the underlying never-move reward collapse persists even with
+  the fix and a single-height-only task. Next step needs actual reward redesign (a
+  progress-based move-phase term, most likely) or exploration-setting changes, not another
+  blind config nudge. Not currently blocking real-world testing — use the fixed-gain baseline.
 - Hardware lane is code-complete and unit-tested but has never touched a real robot — first
   physical contact is the next real-world milestone, not further code changes.
 

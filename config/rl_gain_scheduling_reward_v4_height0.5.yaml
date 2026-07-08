@@ -1,0 +1,129 @@
+# Config for the RL gain-scheduling environment (rl_gain_scheduling/).
+# Never touches config/ur5e_mujoco_torque_osc_tuned.yaml -- this is a new,
+# separate lane. Structural controller settings (P3 flags, torque limits)
+# mirror the tuned config; the `gains:` block here is only a construction-time
+# seed, overwritten every step by the policy via set_gains().
+#
+# height-0.5 variant of config/rl_gain_scheduling_reward_v3.yaml (preserved
+# unmodified -- see that file's own history for the alive-bonus and
+# gain-bounds fixes it carries forward unchanged). v3 evaluated 2026-07-07 at
+# only 1/20 valid on the full height x displacement comparative eval grid,
+# but its accel-then-reverse stress test at mid-height (height_alpha=0.5)
+# passed cleanly (see docs/CURRENT_STATUS.md), and per-height grid analysis
+# showed the v3 checkpoint applying ~zero torque for the entire 1s move phase
+# at every displacement at height_alpha=0.5 specifically (x_error sits at the
+# full target the whole move phase, then a violent hold-phase correction
+# trips the velocity guard) -- a "frozen during move" pattern distinct from
+# the original run1/run2 "never move at all" collapse, since here the
+# controller *can* move (confirmed by the stress test) but the policy isn't
+# reliably choosing to during the discrete move-then-hold task shape.
+#
+# Only change from v3: height_alpha_range narrowed from [0.0, 1.0] to
+# [0.5, 0.5] (mid-height only, matching the user's decision to get one
+# height working well before attempting to generalize across the full
+# workspace). Reward weights and gain bounds unchanged from v3 -- isolates
+# whether the full-range height generalization was itself the obstacle.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  # Construction-time seed only -- overwritten every step by the policy.
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  posture_reanchor_on_settle: true
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.35
+
+env:
+  # One env.step() == one mj_step() at the model's native rate (500Hz,
+  # dt=0.002s) -- explicit, not a silent default. See AGENTS.md's
+  # never-silently-change-control-rate rule.
+  control_decimation_steps: 1
+  # Fixed at mid-height (alpha=0.5) -- the only height this config trains or
+  # evaluates. alpha=0 -> active_origin pose (ee z=1.08m), alpha=1 ->
+  # lower_b pose (ee z=0.54m); both share the wrist_2=0 singularity.
+  height_alpha_range: [0.5, 0.5]
+  target_x_delta_range_m: [-0.20, 0.20]
+  move_duration_s: 1.0
+  hold_duration_s: 2.0
+  max_episode_seconds: 3.0
+  record_lightweight_trace: true
+  full_trace_logging: false
+  # Unchanged from v3 -- see that file's header for the full diagnosis of
+  # why kp_rot is capped at 3 and every kd_* has a positive floor.
+  gain_bounds:
+    kp_x: [0.0, 800.0]
+    kd_x: [5.0, 80.0]
+    kp_y: [0.0, 160.0]
+    kd_y: [2.0, 30.0]
+    kp_z: [0.0, 240.0]
+    kd_z: [3.0, 40.0]
+    kp_rot: [0.0, 3.0]
+    kd_rot: [2.0, 40.0]
+    kp_posture: [0.0, 100.0]
+    kd_posture: [1.0, 24.0]
+    kd_joint: [0.5, 16.0]
+
+reward:
+  alive_bonus: 0.02
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  gain_smooth_weight: 0.01
+  torque_smooth_weight: 0.001
+  terminal_safety_penalty: -25.0
+  terminal_quality_weight: 200.0
+
+training:
+  policy: "MlpPolicy"
+  net_arch: [128, 128]
+  learning_rate: 3.0e-4
+  n_steps: 1024
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  total_timesteps: 2000000
+  n_envs: 8
+  device: "cpu"
+  seed: 0

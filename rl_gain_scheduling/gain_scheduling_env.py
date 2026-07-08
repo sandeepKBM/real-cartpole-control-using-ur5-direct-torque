@@ -155,6 +155,17 @@ class GainSchedulingEnv(gym.Env):
         self._alpha = alpha
         q_start = (1.0 - alpha) * ACTIVE_ORIGIN_Q + alpha * LOWER_B_Q
         apply_start_q(self.model, self.data, q_start)
+        # apply_start_q() resets qpos/qvel/qacc/ctrl but not data.time -- it's
+        # designed for single-episode-per-process callers (the sim tools),
+        # none of which reset() repeatedly. This env does, every episode, and
+        # step()'s t_s = self.data.time feeds directly into the min-jerk
+        # move-hold target generator as "elapsed time since episode start."
+        # Without this, every episode after the first in a given env's
+        # lifetime starts with a stale, already-large t_s, so the target
+        # generator thinks the move phase (often the whole episode) is
+        # already over before the first control step -- the policy sees an
+        # already-settled target from t=0 and never learns to actually move.
+        self.data.time = 0.0
 
         target_x_delta = self._sample_or_take(options, "target_x_delta", *self._target_x_delta_range)
         self._target_x_delta = target_x_delta
