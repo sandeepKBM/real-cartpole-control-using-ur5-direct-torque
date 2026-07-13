@@ -6,8 +6,8 @@ Start here. The authoritative operating guide is the root `AGENTS.md` (symlinked
 - `CURRENT_STATUS.md` — active objective, latest diagnosis, what's done, what's next.
 - `controller_core/`, `simulation/`, `ros2/` — subsystem notes (verify against code; some
   predate the 2026-07-03 consolidation).
-- `hardware/README.md` — current UR5e hardware lane (connect/monitor/move), rewritten
-  2026-07-07; points at `AGENTS.md` §4 for full detail.
+- `hardware/README.md` — hardware doc index; **`hardware/HARDWARE_GUIDE.md`** is the full
+  learning guide (modules, RTDE, safety, CLI, lab checklist).
 - `archive/` — historical docs: `archive/AGENTS_HISTORY.md` (the full pre-2026-07-03 AGENTS.md
   operational log), `archive/PROJECT_PLAN_coppeliasim_era.md` (superseded — CoppeliaSim is
   archived and there's no current replacement plan doc; `CURRENT_STATUS.md` + `AGENTS.md`

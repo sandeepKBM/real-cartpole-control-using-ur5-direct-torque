@@ -1,14 +1,13 @@
-"""Real-UR5e hardware lane: connect, read state, and one bounded Cartesian move.
+"""Real-UR5e hardware lane: connect, read state, position moves, and direct torque.
 
-Three modules, one job each:
-- ``hardware.safety`` -- every numeric limit and safety decision.
-- ``hardware.link`` -- RTDE connection and live state (``UR5eLink``).
-- ``hardware.motion`` -- the one bounded Cartesian move
-  (``move_cartesian_bounded``).
+Modules:
+- ``hardware.safety`` -- limits, connection health, e-stop latch, move monitors.
+- ``hardware.link`` -- ``UR5eLink`` (RTDE receive + optional ``servoL``).
+- ``hardware.motion`` -- bounded Cartesian move via ``servoL``.
+- ``hardware.direct_torque_link`` -- ``UR5eDirectTorqueLink`` (``directTorque()``).
+- ``hardware.direct_torque_transport`` -- 500 Hz OSC X transport on real hardware.
 
-See ``tools/ur5e_connect.py`` (connect + monitor) and ``tools/ur5e_move.py``
-(the move) for the CLI entrypoints. Direct torque control is out of scope in
-this lane -- see AGENTS.md section 4 for why.
+See ``docs/hardware/HARDWARE_GUIDE.md`` for the full learning guide.
 """
 
 from __future__ import annotations

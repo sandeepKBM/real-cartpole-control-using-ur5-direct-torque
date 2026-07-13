@@ -1,47 +1,53 @@
-# Hardware Lane
+# Hardware lane — documentation index
 
-Current as of 2026-07-07. Authoritative detail lives in `AGENTS.md` §4 — this is a short
-pointer, not a duplicate.
+**Start here if you are learning the hardware code:**
 
-## Layout
+## [`HARDWARE_GUIDE.md`](HARDWARE_GUIDE.md) — full learning guide
 
-- `hardware/safety.py` — every numeric limit and safety decision (`UR5eSafetyLimits`,
-  `ConnectionHealth`, `EStopLatch`, `CartesianMoveLimits`/`CartesianMoveMonitor`).
-- `hardware/link.py` — `UR5eLink`: connection + live state. `read_state()` raises
-  `RTDEStateError` rather than ever returning stale/default data.
-- `hardware/motion.py` — `move_cartesian_bounded()`, the one bounded Cartesian move
-  (quintic min-jerk `servoL` streaming, safety-checked every cycle).
-- `tools/ur5e_connect.py` — connect + read state only (`--once` / `--watch`); cannot move
-  the robot (never imports `hardware/motion.py`).
-- `tools/ur5e_move.py` — the one move entrypoint; `--axis {x,y,z}` has no default,
-  `--i-understand-this-moves-the-robot` + a typed `MOVE` confirmation required.
+Module-by-module explanation, RTDE primer, both control paths (`servoL` vs
+`directTorque`), safety system, CLI tools, lab checklist, troubleshooting, and
+URSim vs real-robot limits.
 
-Direct torque control is out of scope entirely — the installed `rtde_control` library has no
-working torque API, and there is no Jacobian/FK code that works from real robot state without
-MuJoCo. See `docs/archive/hardware_v1/ur5e_direct_torque_warning.md` for the fuller historical
-rationale (superseded framing, same conclusion).
+## Operational guides
 
-## Procedural sequence for first real-robot contact
+| Document | When to use |
+|----------|-------------|
+| [`POLYSCOPE_PANEL_CHECKLIST.md`](POLYSCOPE_PANEL_CHECKLIST.md) | **At the robot** — what to switch on/off on the teach pendant before Python |
+| [`URSIM_REMOTE_CONTROL.md`](URSIM_REMOTE_CONTROL.md) | URSim Docker, PolyScope remote control, admin password, fieldbus, factory reset |
+| [`ur5e_rtde_minimal_test_plan.md`](ur5e_rtde_minimal_test_plan.md) | Older staged RTDE bring-up notes |
+| [`ur5e_direct_torque_warning.md`](ur5e_direct_torque_warning.md) | Historical warning (superseded by direct-torque lane) |
 
-1. `tools/ur5e_connect.py --once` first, always — confirms the RTDE connection and that
-   `read_state()` returns sane joint/TCP data before anything else.
-2. `tools/ur5e_connect.py --watch` to confirm the connection holds and liveness/reconnect
-   behavior works as expected.
-3. `tools/ur5e_move.py` with a small `--distance-m 0.02` before ever requesting a larger move.
+## Code layout (quick)
 
-## What's verified vs. not
+| Path | Role |
+|------|------|
+| `hardware/safety.py` | Limits, connection health, e-stop, Cartesian monitor |
+| `hardware/link.py` | `UR5eLink` — receive + `servoL` |
+| `hardware/motion.py` | Bounded Cartesian move |
+| `hardware/direct_torque_link.py` | `UR5eDirectTorqueLink` — `directTorque()` @ 500 Hz |
+| `hardware/direct_torque_transport.py` | OSC X move+hold on real robot |
+| `hardware/dashboard.py` | Dashboard port 29999 helpers |
+| `tools/ur5e_connect.py` | Receive-only (cannot move) |
+| `tools/ur5e_move.py` | Position-mode move |
+| `tools/ur5e_direct_torque_x_transport.py` | Torque-mode X transport |
 
-Verified today against the real Universal Robots `URControl` binary (via a local URSim
-instance, not a mock): `hardware/link.py`'s connection path against the real RTDE protocol
-server, and that its error handling correctly rejects a degenerate (not-fully-powered-on)
-server response instead of accepting bad data. Also confirmed directly against the real
-library: `RTDEReceiveInterface` has `getSafetyStatusBits` and not `getSafetyStatus` (matches
-this code's fallback order), and `RTDEControlInterface.servoL`'s real signature is exactly
-`(pose, speed, acceleration, time, lookahead_time, gain)` (matches `hardware/link.py`'s
-`_EXPECTED_SERVOL_PARAMS`).
+## Minimal verification (WSL)
 
-Not verifiable without the real robot or a fuller URSim stack (Dashboard server + real
-power-on): real `servoL` streaming motion, whether 125Hz streaming holds up on real network
-traffic, whether `getActualTCPPose()`'s rotation-vector convention matches the orientation-error
-math here, and whether the physical mount makes a given `--axis` argument actually correspond
-to true left/right.
+```bash
+source ~/ur5e_repo/.venv/bin/activate
+cd /mnt/c/Users/sandr/Downloads/real-cartpole-control-using-ur5-direct-torque
+
+pytest tests/hardware/ -q
+python tools/_check_ursim_remote.py
+python tools/ur5e_connect.py --robot-ip 127.0.0.1 --once
+python tools/ur5e_direct_torque_x_transport.py --robot-ip 127.0.0.1 --probe-only --skip-dashboard-power-on
+```
+
+## Two control paths
+
+| Path | Tool | Robot API | Motion in URSim? |
+|------|------|-----------|------------------|
+| Position | `ur5e_move.py` | `servoL` @ 125 Hz | Yes (firmware IK) |
+| Direct torque | `ur5e_direct_torque_x_transport.py` | `directTorque()` @ 500 Hz | **No** (API only) |
+
+Validate torque **motion** in MuJoCo or on a **physical UR5e**.

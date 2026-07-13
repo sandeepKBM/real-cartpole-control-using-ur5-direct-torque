@@ -61,7 +61,7 @@ def _mujoco_mass(model, data, q):
     data.qvel[:] = 0.0
     mujoco.mj_forward(model, data)
     M = np.zeros((model.nv, model.nv))
-    mujoco.mj_fullM(model, M, data.qM)
+    mujoco.mj_fullM(model, data, M)
     return M
 
 

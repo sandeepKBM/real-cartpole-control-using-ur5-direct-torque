@@ -92,6 +92,18 @@ def cartesian_force_to_joint_torque(
     return ControlOutput(mode="torque", tau=tau, saturated=saturated)
 
 
+def rotvec_to_quat_wxyz(rotvec: np.ndarray) -> np.ndarray:
+    """Convert UR rotation-vector TCP orientation ``[rx, ry, rz]`` to ``[w,x,y,z]``."""
+    rv = np.asarray(rotvec, dtype=np.float64).reshape(3)
+    angle = float(np.linalg.norm(rv))
+    if angle < 1e-12:
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    axis = rv / angle
+    half = 0.5 * angle
+    s = np.sin(half)
+    return np.array([np.cos(half), axis[0] * s, axis[1] * s, axis[2] * s], dtype=np.float64)
+
+
 def quat_to_rotmat(quat_wxyz: np.ndarray) -> np.ndarray:
     """Convert a ``[w, x, y, z]`` quaternion to a 3x3 rotation matrix.
 

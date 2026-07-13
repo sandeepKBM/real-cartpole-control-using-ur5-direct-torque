@@ -276,7 +276,7 @@ def build_mujoco_state(
     ee_ang_vel = jacr[:, :6] @ qd
     gravity_torque = compute_gravity_torque(model, data, joint_ids) if gravity_compensation else None
     mass_full = np.zeros((model.nv, model.nv), dtype=np.float64)
-    mujoco.mj_fullM(model, mass_full, data.qM)
+    mujoco.mj_fullM(model, data, mass_full)
     mass_matrix = mass_full[:6, :6].copy()
     return MujocoUR5eState(
         time_s=float(time_s),
