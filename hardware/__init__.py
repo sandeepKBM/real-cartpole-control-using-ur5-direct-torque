@@ -1,13 +1,7 @@
-"""Real-UR5e hardware lane: connect, read state, position moves, and direct torque.
+"""Real-UR5e hardware lane: connect, safety, position moves, and torque transport.
 
-Modules:
-- ``hardware.safety`` -- limits, connection health, e-stop latch, move monitors.
-- ``hardware.link`` -- ``UR5eLink`` (RTDE receive + optional ``servoL``).
-- ``hardware.motion`` -- bounded Cartesian move via ``servoL``.
-- ``hardware.direct_torque_link`` -- ``UR5eDirectTorqueLink`` (``directTorque()``).
-- ``hardware.direct_torque_transport`` -- 500 Hz OSC X transport on real hardware.
-
-See ``docs/hardware/HARDWARE_GUIDE.md`` for the full learning guide.
+Active path: ``docs/hardware/README.md`` (learning map) + ``HARDWARE_GUIDE.md``.
+Three modes via ``hardware.x_transport``: position / direct_torque / urscript.
 """
 
 from __future__ import annotations

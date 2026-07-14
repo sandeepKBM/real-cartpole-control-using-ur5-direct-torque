@@ -160,22 +160,22 @@ class UR5eDirectTorqueLink:
         if result is False:
             raise RTDEStateError("directTorque() returned false")
 
-    def build_robot_state(
-        self,
+    @staticmethod
+    def compose_robot_state(
         link_state: UR5eState,
         *,
+        jacobian: np.ndarray,
+        mass_matrix: np.ndarray,
         time_s: float,
         target_x: float,
         target_x_vel: float,
     ) -> dict[str, np.ndarray | float | bool]:
-        """Map RTDE telemetry into the controller_core RobotState contract."""
+        """Map RTDE telemetry + pre-fetched dynamics into controller_core RobotState."""
         tcp = np.asarray(link_state.tcp_pose, dtype=np.float64).reshape(6)
         ee_pos = tcp[:3].copy()
         ee_quat = rotvec_to_quat_wxyz(tcp[3:6])
         q = np.asarray(link_state.q, dtype=np.float64).reshape(6)
         qd = np.asarray(link_state.qd, dtype=np.float64).reshape(6)
-        jacobian = self.get_jacobian()
-        mass_matrix = self.get_mass_matrix()
         twist = jacobian @ qd
         return {
             "time": float(time_s),
@@ -191,6 +191,47 @@ class UR5eDirectTorqueLink:
             "target_x_vel": float(target_x_vel),
             "transport_axis_index": 0,
         }
+
+    def build_robot_state(
+        self,
+        link_state: UR5eState,
+        *,
+        time_s: float,
+        target_x: float,
+        target_x_vel: float,
+    ) -> dict[str, np.ndarray | float | bool]:
+        """Map RTDE telemetry into the controller_core RobotState contract."""
+        return self.compose_robot_state(
+            link_state,
+            jacobian=self.get_jacobian(),
+            mass_matrix=self.get_mass_matrix(),
+            time_s=time_s,
+            target_x=target_x,
+            target_x_vel=target_x_vel,
+        )
+
+    def move_j(
+        self,
+        q_rad: np.ndarray,
+        *,
+        speed_rad_s: float = 0.5,
+        acceleration_rad_s2: float = 0.5,
+    ) -> None:
+        """Blocking joint-space move via RTDE ``moveJ`` (position mode)."""
+        if self._control is None:
+            raise RTDEStateError("move_j() called before connect()")
+        q = np.asarray(q_rad, dtype=np.float64).reshape(6)
+        if not np.all(np.isfinite(q)):
+            raise RTDEStateError("move_j() got non-finite joint targets")
+        move_j = getattr(self._control, "moveJ", None)
+        if move_j is None:
+            raise RTDELinkError("Connected RTDE control interface has no moveJ() method")
+        try:
+            result = move_j(q.tolist(), float(speed_rad_s), float(acceleration_rad_s2))
+        except Exception as exc:
+            raise RTDEStateError(f"moveJ() failed: {exc}") from exc
+        if result is False:
+            raise RTDEStateError("moveJ() returned false")
 
     def safe_stop(self, reason: str) -> None:
         if self._control is not None:

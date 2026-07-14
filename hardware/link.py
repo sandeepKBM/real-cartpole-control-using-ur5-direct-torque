@@ -231,6 +231,29 @@ class UR5eLink:
         pose_arr = np.asarray(pose, dtype=np.float64).reshape(6)
         self._control.servoL(pose_arr.tolist(), speed, acceleration, time_s, lookahead_time, gain)
 
+    def move_j(
+        self,
+        q_rad: np.ndarray,
+        *,
+        speed_rad_s: float = 0.5,
+        acceleration_rad_s2: float = 0.5,
+    ) -> None:
+        """Blocking joint-space move via RTDE ``moveJ``."""
+        if self._control is None:
+            raise RTDEStateError("move_j() called before connect(with_control=True)")
+        q = np.asarray(q_rad, dtype=np.float64).reshape(6)
+        if not np.all(np.isfinite(q)):
+            raise RTDEStateError("move_j() got non-finite joint targets")
+        move_j = getattr(self._control, "moveJ", None)
+        if move_j is None:
+            raise RTDELinkError("Connected RTDE control interface has no moveJ() method")
+        try:
+            result = move_j(q.tolist(), float(speed_rad_s), float(acceleration_rad_s2))
+        except Exception as exc:
+            raise RTDEStateError(f"moveJ() failed: {exc}") from exc
+        if result is False:
+            raise RTDEStateError("moveJ() returned false")
+
     def servo_stop(self) -> None:
         """Cleanly end a servoL streaming session (best-effort)."""
         if self._control is None:

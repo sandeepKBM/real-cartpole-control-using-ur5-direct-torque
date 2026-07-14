@@ -20,8 +20,11 @@ from simulation.ur5e_mujoco_torque import x_profile_target
 from transport_metrics import compute_valid_move_hold_metrics, summarize_move_hold_trace
 
 from .direct_torque_link import UR5eDirectTorqueLink
+from .latency import PhaseLatencyRecorder
 from .link import RTDEStateError
+from .local_dynamics import LocalPinocchioDynamics, normalize_dynamics_source
 from .safety import EStopLatch
+from .timing import TimingTracker, monotonic_ns
 
 
 @dataclass
@@ -57,9 +60,14 @@ def run_x_transport_direct_torque(
     duration_s: float,
     output_dir: Path | None = None,
     motion_opt_in: bool,
+    record_latency: bool = True,
+    dynamics_source: str = "rtde",
 ) -> DirectTorqueTransportResult:
     if not motion_opt_in:
         raise ValueError("motion_opt_in must be True for a live direct-torque transport")
+
+    dynamics_source = normalize_dynamics_source(dynamics_source)
+    local_dynamics = LocalPinocchioDynamics() if dynamics_source == "local" else None
 
     impedance_cfg, safety_cfg, frequency_hz = _load_impedance_bundle(config_path)
     if abs(frequency_hz - 500.0) > 1.0:
@@ -77,13 +85,20 @@ def run_x_transport_direct_torque(
     controller = XAxisCartesianImpedanceController(impedance_cfg)
     safety = ImpedanceSafetyMonitor(safety_cfg)
     estop = EStopLatch()
+    tracker = TimingTracker(frequency_hz)
+    phases = PhaseLatencyRecorder() if record_latency else None
 
     link.connect()
     state0 = link.read_state()
     x0 = float(state0.tcp_pose[0])
-    controller.reset_from_state(
-        link.build_robot_state(state0, time_s=0.0, target_x=x0, target_x_vel=0.0)
-    )
+    if local_dynamics is not None:
+        J0, M0 = local_dynamics.jacobian_and_mass_matrix(state0.q)
+        init_robot_state = link.compose_robot_state(
+            state0, jacobian=J0, mass_matrix=M0, time_s=0.0, target_x=x0, target_x_vel=0.0
+        )
+    else:
+        init_robot_state = link.build_robot_state(state0, time_s=0.0, target_x=x0, target_x_vel=0.0)
+    controller.reset_from_state(init_robot_state)
     safety.reset()
     safety.set_initial_position(
         np.asarray(state0.tcp_pose[:3], dtype=np.float64),
@@ -95,6 +110,8 @@ def run_x_transport_direct_torque(
     steps = 0
     t_s = 0.0
     last_link_state = state0
+    next_deadline_ns = monotonic_ns() + tracker.period_ns
+    prev_cycle_start_ns: int | None = None
 
     try:
         while t_s < duration_s - 1e-12:
@@ -102,8 +119,17 @@ def run_x_transport_direct_torque(
                 termination_reason = estop.reason or "estop"
                 break
 
+            cycle_start_ns = monotonic_ns()
+            lateness_ns = max(0, cycle_start_ns - next_deadline_ns)
+            if phases is not None:
+                phases.record("lateness_ns", lateness_ns)
+
+            t_read = monotonic_ns()
             link_state = link.read_state()
+            if phases is not None:
+                phases.record("read_state_ns", monotonic_ns() - t_read)
             last_link_state = link_state
+
             target_x, target_x_vel = x_profile_target(
                 "min_jerk_move_hold",
                 x0,
@@ -112,27 +138,82 @@ def run_x_transport_direct_torque(
                 duration_s,
                 move_duration_s=move_duration_s,
             )
-            robot_state = link.build_robot_state(
+
+            t_jac = monotonic_ns()
+            if local_dynamics is not None:
+                jacobian, mass_matrix = local_dynamics.jacobian_and_mass_matrix(link_state.q)
+                if phases is not None:
+                    phases.record("local_dynamics_ns", monotonic_ns() - t_jac)
+            else:
+                jacobian = link.get_jacobian()
+                if phases is not None:
+                    phases.record("get_jacobian_ns", monotonic_ns() - t_jac)
+                t_mass = monotonic_ns()
+                mass_matrix = link.get_mass_matrix()
+                if phases is not None:
+                    phases.record("get_mass_matrix_ns", monotonic_ns() - t_mass)
+
+            t_build = monotonic_ns()
+            robot_state = link.compose_robot_state(
                 link_state,
+                jacobian=jacobian,
+                mass_matrix=mass_matrix,
                 time_s=t_s,
                 target_x=target_x,
                 target_x_vel=target_x_vel,
             )
+            if phases is not None:
+                phases.record("build_state_ns", monotonic_ns() - t_build)
+
+            t_ctrl = monotonic_ns()
             output = controller.compute(robot_state)
             tau = np.asarray(output.tau, dtype=np.float64).reshape(6)
+            if phases is not None:
+                phases.record("controller_ns", monotonic_ns() - t_ctrl)
 
+            t_safe = monotonic_ns()
             safety_status = safety.check(
                 robot_state,
                 x_error=float(output.x_error),
                 orientation_error_norm=float(output.orientation_error_norm),
                 axis_target_moving=bool(t_s <= move_duration_s),
             )
+            if phases is not None:
+                phases.record("safety_ns", monotonic_ns() - t_safe)
             if not safety_status.ok:
                 termination_reason = safety_status.reason or "safety_stop"
                 estop.trip(termination_reason)
                 break
 
+            t_torque = monotonic_ns()
             link.direct_torque(tau, friction_comp=True)
+            if phases is not None:
+                phases.record("direct_torque_ns", monotonic_ns() - t_torque)
+
+            cycle_end_ns = monotonic_ns()
+            work_ns = cycle_end_ns - cycle_start_ns
+            if phases is not None:
+                phases.record("total_work_ns", work_ns)
+
+            interval_ns = None if prev_cycle_start_ns is None else cycle_start_ns - prev_cycle_start_ns
+            sleep_ns = 0
+            next_deadline_ns += tracker.period_ns
+            sleep_ns = max(0, next_deadline_ns - cycle_end_ns)
+            if sleep_ns > 0:
+                time.sleep(sleep_ns / 1e9)
+            if phases is not None:
+                phases.record("sleep_ns", sleep_ns)
+
+            tracker.add_sample(
+                cycle_index=steps,
+                start_ns=cycle_start_ns,
+                deadline_ns=next_deadline_ns - tracker.period_ns,
+                end_ns=cycle_end_ns,
+                sleep_ns=sleep_ns,
+                interval_ns=interval_ns,
+            )
+            prev_cycle_start_ns = cycle_start_ns
+
             trace_rows.append(
                 {
                     "time_s": t_s,
@@ -146,11 +227,12 @@ def run_x_transport_direct_torque(
                     "orientation_error_norm": float(output.orientation_error_norm),
                     "tau_controller": tau.tolist(),
                     "tau_applied": tau.tolist(),
+                    "cycle_work_ms": work_ns / 1e6,
+                    "lateness_ms": lateness_ns / 1e6,
                 }
             )
             steps += 1
             t_s += dt_s
-            time.sleep(max(0.0, dt_s * 0.95))
     except RTDEStateError as exc:
         termination_reason = f"rtde_state_error: {exc}"
         estop.trip(termination_reason)
@@ -189,7 +271,11 @@ def run_x_transport_direct_torque(
         "max_abs_qd_radps": max_abs_qd,
         "joint_limit_guard_ok": True,
         "torque_saturation_percentage": 0.0,
+        "dynamics_source": dynamics_source,
+        "timing": tracker.summary(),
     }
+    if phases is not None:
+        summary["latency_phases"] = phases.summary()
     summary.update(
         summarize_move_hold_trace(
             trace_rows,

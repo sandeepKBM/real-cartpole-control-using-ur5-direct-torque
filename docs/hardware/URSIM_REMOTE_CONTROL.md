@@ -216,19 +216,19 @@ Success:
 PROBE OK: receive + control + directTorque() path works.
 ```
 
-### 6d. Fieldbus conflict sweep (diagnostic)
+### 6d. Fieldbus conflict (diagnostic)
 
-```bash
-python tools/_rtde_control_sweep.py
-```
-
-At 125 Hz this often surfaces the explicit fieldbus error:
+If `tools/_rtde_control_probe.py` fails with a sync timeout, disable PROFINET /
+EtherNet/IP / MODBUS in PolyScope (Services + Installation → Fieldbus), restart
+URSim, and retry. Explicit register-in-use errors look like:
 
 ```text
 One of the RTDE input registers are already in use!
 Currently you must disable the EtherNet/IP adapter, PROFINET or any MODBUS unit
 configured on the robot.
 ```
+
+(Historical frequency/flag sweeps: `archive/superseded/hardware_scratch/_rtde_control_sweep.py`.)
 
 ---
 
@@ -312,8 +312,7 @@ to validate actual torque motion.
 | `tools/_check_ursim_remote.py` | Dashboard status snapshot |
 | `tools/_clear_dashboard_mode_lock.py` | Undo dashboard operational-mode lock |
 | `tools/_rtde_control_probe.py` | Minimal control + directTorque test |
-| `tools/_rtde_control_sweep.py` | Frequency / flag sweep + fieldbus error surfacing |
-| `tools/ur5e_direct_torque_x_transport.py` | Full tuned OSC X transport CLI |
+| `tools/ur5e_direct_torque_x_transport.py` | X transport CLI (`--control-mode`) |
 | `hardware/dashboard.py` | Dashboard helpers (`query_remote_control`, `clear_operational_mode`) |
 
 ---

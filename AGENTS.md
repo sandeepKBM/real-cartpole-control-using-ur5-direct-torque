@@ -3,7 +3,7 @@
 Working playbook for agents operating in `/common/users/ss5772/real_Cartpole`.
 Update rule: edit in place, keep these sections, date-stamp material changes. Do not append
 chronological logs here — that pattern was retired 2026-07-03; the old log is preserved at
-`docs/archive/AGENTS_HISTORY.md`.
+`docs/archive/AGENTS_HISTORY.md`. Material hardware refresh: 2026-07-14.
 
 ## 1. Project reality
 
@@ -111,44 +111,37 @@ an MP4 or a bare exit code as success evidence — read the run record.
 
 ## 4. Safety & guardrails (hardware — do not weaken)
 
-`hardware/` is the real-UR5e RTDE lane (rewritten 2026-07-07 — the previous version's files
-live in `archive/superseded/hardware_rtde_v1/`, including the ROS2 pipeline node, which had a
-real bug: a failed state read left stale data in place forever with no reconnect/auto-stop).
-Three modules, one job each:
-- `hardware/safety.py` — every numeric limit and safety decision. `UR5eSafetyLimits`
-  (absolute ceilings, unchanged from the previous lane), `ConnectionHealth`
-  (consecutive-failure + staleness tracking), `EStopLatch` (see below),
-  `CartesianMoveLimits`/`CartesianMoveMonitor` (the sim's `ImpedanceSafetyMonitor` concept —
-  drift-from-start, orientation-error, monotonic-growth-abort — ported to real TCP-pose
-  telemetry).
-- `hardware/link.py` — `UR5eLink`: connection + live state, nothing else. `read_state()`
-  **raises** `RTDEStateError` on any problem; it never returns a cached/stale value (the
-  direct fix for the old bug above). `connect(with_control=True)` verifies the real
-  `servoL` signature via introspection and fails fast rather than guessing argument order.
-- `hardware/motion.py` — `move_cartesian_bounded()`, the one bounded Cartesian move (quintic
-  min-jerk `servoL` waypoint streaming, safety-checked every cycle). Direct torque control is
-  out of scope entirely: the installed `rtde_control` library has no working torque API, and
-  there is no Jacobian/FK code anywhere in this repo that works from real robot state without
-  MuJoCo — building real torque control safely also needs a robot-side watchdog that doesn't
-  exist (see `docs/hardware/ur5e_direct_torque_warning.md`).
+`hardware/` is the real-UR5e RTDE lane (rewritten 2026-07-07; older lane in
+`archive/superseded/hardware_rtde_v1/`). **Learning map:** `docs/hardware/README.md`.
 
-CLI entrypoints: `tools/ur5e_connect.py` (`--once`/`--watch`; connect + read state only —
-never imports `hardware/motion.py`, so it is physically incapable of moving the robot) and
-`tools/ur5e_move.py` (`--axis {x,y,z}` has no default — the physical mounting determines
-left/right; `--i-understand-this-moves-the-robot` required, plus a typed `MOVE` confirmation).
+Three control modes via `hardware/x_transport.py` (`--control-mode`):
+1. **`position`** (default) — `servoL` + optional shadow OSC (`position_transport.py`);
+   use on URSim / real arm to test trajectory, safety, logging without live torques.
+2. **`direct_torque`** — Python OSC @ 500 Hz → `directTorque()` (`direct_torque_transport.py`);
+   URSim validates the API only (no torque physics); real arm for motion.
+3. **`urscript`** — OSC on PolyScope (`urscript_transport.py`); minimum-latency path.
+
+Core modules:
+- `hardware/safety.py` — `UR5eSafetyLimits`, `ConnectionHealth`, one-way `EStopLatch`,
+  `CartesianMoveMonitor` (TCP drift / orientation / growth abort).
+- `hardware/link.py` — `UR5eLink`: receive + optional `servoL`/`moveJ`. `read_state()`
+  **raises** `RTDEStateError` (never returns stale cache — fix for the old ROS2 bug).
+- `hardware/motion.py` — bounded Cartesian `servoL` move (`tools/ur5e_move.py`).
+- `hardware/direct_torque_link.py` — `UR5eDirectTorqueLink` + RTDE/local J+M.
+- Never add gravity torque in Python when using `directTorque()` — PolyScope adds it.
+
+CLIs: `tools/ur5e_connect.py` (receive-only; cannot move), `tools/ur5e_move.py`,
+`tools/ur5e_direct_torque_x_transport.py` (main `--control-mode` entry),
+`tools/ur5e_direct_torque_height_latency_test.py`, `tools/ur5e_urscript_x_transport.py`.
 
 Guardrails enforced in code:
-1. **Receive-only default** — `UR5eLink.connect(with_control=False)` never opens the control
-   socket unless explicitly asked.
-2. **Motion requires explicit opt-in** — `--i-understand-this-moves-the-robot`, checked first
-   in `move_cartesian_bounded()` before any other logic runs.
-3. **The e-stop latch is real** — `EStopLatch.trip()` is one-way; there is no `reset()`/
-   `clear()` method anywhere in that class, so once tripped, a fresh process is required to
-   run again. (The previous lane's docs claimed this latch existed; it didn't, anywhere in
-   the code — this is now true, not just documented.)
-4. **No reconnect mid-motion** — `move_cartesian_bounded()` treats any state-read failure as
-   immediately fatal (stop + trip latch); reconnect-with-backoff is only attempted in
-   `tools/ur5e_connect.py --watch`'s idle monitoring loop, never while a move is executing.
+1. **Receive-only default** — `UR5eLink.connect(with_control=False)` never opens control
+   unless asked.
+2. **Motion requires explicit opt-in** — `--i-understand-this-moves-the-robot`, checked
+   before any move path runs.
+3. **E-stop latch is one-way** — no `reset()`/`clear()`; tripped ⇒ new process.
+4. **No reconnect mid-motion** — state-read failure aborts; reconnect only in
+   `ur5e_connect.py --watch` idle loop.
 
 Do-not-recreate (gravity/dynamics bugs, still relevant):
 - Do not tune gravity scale from single-joint probes; always test all 6 joints.

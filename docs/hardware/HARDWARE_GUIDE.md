@@ -1,27 +1,32 @@
 # Hardware lane — complete learning guide
 
 **Audience:** you, on the lab floor, without an AI assistant.  
-**Last updated:** 2026-07-08  
-**Code root:** `hardware/` + `tools/ur5e_*.py`
+**Last updated:** 2026-07-14  
+**Code root:** `hardware/` + hardware `tools/ur5e_*.py`  
+**File map + learning order:** [`README.md`](README.md) — start there.
 
 This document explains **what every hardware file does**, **how data flows**, **how to
 run things safely**, and **what URSim can vs cannot validate**.
 
-Shorter operational checklists live in:
+Operational checklists:
 
-- [`URSIM_REMOTE_CONTROL.md`](URSIM_REMOTE_CONTROL.md) — Docker / PolyScope bring-up
-- [`README.md`](README.md) — file index and quick commands
+- [`README.md`](README.md) — every relevant file + learn/run order
+- [`POLYSCOPE_PANEL_CHECKLIST.md`](POLYSCOPE_PANEL_CHECKLIST.md) — teach pendant
+- [`URSIM_REMOTE_CONTROL.md`](URSIM_REMOTE_CONTROL.md) — Docker / remote control
+- [`URSCRIPT_INNER_LOOP.md`](URSCRIPT_INNER_LOOP.md) — Mode 3 (on-robot OSC)
 
 ---
 
 ## 1. Mental model (read this first)
 
-The repo has **two different ways** to move a real UR5e. They are **not interchangeable**.
+The hardware lane has **three control modes**. They share trajectory + safety + logging,
+but they are **not interchangeable** at the robot API.
 
-| Path | Robot API | Who does IK / dynamics | Controller in Python | Gravity comp |
-|------|-----------|------------------------|----------------------|--------------|
-| **Position** (`ur5e_move.py`) | `servoL` @ 125 Hz | **Robot firmware** | None (waypoints only) | N/A |
-| **Direct torque** (`ur5e_direct_torque_x_transport.py`) | `directTorque()` @ **500 Hz** | **Your OSC controller** | `XAxisCartesianImpedanceController` | **Inside PolyScope** — do **not** add in Python |
+| Mode | Flag | Robot API | Who runs the 500 Hz law | Gravity |
+|------|------|-----------|-------------------------|---------|
+| **1 Position** | `--control-mode position` (default) | `servoL` @ 125 Hz | Firmware IK; OSC **shadow** only | N/A |
+| **2 Direct torque** | `--control-mode direct_torque` | `directTorque()` @ 500 Hz | Python OSC | **Inside PolyScope** — never add in Python |
+| **3 URScript** | `--control-mode urscript` | Custom script @ 500 Hz | OSC on PolyScope | Inside PolyScope |
 
 ```
                     ┌─────────────────────────────────────────┐
@@ -48,8 +53,10 @@ The repo has **two different ways** to move a real UR5e. They are **not intercha
 1. **`read_state()` never lies with stale data** — on failure it **raises** `RTDEStateError`.
 2. **E-stop latch is one-way** — after `estop.trip()`, start a **new Python process**.
 3. **Remote control must be ON** for RTDE **control** (not always for receive-only).
-4. **URSim does not simulate `direct_torque()` motion** — API works, physics does not.
+4. **URSim does not simulate `direct_torque()` motion** — API works, physics does not. Use **`--control-mode position`** (default) to exercise trajectory, safety, and shadow OSC on URSim via `servoL`.
 5. **Never add gravity torque on hardware** when using `directTorque()` — PolyScope adds it.
+
+**Recommended bring-up order:** `position` (+ shadow OSC) on URSim → `position` on real arm → `direct_torque` on real arm → optional `urscript` for minimum latency.
 
 ---
 
@@ -64,43 +71,44 @@ The repo has **two different ways** to move a real UR5e. They are **not intercha
 | `motion.py` | `move_cartesian_bounded()` — one safe Cartesian move via `servoL` |
 | `direct_torque_link.py` | `UR5eDirectTorqueLink` — RTDE + `directTorque()` + Jacobian/M |
 | `direct_torque_transport.py` | 500 Hz OSC X move+hold loop for real robot |
+| `position_transport.py` | Same X profile via `servoL` + optional OSC shadow (test lane) |
+| `x_transport.py` | Router: `position` → `direct_torque` → `urscript` |
+| `control_mode.py` | `--control-mode` normalization |
+| `poses.py` | Named joint poses (`HEIGHT_ALPHA_0_5_Q`, etc.) |
+| `joint_motion.py` | `moveJ` repositioning before direct-torque sessions |
+| `latency.py` | Per-phase RTDE/controller latency recorder |
+| `local_dynamics.py` | MuJoCo J(q), M(q) fast path (skips RTDE dynamics calls) |
 | `dashboard.py` | TCP dashboard on port 29999 (power on, remote check, mode unlock) |
 | `logging.py` | Re-exports `controller_core.logging_utils` |
 | `timing.py` | Loop period / lateness stats for staged bring-up |
 
-Legacy / staging (not the main path): `ur5e_rtde_bridge.py`, `ur5e_control_session.py`,
-`ur5e_stages.py`, `ros_topics.py`, `safety_limits.py`.
+Archived (do not extend): `archive/superseded/hardware_rtde_v1/`,
+`archive/superseded/hardware_scratch/`. Full file list: [`README.md`](README.md).
 
-### CLI entrypoints (`tools/`)
+### CLI entrypoints (`tools/` — hardware only)
 
 | Script | Moves robot? | Purpose |
 |--------|--------------|---------|
-| `ur5e_connect.py` | **No** (by design) | Receive-only state read (`--once` / `--watch`) |
-| `ur5e_move.py` | Yes (`servoL`) | Bounded single-axis Cartesian move |
-| `ur5e_direct_torque_x_transport.py` | Yes (`directTorque`) | Tuned OSC X transport |
-| `_check_ursim_remote.py` | No | Dashboard status snapshot |
-| `_clear_dashboard_mode_lock.py` | No | Undo `set operational mode` lock |
-| `_ursim_wait_and_power_on.py` | No | Wait for dashboard after Docker start |
+| `ur5e_connect.py` | **No** | Receive-only state (`--once` / `--watch`) |
+| `ur5e_move.py` | Yes | Bounded single-axis `servoL` (first real motion) |
+| `ur5e_move_joints.py` | Yes | `moveJ` to named pose (height α=0.5, …) |
+| `ur5e_direct_torque_x_transport.py` | Yes | **Main** X transport (`--control-mode`, default `position`) |
+| `ur5e_direct_torque_height_latency_test.py` | Yes | Joint move + transport + latency report |
+| `ur5e_urscript_x_transport.py` | Yes | Mode 3 dedicated entrypoint |
+| `_check_ursim_remote.py` / `_clear_dashboard_mode_lock.py` / `_ursim_wait_and_power_on.py` | No | URSim / dashboard helpers |
+| `_rtde_control_probe.py` / `_direct_torque_pulse_test.py` | Probe | API checks (URSim: pulse → expect zero motion) |
 | `reset_ursim_docker.sh` | No | Factory-reset URSim container |
-| `_rtde_control_probe.py` | Probe only | Minimal control + directTorque test |
-| `_direct_torque_pulse_test.py` | Pulse | 15 Nm joint test (URSim: expect zero motion) |
 
-### Config
+MuJoCo drivers (`ur5e_mujoco_torque_experiments.py`, `ur5e_move_hold_transport.py`, …)
+are **not** hardware — ignore them while learning RTDE.
 
-| File | Used by |
-|------|---------|
-| `config/ur5e_mujoco_torque_osc_tuned.yaml` | MuJoCo **and** hardware direct-torque (gains + safety) |
+### Config / tests / assets
 
-### Tests
-
-| File | What it checks |
-|------|----------------|
-| `tests/hardware/test_link.py` | `UR5eLink` connect, read, servoL signature |
-| `tests/hardware/test_motion.py` | Waypoint planning, move abort on safety |
-| `tests/hardware/test_hardware_safety.py` | Limits, monitor, e-stop latch |
-| `tests/hardware/test_direct_torque_helpers.py` | `rotvec_to_quat_wxyz` for TCP pose |
-
-Run: `pytest tests/hardware/ -q`
+| Path | Role |
+|------|------|
+| `config/ur5e_mujoco_torque_osc_tuned.yaml` | Gains + safety (sim **and** hardware) |
+| `assets/urscript/x_axis_osc_inner.script.template` | Mode 3 template |
+| `tests/hardware/test_*.py` | Mocked RTDE suite — `pytest tests/hardware/ -q` |
 
 ---
 
@@ -321,15 +329,17 @@ load YAML → XAxisCartesianImpedanceController + ImpedanceSafetyMonitor
      ↓
 connect → read_state → controller.reset_from_state()
      ↓
-loop at 500 Hz until duration_s:
-     read_state()
-     x_profile_target("min_jerk_move_hold", ...)  → target_x, target_x_vel
-     build_robot_state()
-     output = controller.compute(robot_state)   → tau (6,)
-     safety.check(...)
-     link.direct_torque(tau)
-     append trace row
-     sleep ~0.95 * dt
+loop at 500 Hz until duration_s (deadline scheduling):
+     cycle_start = monotonic
+     read_state()                    → latency: read_state
+     get_jacobian()                  → latency: get_jacobian
+     get_mass_matrix()               → latency: get_mass_matrix
+     compose_robot_state(...)
+     output = controller.compute(...)  → latency: controller
+     safety.check(...)               → latency: safety
+     link.direct_torque(tau)         → latency: direct_torque
+     sleep until next_deadline       → latency: sleep
+     TimingTracker + PhaseLatencyRecorder → summary["timing"], summary["latency_phases"]
      ↓
 finally: zero torque → safe_stop
      ↓
@@ -344,9 +354,55 @@ summarize_move_hold_trace() + compute_valid_move_hold_metrics()
 - `termination_reason == "duration_complete"`
 - `valid_move_and_hold` from transport metrics (tracking, drift, hold quality)
 
+**Latency hotspots (typical):** four RTDE round-trips per cycle dominate when
+``dynamics_source=rtde`` (`read_state`, `getJacobian`, `getMassMatrix`, `directTorque`).
+Use ``--dynamics-source local`` to compute J+M from MuJoCo in-process (~0.1–0.3 ms
+vs ~0.9 ms RTDE) — same MJCF the OSC gains were tuned on.
+
+```bash
+python tools/ur5e_direct_torque_x_transport.py --robot-ip <IP> \\
+  --dynamics-source local \\
+  --target-x-delta 0.02 --move-duration 1.0 --duration 3.0 \\
+  --i-understand-this-moves-the-robot --yes
+```
+
+Python OSC compute is usually sub-millisecond. If `summary["timing"]["late_cycles"]` is high, run on the
+PC wired to the robot (not over SSH), and read `summary["latency_phases"]["dominant_phase"]`.
+
+---
+
+### 4.5b Mode 1 — `position_transport.py` + `x_transport.py`
+
+**`x_transport.run_x_transport(control_mode=...)`** is the single dispatcher used by the
+main CLIs. Prefer calling it (or the CLI) over importing mode modules directly.
+
+**`position_transport.run_x_transport_position`:**
+
+1. Streams the same `min_jerk_move_hold` X profile via `servoL` @ 125 Hz
+2. Runs `CartesianMoveMonitor` every cycle
+3. If `shadow_osc=True` (default): computes OSC with `LocalMujocoDynamics` J+M and
+   logs `tau_shadow` — **never** calls `directTorque()`
+4. Writes `trace.jsonl` / `summary.json` with the same move/hold metrics as Mode 2
+
+Use Mode 1 to prove trajectory + safety + logging on URSim before touching live torque.
+
+**End-to-end test (step 1 + transport + latency):**
+
+```bash
+python tools/ur5e_direct_torque_height_latency_test.py --robot-ip <IP> \\
+  --control-mode position --target-x-delta 0.02 --move-duration 1.0 --duration 3.0 \\
+  --i-understand-this-moves-the-robot --yes
+
+# Offline mock (Mode 2 scheduling only — no robot):
+python tools/ur5e_direct_torque_height_latency_test.py --robot-ip 127.0.0.1 \\
+  --control-mode direct_torque --latency-only-mock
+```
+
+Step 1 alone: `tools/ur5e_move_joints.py --pose height_alpha_0_5 ...`
+
 **Config requirements:**
 
-- `hardware.rtde_frequency_hz` ≈ **500** in YAML
+- Mode 2: `hardware.rtde_frequency_hz` ≈ **500** in YAML
 - Uses `controller.gains` and `controller.safety` from tuned OSC YAML
 
 **Important MuJoCo vs hardware difference:**
@@ -354,7 +410,7 @@ summarize_move_hold_trace() + compute_valid_move_hold_metrics()
 | | MuJoCo | Hardware direct torque |
 |---|--------|------------------------|
 | Gravity | Python adds `tau_gravity` | **Omit** — PolyScope handles |
-| Jacobian/M | Pinocchio / MuJoCo | RTDE `getJacobian()` / `getMassMatrix()` |
+| Jacobian/M | Pinocchio / MuJoCo | RTDE or `--dynamics-source local` |
 | Physics | Sim integrates | Real robot / **not URSim** |
 
 ---
@@ -447,24 +503,34 @@ moves the wrong way, swap `left`/`right` or pick a different axis — depends on
 
 ---
 
-### 5.3 `tools/ur5e_direct_torque_x_transport.py` — torque mode
+### 5.3 `tools/ur5e_direct_torque_x_transport.py` — X transport (all 3 modes)
 
-**Prerequisites:** see [`URSIM_REMOTE_CONTROL.md`](URSIM_REMOTE_CONTROL.md)
+Default is **Mode 1** (`position`). Switch modes with `--control-mode`.
+Prerequisites for Mode 2/3: [`URSIM_REMOTE_CONTROL.md`](URSIM_REMOTE_CONTROL.md).
 
 ```bash
-# Probe — zero torque 1 s (validates API on URSim)
-python tools/ur5e_direct_torque_x_transport.py --robot-ip <IP> --probe-only \
-  --skip-dashboard-power-on
-
-# Small X move — USE REAL ROBOT for visible motion
+# Mode 1 — servoL + shadow OSC (URSim or real; validates trajectory/safety/logging)
 python tools/ur5e_direct_torque_x_transport.py --robot-ip <IP> \
-  --target-x-delta 0.02 --move-duration 1.0 --duration 3.0 \
+  --control-mode position --target-x-delta 0.02 --move-duration 1.0 --duration 3.0 \
   --i-understand-this-moves-the-robot --yes
+
+# Mode 2 — live directTorque (real UR5 for motion; URSim = API only)
+python tools/ur5e_direct_torque_x_transport.py --robot-ip <IP> \
+  --control-mode direct_torque --dynamics-source local \
+  --target-x-delta 0.02 --i-understand-this-moves-the-robot --yes
+
+# Mode 3 — on-robot URScript (see URSCRIPT_INNER_LOOP.md)
+python tools/ur5e_direct_torque_x_transport.py --robot-ip <IP> \
+  --control-mode urscript --target-x-delta 0.02 \
+  --i-understand-this-moves-the-robot --yes
+
+# Probe (receive / API check — no transport)
+python tools/ur5e_direct_torque_x_transport.py --robot-ip <IP> --probe-only
 ```
 
-**Outputs:** `outputs/hardware_direct_torque/x_transport_<timestamp>/`
+**Outputs:** `outputs/hardware_transport/<mode>_<timestamp>/`
 
-- `trace.jsonl` — per-step q, tau, errors
+- `trace.jsonl` — per-step pose; Mode 1 includes `tau_shadow`; Mode 2 includes commanded `tau`
 - `summary.json` — pass/fail metrics
 
 **Key summary fields:**
@@ -475,6 +541,7 @@ python tools/ur5e_direct_torque_x_transport.py --robot-ip <IP> \
 | `valid_move_and_hold` | `true` |
 | `max_abs_qd_radps` | < safety limit |
 | `move_failure_reason` | absent |
+| `shadow_osc` (Mode 1) | `true` unless `--no-shadow-osc` |
 
 ---
 
@@ -512,12 +579,14 @@ URSim for `direct_torque()`. We confirmed zero `qd` and zero `dq` after 15 Nm fo
 
 ### At the robot
 
-1. **E-stop accessible**, workspace clear, speed slider reasonable
+1. **E-stop accessible**, workspace clear, speed slider reasonable ([checklist](POLYSCOPE_PANEL_CHECKLIST.md))
 2. `python tools/ur5e_connect.py --robot-ip <IP> --once` — sane `q`, `tcp_pose`
-3. PolyScope: **Remote control ON** (for torque path)
-4. **Position path first:** `ur5e_move.py` with 0.02 m
-5. **Torque path:** `--probe-only` then `0.02 m` X transport
-6. Inspect `summary.json` before increasing to `0.10 m`
+3. PolyScope: **Remote control ON**
+4. Tiny `ur5e_move.py` (0.02 m) — confirm axis sign
+5. **Mode 1:** `--control-mode position` X transport 0.02 m — read `tau_shadow` in trace
+6. **Mode 2 (real arm only for motion):** `--control-mode direct_torque` 0.02 m
+7. Optional **Mode 3:** `--control-mode urscript`
+8. Inspect `summary.json` before increasing to `0.10 m`
 
 ### If something goes wrong
 
@@ -634,13 +703,12 @@ MuJoCo-only keys (`mujoco.scene_xml`, `gravity_mode`, etc.) are ignored by hardw
 
 ### Add ROS2 bridge
 
-See `hardware/ros_topics.py` and `ros2_ws/` — not the active path for bring-up.
-Prefer proving bare RTDE first.
+Not active. Historical code: `archive/superseded/hardware_rtde_v1/`. Prove bare RTDE first.
 
 ### Tune gains on hardware
 
-Start from MuJoCo-validated YAML. Change one gain at a time. Log every run to
-`outputs/hardware_direct_torque/`. Compare `summary.json` fields to MuJoCo baselines.
+Start from MuJoCo-validated YAML. Change one gain at a time. Log every run under
+`outputs/hardware_transport/`. Compare `summary.json` to MuJoCo baselines.
 
 ---
 
@@ -675,8 +743,10 @@ python tools/_ursim_wait_and_power_on.py
 
 | Document | Topic |
 |----------|-------|
-| [`URSIM_REMOTE_CONTROL.md`](URSIM_REMOTE_CONTROL.md) | Docker, PolyScope, passwords, fieldbus |
-| [`README.md`](README.md) | Short index |
+| [`README.md`](README.md) | **File map + learning order** |
+| [`URSCRIPT_INNER_LOOP.md`](URSCRIPT_INNER_LOOP.md) | Mode 3 |
+| [`URSIM_REMOTE_CONTROL.md`](URSIM_REMOTE_CONTROL.md) | Docker, PolyScope, fieldbus |
+| [`POLYSCOPE_PANEL_CHECKLIST.md`](POLYSCOPE_PANEL_CHECKLIST.md) | Teach-pendant checklist |
 | `config/ur5e_mujoco_torque_osc_tuned.yaml` | Gain tuning rationale (comments) |
 | `controller_core/x_axis_cartesian_impedance.py` | OSC math |
 | `AGENTS.md` §4 | Project-wide hardware guardrails |

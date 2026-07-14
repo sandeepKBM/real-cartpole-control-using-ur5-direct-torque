@@ -85,16 +85,22 @@ bandwidth limit at the tuned `kp_x`, not saturation).
 - Refreshed `docs/controller_core/`, `docs/simulation/`, `docs/ros2/` subsystem docs to match
   the current (post-archival, post-Pinocchio/OSC) code layout.
 
+## 2026-07-14: hardware three-mode lane + docs refresh
+
+Hardware now has three modes via `hardware/x_transport.py` (`--control-mode`):
+`position` (default, `servoL` + shadow OSC), `direct_torque` (Python OSC @ 500 Hz),
+`urscript` (on-robot). Learning map: `docs/hardware/README.md`. Scratch RTDE probes
+moved to `archive/superseded/hardware_scratch/`. `AGENTS.md` §4 updated (direct torque
+is **in** scope with PolyScope ≥5.23 / `ur_rtde>=1.6`).
+
 ## 2026-07-07: hardware lane rewrite
 
 `hardware/` was rewritten from scratch (audited for architecture bugs first — see
 `AGENTS.md` §4 for the real stale-state bug found in the old ROS2 pipeline node, and the
-missing e-stop-latch-implementation claim that turned out to be false). New lane:
-`hardware/{safety,link,motion}.py` + `tools/ur5e_{connect,move}.py`. Direct torque control is
-confirmed out of scope (no working torque API in the installed `rtde_control`, no Jacobian/FK
-path off MuJoCo) — motion uses Cartesian `servoL` instead, IK done robot-side. Old lane
-archived whole to `archive/superseded/hardware_rtde_v1/`. 46 new tests (fake-RTDE-object
-pattern), full suite 167 passing.
+missing e-stop-latch-implementation claim that turned out to be false). Initial rewrite:
+`hardware/{safety,link,motion}.py` + `tools/ur5e_{connect,move}.py`. Old lane archived to
+`archive/superseded/hardware_rtde_v1/`. Direct-torque path landed later (see 2026-07-14).
+Full detail: `docs/hardware/README.md`.
 
 Additionally validated against the *real* Universal Robots `URControl` binary (via a local
 URSim instance, not a mock — see session notes): confirmed `RTDEReceiveInterface` really has
@@ -102,7 +108,7 @@ URSim instance, not a mock — see session notes): confirmed `RTDEReceiveInterfa
 signature is exactly `(pose, speed, acceleration, time, lookahead_time, gain)` — both match
 this code's assumptions exactly. `hardware/link.py`'s `read_state()` was also confirmed to
 correctly reject a degenerate (not-fully-powered-on) real-server response rather than
-accepting bad data. Full detail: `docs/hardware/README.md`.
+accepting bad data.
 
 Not verifiable without the real robot: actual `servoL` motion, 125Hz streaming under real
 network conditions, real TCP orientation-vector convention, and whether the physical mount
