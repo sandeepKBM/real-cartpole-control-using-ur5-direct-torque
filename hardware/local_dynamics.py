@@ -71,8 +71,9 @@ class LocalMujocoDynamics:
         self._mujoco.mj_jacSite(self.model, self.data, jacp, jacr, self.site_id)
         jacobian = np.vstack([jacp[:, : self.n_joints], jacr[:, : self.n_joints]]).astype(np.float64)
 
-        mass_full = np.zeros((self.model.nv, self.model.nv), dtype=np.float64)
-        self._mujoco.mj_fullM(self.model, self.data, mass_full)
+        from simulation.ur5e_mujoco_torque import expand_mass_matrix
+
+        mass_full = expand_mass_matrix(self.model, self.data)
         mass_matrix = mass_full[: self.n_joints, : self.n_joints].copy()
         return jacobian, mass_matrix
 

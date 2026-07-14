@@ -27,7 +27,7 @@ that class) once too many failures accumulate.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -237,6 +237,30 @@ class CartesianMoveLimits:
                 raise ValueError(f"{name} must be positive and finite")
         if self.max_axis_error_growth_steps < 1:
             raise ValueError("max_axis_error_growth_steps must be >= 1")
+
+    @classmethod
+    def for_robot(cls, robot_ip: str, *, base: "CartesianMoveLimits | None" = None, **overrides) -> "CartesianMoveLimits":
+        """Build limits for a target host; relax TCP kinematic guards on URSim."""
+        limits = replace(base or cls(), **overrides) if overrides else (base or cls())
+        if is_likely_ursim(robot_ip):
+            limits = replace(
+                limits,
+                max_tcp_accel_mps2=max(float(limits.max_tcp_accel_mps2), 10.0),
+                max_waypoint_jump_m=max(float(limits.max_waypoint_jump_m), 0.02),
+                max_tcp_speed_mps=max(float(limits.max_tcp_speed_mps), 0.5),
+            )
+        limits.validate()
+        return limits
+
+
+def is_likely_ursim(robot_ip: str) -> bool:
+    """True for loopback targets (Docker URSim on the same machine)."""
+    ip = str(robot_ip).strip().lower()
+    if ip in ("127.0.0.1", "localhost", "::1"):
+        return True
+    if ip.startswith("127."):
+        return True
+    return False
 
 
 class CartesianMoveMonitor:

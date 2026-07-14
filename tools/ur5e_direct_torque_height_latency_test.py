@@ -105,7 +105,6 @@ def main() -> int:
             return 2
         from hardware.direct_torque_transport import run_x_transport_direct_torque
         from hardware.link import UR5eState
-        from hardware.poses import HEIGHT_ALPHA_0_5_Q
 
         class _LatencyMockLink:
             def __init__(self) -> None:

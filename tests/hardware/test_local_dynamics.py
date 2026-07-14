@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 mujoco = pytest.importorskip("mujoco")
 
 from hardware.local_dynamics import DEFAULT_SCENE_XML, LocalMujocoDynamics  # noqa: E402
+from simulation.ur5e_mujoco_torque import expand_mass_matrix  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENE_XML = REPO_ROOT / "assets" / "ur5e_torque" / "scene.xml"
@@ -34,9 +35,8 @@ def _mujoco_jacobian_mass(model, data, site_id, q):
     jacr = np.zeros((3, model.nv))
     mujoco.mj_jacSite(model, data, jacp, jacr, site_id)
     jacobian = np.vstack([jacp[:, :6], jacr[:, :6]])
-    mass_full = np.zeros((model.nv, model.nv))
-    mujoco.mj_fullM(model, data, mass_full)
-    return jacobian, mass_full[:6, :6]
+    mass_matrix = expand_mass_matrix(model, data)[:6, :6]
+    return jacobian, mass_matrix
 
 
 @pytest.mark.hardware

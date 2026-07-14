@@ -33,14 +33,15 @@ class PositionTransportResult:
     trace_path: Path | None
 
 
-def _load_cartesian_limits(config_path: Path) -> CartesianMoveLimits:
+def _load_cartesian_limits(config_path: Path, robot_ip: str) -> CartesianMoveLimits:
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     safety_raw = (cfg.get("controller", {}) or {}).get("safety", {}) or {}
-    return CartesianMoveLimits(
+    base = CartesianMoveLimits(
         max_off_axis_drift_m=float(safety_raw.get("max_abs_orthogonal_drift_m", 0.03)),
         max_orientation_error_rad=float(safety_raw.get("max_orientation_error_rad", 0.25)),
         qd_max_radps=float(safety_raw.get("max_joint_velocity_radps", 3.0)),
     )
+    return CartesianMoveLimits.for_robot(robot_ip, base=base)
 
 
 def run_x_transport_position(
@@ -86,7 +87,7 @@ def run_x_transport_position(
         except ImportError:
             shadow_osc = False
 
-    monitor = CartesianMoveMonitor(_load_cartesian_limits(config_path))
+    monitor = CartesianMoveMonitor(_load_cartesian_limits(config_path, link.robot_ip))
     dt_s = 1.0 / float(rate_hz)
     servo_time_s = dt_s * 1.5
 

@@ -44,6 +44,20 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "ur5e_mujoco_torque"
 ControllerKind = Literal["torque_qp", "impedance", "zero_torque"]
 
 
+def expand_mass_matrix(model: mujoco.MjModel, data: mujoco.MjData) -> np.ndarray:
+    """Dense ``nv x nv`` mass matrix — compatible with MuJoCo 3.x and older bindings.
+
+    MuJoCo 3.x: ``mj_fullM(model, data, dst)`` reads compressed inertia from ``data``.
+    Older bindings: ``mj_fullM(model, dst, data.qM)``.
+    """
+    mass_full = np.zeros((model.nv, model.nv), dtype=np.float64)
+    try:
+        mujoco.mj_fullM(model, data, mass_full)
+    except TypeError:
+        mujoco.mj_fullM(model, mass_full, data.qM)
+    return mass_full
+
+
 @dataclass
 class ZeroTorqueControllerOutput:
     tau: np.ndarray
@@ -275,8 +289,7 @@ def build_mujoco_state(
     ee_lin_vel = jacp[:, :6] @ qd
     ee_ang_vel = jacr[:, :6] @ qd
     gravity_torque = compute_gravity_torque(model, data, joint_ids) if gravity_compensation else None
-    mass_full = np.zeros((model.nv, model.nv), dtype=np.float64)
-    mujoco.mj_fullM(model, data, mass_full)
+    mass_full = expand_mass_matrix(model, data)
     mass_matrix = mass_full[:6, :6].copy()
     return MujocoUR5eState(
         time_s=float(time_s),

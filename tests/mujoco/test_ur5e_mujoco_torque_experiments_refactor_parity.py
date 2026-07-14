@@ -2,12 +2,8 @@
 plumbing move (x_profile_target, build_initial_state_and_adapter, apply_start_q/
 resolve_start_q/coerce_start_q moved to simulation/ur5e_mujoco_torque.py).
 
-Values below were captured by running the identical command against the code
-immediately before and after that move (a git-worktree diff of the full
-trace.jsonl showed zero mismatches across all 250 steps; summary.json matched
-except for absolute path fields). This test pins a handful of representative
-summary fields so any future accidental behavior change in that call path is
-caught, without checking in a large trace fixture.
+Values below were refreshed after fixing ``expand_mass_matrix`` (correct
+``mj_fullM`` usage across MuJoCo binding versions).
 """
 
 from __future__ import annotations
@@ -24,22 +20,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED = {
     "termination_reason": "duration_complete",
     "steps": 250,
-    "achieved_x_delta_m": pytest.approx(2.1359980823239867e-05, abs=1e-12),
-    "final_x_error_m": pytest.approx(0.009978640019176761, abs=1e-12),
-    "max_abs_orientation_error_rad": pytest.approx(1.125336179592295e-05, abs=1e-12),
-    "max_abs_qd_radps": pytest.approx(0.0011764913904821592, abs=1e-12),
-    "max_abs_tau_applied_nm": pytest.approx(0.18833473468883397, abs=1e-9),
-    "move_hold_quality_score": pytest.approx(0.19962752575752596, abs=1e-9),
+    "achieved_x_delta_m": pytest.approx(2.4147800612543547e-05, abs=1e-12),
+    "final_x_error_m": pytest.approx(0.009975852199387457, abs=1e-12),
+    "max_abs_orientation_error_rad": pytest.approx(1.2724684135723752e-05, abs=1e-12),
+    "max_abs_qd_radps": pytest.approx(0.001328891168439839, abs=1e-12),
+    "max_abs_tau_applied_nm": pytest.approx(0.21255900378184536, abs=1e-9),
+    "move_hold_quality_score": pytest.approx(0.1995790397692334, abs=1e-9),
 }
 EXPECTED_FINAL_Q = [
-    2.223046923836849e-06,
-    -1.570807223866776,
-    -2.256813267603262e-05,
-    -1.5707952721838259,
-    -1.5088723726911234e-06,
-    1.9864844580384265e-05,
+    2.5126774343635992e-06,
+    -1.5708086481437646,
+    -2.5510174184623293e-05,
+    -1.5707951336467978,
+    -1.7053370374942624e-06,
+    2.245310874135949e-05,
 ]
-EXPECTED_FINAL_EE_POS = [2.1359980823014048e-05, -0.23399999995298015, 1.0799999997076304]
+EXPECTED_FINAL_EE_POS = [2.414780061231773e-05, -0.23399999993991763, 1.0799999996263487]
 
 
 def test_controller_rollout_matches_pre_refactor_golden_values(tmp_path: Path) -> None:

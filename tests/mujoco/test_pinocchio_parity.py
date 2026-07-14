@@ -20,6 +20,7 @@ pin = pytest.importorskip("pinocchio")
 import mujoco  # noqa: E402
 
 from controller_core.model_dynamics import DEFAULT_UR5E_MJCF, PinocchioUR5eDynamics  # noqa: E402
+from simulation.ur5e_mujoco_torque import expand_mass_matrix  # noqa: E402
 
 N_SAMPLES = 200
 GRAVITY_TOL_NM = 1e-8
@@ -60,9 +61,7 @@ def _mujoco_mass(model, data, q):
     data.qpos[:] = q
     data.qvel[:] = 0.0
     mujoco.mj_forward(model, data)
-    M = np.zeros((model.nv, model.nv))
-    mujoco.mj_fullM(model, data, M)
-    return M
+    return expand_mass_matrix(model, data)
 
 
 def test_joint_order_matches(engines):

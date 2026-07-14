@@ -21,6 +21,7 @@ from hardware.safety import (  # noqa: E402
     UR5eSafetyLimits,
     check_joint_state,
     check_tcp_pose,
+    is_likely_ursim,
 )
 
 
@@ -284,3 +285,17 @@ def test_cartesian_move_monitor_trips_on_monotonic_growth_once_settled():
         )
         last_ok = decision.ok
     assert last_ok is False
+
+
+def test_is_likely_ursim_loopback():
+    assert is_likely_ursim("127.0.0.1") is True
+    assert is_likely_ursim("localhost") is True
+    assert is_likely_ursim("192.168.1.10") is False
+
+
+def test_cartesian_limits_for_robot_relaxes_ursim_kinematic_guards():
+    real = CartesianMoveLimits.for_robot("192.168.1.10")
+    sim = CartesianMoveLimits.for_robot("127.0.0.1")
+    assert sim.max_tcp_accel_mps2 > real.max_tcp_accel_mps2
+    assert sim.max_waypoint_jump_m > real.max_waypoint_jump_m
+    assert sim.max_tcp_speed_mps >= 0.5

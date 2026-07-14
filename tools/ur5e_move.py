@@ -103,7 +103,10 @@ def main() -> int:
         print("[BLOCKED] pass --i-understand-this-moves-the-robot to actually move the robot.")
         return 1
 
-    move_limits = CartesianMoveLimits(max_tcp_speed_mps=max(0.05, peak_v * 1.2))
+    move_limits = CartesianMoveLimits.for_robot(
+        args.robot_ip,
+        max_tcp_speed_mps=max(0.05, peak_v * 1.2),
+    )
     if peak_v > move_limits.max_tcp_speed_mps:
         print(
             f"[BLOCKED] planned peak velocity {peak_v:.4f} m/s exceeds the monitor's "

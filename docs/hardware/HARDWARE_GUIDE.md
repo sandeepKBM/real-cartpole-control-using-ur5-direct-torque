@@ -189,6 +189,8 @@ Used only by **`servoL` moves** (`hardware/motion.py`). Pure geometry on TCP pos
 - Axis tracking error growth during hold
 
 Defaults are **tighter than MuJoCo** because this was the first real-hardware Cartesian move.
+**URSim auto-relax:** when `robot_ip` is loopback (`127.0.0.1`, `localhost`), use
+`CartesianMoveLimits.for_robot()` — higher TCP accel / jump / speed ceilings for noisy sim telemetry.
 
 #### C. Connection health (`ConnectionHealth`)
 

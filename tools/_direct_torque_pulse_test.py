@@ -35,7 +35,7 @@ def main() -> int:
             time.sleep(DT)
         s1 = link.read_state()
         dq = np.asarray(s1.q, dtype=float) - q0
-        print("  max_abs_dq:", float(np.max(np.abs(dq)))
+        print("  max_abs_dq:", float(np.max(np.abs(dq))))
         if float(np.max(np.abs(dq))) > 1e-4:
             link.safe_stop("pulse_done")
             return 0
