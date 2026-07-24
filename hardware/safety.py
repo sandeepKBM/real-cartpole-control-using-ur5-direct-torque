@@ -210,12 +210,22 @@ class CartesianMoveLimits:
     repo and there's no track record to trust yet. ``max_tcp_speed_mps``,
     ``max_tcp_accel_mps2``, and ``max_waypoint_jump_m`` are new -- no prior
     Cartesian-motion value existed on the hardware side to carry over.
+
+    ``max_tcp_accel_mps2`` raised 0.2 -> 0.5 (2026-07-24) after testing a
+    0.15m/1.3s min-jerk move (peak accel ~0.5 m/s^2, the duration needed to
+    reach this ceiling at that distance) through the tuned OSC config in
+    MuJoCo: clean pass, max orientation error 0.166 rad (34% margin under the
+    0.25 rad guard), max |qd| 0.467 rad/s (well under the 1.5 rad/s operative
+    cap). NOTE: raising this alone does not unlock faster real moves --
+    max_tcp_speed_mps is a separate, still-unchanged guard, and a 1.3s/0.15m
+    move's peak velocity (~0.22 m/s) would trip it first. Left unchanged
+    pending a deliberate decision on speed, not accel.
     """
 
     max_off_axis_drift_m: float = 0.02
     max_orientation_error_rad: float = 0.25
     max_tcp_speed_mps: float = 0.05
-    max_tcp_accel_mps2: float = 0.2
+    max_tcp_accel_mps2: float = 0.5
     max_waypoint_jump_m: float = 0.002
     max_axis_error_growth_steps: int = 100
     # Tighter operative trip point than UR5eSafetyLimits.qd_max_radps
