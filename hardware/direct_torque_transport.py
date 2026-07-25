@@ -23,7 +23,7 @@ from .direct_torque_link import UR5eDirectTorqueLink
 from .latency import PhaseLatencyRecorder
 from .link import RTDEStateError
 from .local_dynamics import LocalPinocchioDynamics, normalize_dynamics_source
-from .safety import EStopLatch
+from .safety import CartesianMoveLimits, CartesianMoveMonitor, EStopLatch, is_robot_safety_normal
 from .timing import TimingTracker, monotonic_ns
 
 
@@ -104,6 +104,19 @@ def run_x_transport_direct_torque(
         np.asarray(state0.tcp_pose[:3], dtype=np.float64),
         move_axis=0,
     )
+    # ImpedanceSafetyMonitor (above) has no TCP speed/acceleration/waypoint-jump
+    # ceiling -- only drift/orientation/joint-velocity/axis-growth. Layer
+    # CartesianMoveMonitor on top for the checks position mode already has and
+    # this (live-torque) mode was missing. Reuse safety_cfg's already-active
+    # thresholds for qd/drift/orientation so this doesn't introduce a second,
+    # different trip point for a check that already exists.
+    move_limits = CartesianMoveLimits(
+        qd_max_radps=safety_cfg.max_joint_velocity_radps,
+        max_off_axis_drift_m=min(safety_cfg.max_abs_y_drift_m, safety_cfg.max_abs_z_drift_m),
+        max_orientation_error_rad=safety_cfg.max_orientation_error_rad,
+    )
+    move_monitor = CartesianMoveMonitor(move_limits)
+    move_monitor.set_start(state0.tcp_pose, move_axis_index=0)
 
     trace_rows: list[dict[str, Any]] = []
     termination_reason = "duration_complete"
@@ -172,7 +185,7 @@ def run_x_transport_direct_torque(
                 phases.record("controller_ns", monotonic_ns() - t_ctrl)
 
             t_safe = monotonic_ns()
-            safety_status = safety.check(
+            safety_decision = safety.check(
                 robot_state,
                 x_error=float(output.x_error),
                 orientation_error_norm=float(output.orientation_error_norm),
@@ -180,8 +193,27 @@ def run_x_transport_direct_torque(
             )
             if phases is not None:
                 phases.record("safety_ns", monotonic_ns() - t_safe)
-            if not safety_status.ok:
-                termination_reason = safety_status.reason or "safety_stop"
+            if not safety_decision.ok:
+                termination_reason = safety_decision.reason or "safety_stop"
+                estop.trip(termination_reason)
+                break
+
+            move_decision = move_monitor.check(
+                q=link_state.q,
+                qd=link_state.qd,
+                tcp_pose=link_state.tcp_pose,
+                target_tcp_pose=np.concatenate(([target_x], state0.tcp_pose[1:6])),
+                orientation_error_rad=float(output.orientation_error_norm),
+                axis_target_moving=bool(t_s <= move_duration_s),
+                dt_s=dt_s,
+            )
+            if not move_decision.ok:
+                termination_reason = move_decision.reason or "cartesian_move_stop"
+                estop.trip(termination_reason)
+                break
+
+            if not is_robot_safety_normal(link_state.safety_status):
+                termination_reason = f"robot_safety_status_abnormal: {link_state.safety_status}"
                 estop.trip(termination_reason)
                 break
 

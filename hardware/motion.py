@@ -8,12 +8,13 @@ safety violation or state-read failure aborts immediately via
 reconnect attempt mid-motion; a reconnect during motion could paper over a
 real fault, so any problem here is treated as final.
 
-This uses position-space ``servoL`` streaming, not torque control: the real
-UR5e's RTDE control library has no working torque API in this environment
-(confirmed by reading the code, not assumed), and there is no Jacobian/FK
-code anywhere in this repo that works from real robot state without MuJoCo.
-``servoL`` lets the robot's own firmware do inverse kinematics, so none of
-that is needed here -- see AGENTS.md / the plan file for the full reasoning.
+This uses position-space ``servoL`` streaming, not torque control -- ``servoL``
+lets the robot's own firmware do inverse kinematics, so no Jacobian/FK code is
+needed here. (Historical note: when this module was first written the
+installed RTDE control library had no working torque API at all; a live
+torque path was added later in ``hardware/direct_torque_transport.py`` and
+``hardware/urscript_transport.py`` -- see AGENTS.md sec 4 for both lanes and
+the reasoning behind keeping this one position-only.)
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .link import RTDEStateError, UR5eLink
-from .safety import CartesianMoveMonitor, EStopLatch
+from .safety import CartesianMoveMonitor, EStopLatch, is_robot_safety_normal
 
 
 @dataclass
@@ -171,6 +172,18 @@ def move_cartesian_bounded(
             return MoveResult(
                 ok=False,
                 reason=decision.reason,
+                waypoints_sent=i + 1,
+                stopped_early=True,
+                final_tcp_pose=state.tcp_pose,
+            )
+
+        if not is_robot_safety_normal(state.safety_status):
+            reason = f"robot_safety_status_abnormal: {state.safety_status}"
+            link.safe_stop(reason)
+            estop.trip(reason)
+            return MoveResult(
+                ok=False,
+                reason=reason,
                 waypoints_sent=i + 1,
                 stopped_early=True,
                 final_tcp_pose=state.tcp_pose,

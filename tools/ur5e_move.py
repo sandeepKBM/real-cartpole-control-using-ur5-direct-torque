@@ -7,10 +7,9 @@ orientation, velocity, and tracking error every single control cycle --
 see hardware/motion.py and hardware/safety.py::CartesianMoveMonitor.
 
 This does NOT run the simulation's torque-based Cartesian impedance
-controller: the real robot's RTDE control library has no working torque API
-in this environment, and there is no Jacobian/forward-kinematics code
-anywhere in this repo that works from real robot state without MuJoCo. See
-AGENTS.md / the plan file for the full reasoning.
+controller -- it's a deliberately simple, position-only first-motion script.
+For live torque control see tools/ur5e_direct_torque_x_transport.py
+(--control-mode direct_torque or urscript); see AGENTS.md sec 4 for both.
 
 --axis has no default -- you must know (or determine on-site with a small
 test move) which axis and sign corresponds to physical left/right for this
@@ -103,10 +102,12 @@ def main() -> int:
         print("[BLOCKED] pass --i-understand-this-moves-the-robot to actually move the robot.")
         return 1
 
-    move_limits = CartesianMoveLimits.for_robot(
-        args.robot_ip,
-        max_tcp_speed_mps=max(0.05, peak_v * 1.2),
-    )
+    # Fixed, evidence-based ceiling -- not derived from this move's own peak_v.
+    # The previous max(0.05, peak_v * 1.2) made both this pre-check and the live
+    # CartesianMoveMonitor guard during the move tautological: peak_v can never
+    # exceed 1.2x itself, so neither could ever trip on an aggressive-but-nominal
+    # move, only on >20% overshoot from what was already planned.
+    move_limits = CartesianMoveLimits.for_robot(args.robot_ip)
     if peak_v > move_limits.max_tcp_speed_mps:
         print(
             f"[BLOCKED] planned peak velocity {peak_v:.4f} m/s exceeds the monitor's "

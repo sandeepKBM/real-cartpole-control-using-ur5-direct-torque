@@ -22,7 +22,7 @@ from transport_metrics import compute_valid_move_hold_metrics, summarize_move_ho
 from .direct_torque_link import UR5eDirectTorqueLink
 from .link import RTDEStateError, UR5eLink
 from .local_dynamics import LocalMujocoDynamics
-from .safety import CartesianMoveLimits, CartesianMoveMonitor, EStopLatch
+from .safety import CartesianMoveLimits, CartesianMoveMonitor, EStopLatch, is_robot_safety_normal
 
 
 @dataclass
@@ -167,6 +167,11 @@ def run_x_transport_position(
             )
             if not decision.ok:
                 termination_reason = decision.reason or "safety_stop"
+                estop.trip(termination_reason)
+                break
+
+            if not is_robot_safety_normal(link_state.safety_status):
+                termination_reason = f"robot_safety_status_abnormal: {link_state.safety_status}"
                 estop.trip(termination_reason)
                 break
 

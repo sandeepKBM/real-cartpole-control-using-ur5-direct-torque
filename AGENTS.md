@@ -142,6 +142,71 @@ Guardrails enforced in code:
 3. **E-stop latch is one-way** — no `reset()`/`clear()`; tripped ⇒ new process.
 4. **No reconnect mid-motion** — state-read failure aborts; reconnect only in
    `ur5e_connect.py --watch` idle loop.
+5. **All three modes share `CartesianMoveMonitor` (TCP speed/accel/waypoint-jump), not just
+   `position`** — fixed 2026-07-25 (see below); previously `direct_torque`/`urscript` only
+   had `ImpedanceSafetyMonitor` (drift/orientation/joint-velocity/axis-growth, no Cartesian
+   kinematic ceiling), i.e. the two modes capable of a torque runaway had the loosest guards.
+6. **Robot-reported safety status is checked every cycle in all four loops**
+   (`motion.py`, `position_transport.py`, `direct_torque_transport.py`,
+   `urscript_transport.py`) via `hardware.safety.is_robot_safety_normal()` — fixed
+   2026-07-25; the telemetry was already being read (`getSafetyStatusBits()`/
+   `getSafetyStatus()` → `UR5eState.safety_status`) but never inspected anywhere.
+
+**2026-07-25 audit + fixes** (four parallel review passes: hardware lane, RL pipeline,
+controller/simulation stack, and the code pulled from a separate session over the prior two
+days). Fixed, tested (167→180 passing, one pre-existing unrelated-and-flaky timing test not
+touched), and pushed:
+- Guardrail-gap fix above (item 5): `CartesianMoveMonitor` layered onto `direct_torque` and
+  `urscript` modes, reusing each mode's already-active `ImpedanceSafetyConfig` thresholds for
+  qd/drift/orientation (so this doesn't introduce a second, different trip point for a check
+  that already existed) and `CartesianMoveLimits`' own defaults for the genuinely new
+  speed/accel/waypoint-jump checks.
+- Robot safety-status check above (item 6): `hardware/safety.py::is_robot_safety_normal()`
+  checks bit 0 (`IS_NORMAL_MODE`) of `getSafetyStatusBits()`'s documented bitmask convention —
+  confirmed against this project's own runtime (a live URSim `URControl` instance, checked
+  2026-07-07, has `getSafetyStatusBits` and not `getSafetyStatus`), not just UR's
+  documentation. `None` (getter unavailable) is treated as "can't verify," not "abnormal."
+- `hardware/urscript_transport.py`: every fault/stop path (monitor-read-failure,
+  safety-violation, supervisor-timeout, `finally`) now goes through one `_set_stop_register()`
+  helper that tries both `setInputIntRegister`/`setInputIntegerRegister` — previously only
+  setup tried both names, every actual stop signal tried only one, so a `ur_rtde` build
+  exposing only the other name would detect a fault and never actually stop the robot.
+- `hardware/urscript_transport.py::_read_state_from_receive` now raises `RTDEStateError` on
+  NaN/Inf, matching `hardware/link.py::UR5eLink.read_state()` — previously a corrupt reading
+  defeated every drift/orientation `abs(x) > threshold` check silently instead of failing
+  loudly (`abs(NaN) > thr` is `False`).
+- `tools/ur5e_move.py`: the TCP-speed guard was `max(0.05, peak_v * 1.2)` — derived from the
+  planned move's own peak velocity, so the check `peak_v > limit` could only ever compare
+  `peak_v` against `1.2 * peak_v` and could never fire on an aggressive-but-nominal move, only
+  on >20% overshoot from what was already planned. Now a fixed ceiling
+  (`CartesianMoveLimits.for_robot`'s own default, still URSim-relaxed via `is_likely_ursim`).
+
+**Found, not yet fixed — flagged for a deliberate decision, not silently patched:**
+- **URScript (Mode 3) runs a hand-ported control law, not the validated one.** The on-robot
+  script omits nullspace posture projection and singular-value wrench scaling (both added
+  specifically to handle the wrist singularity the transport start pose sits at) and uses a
+  per-joint torque clamp instead of geometric backtracking. `tests/hardware/test_urscript_gen.py`
+  has no numerical-parity coverage against `x_axis_cartesian_impedance.py`. The ~250-run OSC
+  validation campaign does not cover what Mode 3 actually executes on the real arm.
+- **`controller_core/x_axis_cartesian_impedance.py`'s global `cond(J)`-based `singular_scale`
+  nulls task authority at the transport start pose.** Measured: freezes the controller for
+  ~0.2s at the start of every move (`tau≈1e-11 Nm`), escaping only via numerical-noise
+  perturbation of `wrist_2` off exactly zero — fragile and non-physical. It's redundant with,
+  and defeats, the `lambda_regularization` already in the tuned config, which alone already
+  produces a healthy X force at the singularity. Disabling it moved the speed ceiling for a
+  0.15m move from ~0.4s to ~0.25s with *lower* peak velocity/torque, no regression on
+  long-hold/large-displacement spot checks — but needs a full validation sweep before
+  trusting, and is a controller-math change, not a hardware-lane fix.
+- **`max_deadline_ms` (`UR5eSafetyLimits`) is defined but never enforced**, confirmed across
+  all three modes — a cycle overrun just runs late instead of aborting.
+- **No cycle-to-cycle staleness detection during motion.** `robot_timestamp_s` is captured
+  every read but never compared; `ConnectionHealth.is_alive()`/`record_failure()` is invoked
+  only in `ur5e_connect.py --watch`'s idle loop, never in any motion loop. `read_state()`'s
+  "never returns stale data" guarantee holds only for the raise-on-exception case — a
+  stalled-but-non-raising RTDE stream (returning the last buffered value, which `ur_rtde` can
+  do) would not be caught.
+- **RL gain-scheduling's never-move collapse has a credible root cause**, see
+  `docs/CURRENT_STATUS.md` — not a hardware item, kept here only as a pointer.
 
 Do-not-recreate (gravity/dynamics bugs, still relevant):
 - Do not tune gravity scale from single-joint probes; always test all 6 joints.

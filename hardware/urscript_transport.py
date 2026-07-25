@@ -16,12 +16,26 @@ from controller_core.safety import ImpedanceSafetyConfig, ImpedanceSafetyMonitor
 
 from .link import RTDELinkError, RTDEStateError, UR5eState, _load_rtde_classes
 from .poses import HEIGHT_ALPHA_0_5_Q
+from .safety import CartesianMoveLimits, CartesianMoveMonitor, is_robot_safety_normal
 from .urscript_gen import (
     DEFAULT_CONFIG,
     UrscriptOscParams,
     load_params_from_yaml,
     write_generated_script,
 )
+
+
+def _set_stop_register(control: Any, reg: int, value: int) -> None:
+    """Set the on-robot stop register under whichever setter name this
+    ur_rtde build exposes. Every call site that signals a stop must go
+    through this helper, not call setInputIntRegister directly -- a build
+    exposing only setInputIntegerRegister would otherwise silently fail to
+    stop the robot on a real fault (setup already tried both names; the
+    fault paths previously did not)."""
+    if hasattr(control, "setInputIntRegister"):
+        control.setInputIntRegister(reg, value)
+    elif hasattr(control, "setInputIntegerRegister"):
+        control.setInputIntegerRegister(reg, value)
 
 
 @dataclass
@@ -45,17 +59,34 @@ def _load_safety_cfg(config_path: Path) -> ImpedanceSafetyConfig:
 
 
 def _read_state_from_receive(receive: Any) -> UR5eState:
+    """Read q/qd/tcp_pose and raise RTDEStateError on any NaN/Inf -- matching
+    hardware.link.UR5eLink.read_state()'s guarantee. Without this, a corrupt
+    reading defeats the drift/orientation checks silently: abs(NaN) > thr is
+    False, so a NaN tcp_pose would pass every CartesianMoveMonitor/
+    ImpedanceSafetyMonitor check rather than failing loudly."""
     host_stamp_ns = time.monotonic_ns()
-    q = np.asarray(receive.getActualQ(), dtype=np.float64).reshape(6)
-    qd = np.asarray(receive.getActualQd(), dtype=np.float64).reshape(6)
-    tcp_pose = np.asarray(receive.getActualTCPPose(), dtype=np.float64).reshape(6)
+    try:
+        q = np.asarray(receive.getActualQ(), dtype=np.float64).reshape(6)
+        qd = np.asarray(receive.getActualQd(), dtype=np.float64).reshape(6)
+        tcp_pose = np.asarray(receive.getActualTCPPose(), dtype=np.float64).reshape(6)
+    except Exception as exc:
+        raise RTDEStateError(f"RTDE state read failed: {exc}") from exc
+    if not (np.all(np.isfinite(q)) and np.all(np.isfinite(qd)) and np.all(np.isfinite(tcp_pose))):
+        raise RTDEStateError("NaN/Inf in q, qd, or tcp_pose")
+    safety_status = None
+    get_safety = getattr(receive, "getSafetyStatusBits", None) or getattr(receive, "getSafetyStatus", None)
+    if get_safety is not None:
+        try:
+            safety_status = int(get_safety())
+        except Exception:
+            safety_status = None
     return UR5eState(
         q=q,
         qd=qd,
         tcp_pose=tcp_pose,
         host_stamp_ns=host_stamp_ns,
         robot_timestamp_s=None,
-        safety_status=None,
+        safety_status=safety_status,
     )
 
 
@@ -143,11 +174,25 @@ def run_urscript_x_transport(
         safety.reset()
         safety.set_initial_position(np.asarray(state0.tcp_pose[:3], dtype=np.float64), move_axis=0)
 
+        # ImpedanceSafetyMonitor (above) has no TCP speed/acceleration/waypoint-jump
+        # ceiling -- only drift/orientation/joint-velocity/axis-growth. Layer
+        # CartesianMoveMonitor on top for the checks position mode already has and
+        # this mode was missing. Reuse safety_cfg's already-active thresholds for
+        # qd/drift/orientation (so this doesn't introduce a second, different trip
+        # point for a check that already exists) and CartesianMoveLimits' own
+        # conservative defaults for the genuinely new speed/accel/jump checks.
+        move_limits = CartesianMoveLimits(
+            qd_max_radps=safety_cfg.max_joint_velocity_radps,
+            max_off_axis_drift_m=min(safety_cfg.max_abs_y_drift_m, safety_cfg.max_abs_z_drift_m),
+            max_orientation_error_rad=safety_cfg.max_orientation_error_rad,
+        )
+        move_monitor = CartesianMoveMonitor(move_limits)
+        move_monitor.set_start(state0.tcp_pose, move_axis_index=0)
+        target_tcp_pose = state0.tcp_pose.copy()
+        target_tcp_pose[0] = x0 + float(target_x_delta_m)
+
         stop_reg = int(params.stop_input_int_reg)
-        if hasattr(control, "setInputIntRegister"):
-            control.setInputIntRegister(stop_reg, 0)
-        elif hasattr(control, "setInputIntegerRegister"):
-            control.setInputIntegerRegister(stop_reg, 0)
+        _set_stop_register(control, stop_reg, 0)
 
         stop_monitor.clear()
         dt_monitor = 1.0 / float(monitor_hz)
@@ -159,8 +204,7 @@ def run_urscript_x_transport(
                     st = _read_state_from_receive(receive)
                 except Exception as exc:
                     monitor_fault.append(f"monitor_read_failed: {exc}")
-                    if hasattr(control, "setInputIntRegister"):
-                        control.setInputIntRegister(stop_reg, 1)
+                    _set_stop_register(control, stop_reg, 1)
                     return
                 elapsed = time.monotonic() - t0
                 trace_rows.append(
@@ -180,21 +224,38 @@ def run_urscript_x_transport(
                     "target_x": x0 + float(target_x_delta_m),
                     "transport_axis_index": 0,
                 }
+                orientation_error_rad = float(np.linalg.norm(st.tcp_pose[3:] - state0.tcp_pose[3:]))
+                axis_target_moving = elapsed <= float(move_duration_s)
                 decision = safety.check(
                     robot_state,
                     x_error=float((x0 + float(target_x_delta_m)) - st.tcp_pose[0]),
-                    orientation_error_norm=float(np.linalg.norm(st.tcp_pose[3:] - state0.tcp_pose[3:])),
-                    axis_target_moving=elapsed <= float(move_duration_s),
+                    orientation_error_norm=orientation_error_rad,
+                    axis_target_moving=axis_target_moving,
                 )
                 if not decision.ok:
                     monitor_fault.append(decision.reason or "safety_stop")
-                    if hasattr(control, "setInputIntRegister"):
-                        control.setInputIntRegister(stop_reg, 1)
+                    _set_stop_register(control, stop_reg, 1)
+                    return
+                move_decision = move_monitor.check(
+                    q=st.q,
+                    qd=st.qd,
+                    tcp_pose=st.tcp_pose,
+                    target_tcp_pose=target_tcp_pose,
+                    orientation_error_rad=orientation_error_rad,
+                    axis_target_moving=axis_target_moving,
+                    dt_s=dt_monitor,
+                )
+                if not move_decision.ok:
+                    monitor_fault.append(move_decision.reason or "cartesian_move_stop")
+                    _set_stop_register(control, stop_reg, 1)
+                    return
+                if not is_robot_safety_normal(st.safety_status):
+                    monitor_fault.append(f"robot_safety_status_abnormal: {st.safety_status}")
+                    _set_stop_register(control, stop_reg, 1)
                     return
                 if elapsed > float(duration_s) + 2.0:
                     monitor_fault.append("supervisor_timeout")
-                    if hasattr(control, "setInputIntRegister"):
-                        control.setInputIntRegister(stop_reg, 1)
+                    _set_stop_register(control, stop_reg, 1)
                     return
                 time.sleep(max(0.0, dt_monitor - 0.001))
 
@@ -226,8 +287,7 @@ def run_urscript_x_transport(
     finally:
         stop_monitor.set()
         try:
-            if hasattr(control, "setInputIntRegister"):
-                control.setInputIntRegister(int(params.stop_input_int_reg), 1)
+            _set_stop_register(control, int(params.stop_input_int_reg), 1)
         except Exception:
             pass
         for obj in (control, receive):

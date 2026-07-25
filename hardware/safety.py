@@ -37,6 +37,28 @@ from controller_core.safety_utils import (
     UR5_QLIM_UPPER_RAD,
 )
 
+# Bit 0 of RTDEReceiveInterface.getSafetyStatusBits() is IS_NORMAL_MODE, per
+# Universal Robots' documented SafetyStatusBits convention. Confirmed against
+# this project's actual runtime, not just documentation: a live URSim
+# URControl instance was checked directly earlier in this project's history
+# and getSafetyStatusBits is what's actually present (getSafetyStatus, the
+# older enum-valued fallback in UR5eState population, is not) -- so the
+# bitmask interpretation applies to whatever this codebase actually populates
+# safety_status with in practice.
+_SAFETY_STATUS_IS_NORMAL_MODE_BIT = 1  # bit 0
+
+
+def is_robot_safety_normal(safety_status: int | None) -> bool:
+    """True if the robot's own reported safety status is normal, or if the
+    status isn't available at all (None means the getter isn't exposed on
+    this robot/simulator -- treated as "can't verify," not "abnormal," so
+    this doesn't make the lane unusable wherever that telemetry is absent).
+    False only for a confirmed abnormal reading -- callers should trip an
+    e-stop on False."""
+    if safety_status is None:
+        return True
+    return bool(int(safety_status) & _SAFETY_STATUS_IS_NORMAL_MODE_BIT)
+
 
 @dataclass
 class SafetyDecision:
