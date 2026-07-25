@@ -40,6 +40,9 @@ class _FakeReceive:
 
 
 class _FakeControl:
+    # Cap per-cycle TCP motion so CartesianMoveMonitor kinematic guards stay realistic.
+    _MAX_TCP_STEP_M = 0.002
+
     def __init__(self, receive: _FakeReceive) -> None:
         self._receive = receive
         self.servo_l_calls = 0
@@ -47,7 +50,11 @@ class _FakeControl:
 
     def servoL(self, pose, speed, acceleration, time, lookahead_time, gain):
         self.servo_l_calls += 1
-        self._receive._tcp_x = float(pose[0])
+        target_x = float(pose[0])
+        delta = target_x - self._receive._tcp_x
+        step = min(abs(delta), self._MAX_TCP_STEP_M)
+        if step > 0.0:
+            self._receive._tcp_x += step if delta > 0.0 else -step
 
     def servoStop(self):
         self.servo_stop_calls += 1
@@ -116,3 +123,26 @@ def test_position_transport_shadow_osc_logs_tau(tmp_path: Path) -> None:
     first = json.loads(rows[0])
     assert "tau_shadow" in first
     assert len(first["tau_shadow"]) == 6
+    assert "ee_pos" in first
+    assert "x_error" in first
+
+
+@pytest.mark.hardware
+def test_position_transport_trace_scores_move_hold_metrics(tmp_path: Path) -> None:
+    link, control = _link(tcp_x=0.4)
+    result = run_x_transport_position(
+        link,
+        config_path=CONFIG,
+        target_x_delta_m=0.01,
+        move_duration_s=0.20,
+        duration_s=0.40,
+        output_dir=tmp_path,
+        motion_opt_in=True,
+        rate_hz=50.0,
+        shadow_osc=False,
+    )
+    assert control.servo_l_calls >= 5
+    assert result.summary.get("move_phase_achieved_x_delta_m", 0.0) > 0.0
+    assert result.summary.get("valid_move_and_hold") is True
+    assert result.ok is True
+    assert result.summary.get("target_x_delta") == pytest.approx(0.01)

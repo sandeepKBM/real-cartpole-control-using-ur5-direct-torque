@@ -144,6 +144,18 @@ def main() -> int:
                     target_x_vel=target_x_vel,
                 )
 
+            def compose_robot_state(self, link_state, *, jacobian, mass_matrix, time_s, target_x, target_x_vel):
+                from hardware.direct_torque_link import UR5eDirectTorqueLink
+
+                return UR5eDirectTorqueLink.compose_robot_state(
+                    link_state,
+                    jacobian=jacobian,
+                    mass_matrix=mass_matrix,
+                    time_s=time_s,
+                    target_x=target_x,
+                    target_x_vel=target_x_vel,
+                )
+
             def safe_stop(self, reason: str) -> None:
                 return None
 

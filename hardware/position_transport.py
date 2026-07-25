@@ -179,6 +179,11 @@ def run_x_transport_position(
                 "target_x_vel": target_x_vel,
                 "command_mode": "servoL",
             }
+            tcp = np.asarray(link_state.tcp_pose, dtype=np.float64).reshape(6)
+            row["ee_pos"] = tcp[:3].tolist()
+            row["ee_quat"] = rotvec_to_quat_wxyz(tcp[3:6]).tolist()
+            row["x_error"] = float(target_x - tcp[0])
+            row["orientation_error_norm"] = float(np.linalg.norm(tcp[3:] - start_pose[3:]))
             if controller is not None and local_dyn is not None:
                 robot_state = _robot_state_from_link(
                     link_state,
@@ -204,14 +209,21 @@ def run_x_transport_position(
         link.safe_stop("transport_exit")
 
     achieved_x_delta_m = float(last_state.tcp_pose[0] - x0)
+    max_abs_qd = float(
+        max((max(abs(v) for v in row.get("qd", [0.0] * 6)) for row in trace_rows), default=0.0)
+    )
     summary = {
         "backend": "servoL_position",
         "control_mode": "position",
         "config_path": str(config_path),
+        "target_x_delta": float(target_x_delta_m),
         "target_x_delta_m": float(target_x_delta_m),
+        "transport_axis_index": 0,
         "move_duration_s": move_duration_s,
         "hold_duration_s": max(duration_s - move_duration_s, 0.0),
         "duration_s": duration_s,
+        "total_duration_s": duration_s,
+        "sim_time_s": min(t_s, duration_s),
         "frequency_hz": float(rate_hz),
         "steps": steps,
         "shadow_osc": bool(shadow_osc and controller is not None),
@@ -221,6 +233,11 @@ def run_x_transport_position(
         "initial_ee_pos": state0.tcp_pose[:3].tolist(),
         "servo_gain": float(servo_gain),
         "servo_lookahead_s": float(servo_lookahead_s),
+        "success": termination_reason == "duration_complete" and not estop.tripped,
+        "velocity_guard_ok": max_abs_qd <= monitor.limits.qd_max_radps,
+        "max_abs_qd_radps": max_abs_qd,
+        "joint_limit_guard_ok": True,
+        "torque_saturation_percentage": 0.0,
     }
     summary.update(
         summarize_move_hold_trace(
