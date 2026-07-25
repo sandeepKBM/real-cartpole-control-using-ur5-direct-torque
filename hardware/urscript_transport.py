@@ -16,7 +16,14 @@ from controller_core.safety import ImpedanceSafetyConfig, ImpedanceSafetyMonitor
 
 from .link import RTDELinkError, RTDEStateError, UR5eState, _load_rtde_classes
 from .poses import HEIGHT_ALPHA_0_5_Q
-from .safety import CartesianMoveLimits, CartesianMoveMonitor, is_robot_safety_normal
+from .safety import (
+    CartesianMoveLimits,
+    CartesianMoveMonitor,
+    DeadlineMonitor,
+    StaleStateMonitor,
+    UR5eSafetyLimits,
+    is_robot_safety_normal,
+)
 from .urscript_gen import (
     DEFAULT_CONFIG,
     UrscriptOscParams,
@@ -73,6 +80,16 @@ def _read_state_from_receive(receive: Any) -> UR5eState:
         raise RTDEStateError(f"RTDE state read failed: {exc}") from exc
     if not (np.all(np.isfinite(q)) and np.all(np.isfinite(qd)) and np.all(np.isfinite(tcp_pose))):
         raise RTDEStateError("NaN/Inf in q, qd, or tcp_pose")
+    # Populate the robot clock too (was previously always None), matching
+    # hardware.link.UR5eLink.read_state() -- StaleStateMonitor needs it to
+    # detect a frozen-but-non-raising stream during motion.
+    robot_timestamp_s = None
+    get_timestamp = getattr(receive, "getTimestamp", None)
+    if get_timestamp is not None:
+        try:
+            robot_timestamp_s = float(get_timestamp())
+        except Exception:
+            robot_timestamp_s = None
     safety_status = None
     get_safety = getattr(receive, "getSafetyStatusBits", None) or getattr(receive, "getSafetyStatus", None)
     if get_safety is not None:
@@ -85,7 +102,7 @@ def _read_state_from_receive(receive: Any) -> UR5eState:
         qd=qd,
         tcp_pose=tcp_pose,
         host_stamp_ns=host_stamp_ns,
-        robot_timestamp_s=None,
+        robot_timestamp_s=robot_timestamp_s,
         safety_status=safety_status,
     )
 
@@ -197,13 +214,28 @@ def run_urscript_x_transport(
         stop_monitor.clear()
         dt_monitor = 1.0 / float(monitor_hz)
 
+        # Enforce the previously-unchecked max_deadline_ms, and catch a
+        # frozen-but-non-raising RTDE stream, on every supervisor cycle (see
+        # hardware/safety.py for the trip-condition reasoning). The control law
+        # itself runs on-robot in URScript; this Python supervisor is the only
+        # place that can notice the telemetry feeding its safety checks has
+        # stalled or that its own loop can no longer keep its budget.
+        deadline_monitor = DeadlineMonitor(UR5eSafetyLimits().max_deadline_ms)
+        stale_monitor = StaleStateMonitor()
+
         def _supervisor() -> None:
             t0 = time.monotonic()
             while not stop_monitor.is_set():
+                cycle_start = time.monotonic()
                 try:
                     st = _read_state_from_receive(receive)
                 except Exception as exc:
                     monitor_fault.append(f"monitor_read_failed: {exc}")
+                    _set_stop_register(control, stop_reg, 1)
+                    return
+                stale_reason = stale_monitor.record(st.robot_timestamp_s, st.host_stamp_ns)
+                if stale_reason:
+                    monitor_fault.append(stale_reason)
                     _set_stop_register(control, stop_reg, 1)
                     return
                 elapsed = time.monotonic() - t0
@@ -255,6 +287,16 @@ def run_urscript_x_transport(
                     return
                 if elapsed > float(duration_s) + 2.0:
                     monitor_fault.append("supervisor_timeout")
+                    _set_stop_register(control, stop_reg, 1)
+                    return
+                # Overrun = supervisor work (read + all checks) past its period
+                # budget. A stalled supervisor read that still returns is the
+                # case this catches; the fixed sleep below never subtracts work,
+                # so this is the only place lateness is acted on.
+                overrun_ns = int(max(0.0, (time.monotonic() - cycle_start) - dt_monitor) * 1e9)
+                deadline_reason = deadline_monitor.record(overrun_ns)
+                if deadline_reason:
+                    monitor_fault.append(deadline_reason)
                     _set_stop_register(control, stop_reg, 1)
                     return
                 time.sleep(max(0.0, dt_monitor - 0.001))

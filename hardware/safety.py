@@ -183,6 +183,161 @@ class ConnectionHealth:
         return age_s <= self.max_state_age_s
 
 
+class DeadlineMonitor:
+    """Aborts a control loop that can't hold its real-time period.
+
+    Each cycle reports how far it overran its control-period budget
+    (nanoseconds *beyond* the period -- 0 if it finished on time; for a loop
+    that schedules against an absolute deadline this is the start-lateness, for
+    a relative-sleep loop it is ``work - period``). This enforces
+    ``UR5eSafetyLimits.max_deadline_ms`` (3.0 ms), which was previously
+    validated-but-never-checked: an overrun just ran late instead of aborting.
+
+    A single transient overrun (an OS scheduling hiccup, a GC pause) on an
+    otherwise-healthy loop must NOT abort a physical robot mid-motion -- a
+    spurious e-stop is itself a hazard -- so a lone spike is tolerated. There
+    are two independent trip conditions:
+
+    * ``max_consecutive_overruns`` cycles *in a row* each overran the deadline
+      by more than ``max_deadline_ms``. Consecutive (not cumulative) because a
+      loop that overruns once, recovers, and then runs thousands of clean
+      cycles is healthy; it is *sustained* lateness that means the control law
+      is now acting on stale state and commanding torques timed to a clock it
+      cannot meet. N defaults to 3, matching this module's existing
+      ``ConnectionHealth.max_consecutive_failures`` convention for "how many
+      bad cycles before fatal."
+    * a *single* cycle overran by more than ``hard_overrun_multiple`` x
+      ``max_deadline_ms``. A lateness that large in one cycle is not jitter but
+      a stall -- the loop blocked for many control periods at once and the
+      robot ran with no fresh command that whole window. Waiting for two more
+      equally-bad cycles just prolongs an already-unsafe open-loop interval, so
+      this trips immediately. 5x (15 ms at the 3 ms default) sits well above
+      any plausible single-cycle scheduling jitter yet is a small fraction of a
+      human-noticeable delay.
+
+    ``record()`` returns an abort-reason string the first time either
+    condition trips, else ``None``. The caller must treat a non-None return as
+    fatal (safe_stop + trip the e-stop latch), exactly like a monitor
+    ``SafetyDecision`` that isn't ``ok``.
+    """
+
+    def __init__(
+        self,
+        max_deadline_ms: float,
+        *,
+        max_consecutive_overruns: int = 3,
+        hard_overrun_multiple: float = 5.0,
+    ) -> None:
+        max_deadline_ms = float(max_deadline_ms)
+        if not np.isfinite(max_deadline_ms) or max_deadline_ms <= 0.0:
+            raise ValueError("max_deadline_ms must be positive and finite")
+        if max_consecutive_overruns < 1:
+            raise ValueError("max_consecutive_overruns must be >= 1")
+        if not np.isfinite(hard_overrun_multiple) or hard_overrun_multiple < 1.0:
+            raise ValueError("hard_overrun_multiple must be >= 1.0")
+        self.max_deadline_ms = max_deadline_ms
+        self.max_consecutive_overruns = int(max_consecutive_overruns)
+        self.hard_overrun_multiple = float(hard_overrun_multiple)
+        self._max_deadline_ns = int(round(max_deadline_ms * 1e6))
+        self._hard_overrun_ns = int(round(max_deadline_ms * hard_overrun_multiple * 1e6))
+        self._consecutive_overruns = 0
+
+    @property
+    def consecutive_overruns(self) -> int:
+        return self._consecutive_overruns
+
+    def record(self, overrun_ns: int) -> str | None:
+        overrun_ns = max(0, int(overrun_ns))
+        overrun_ms = overrun_ns / 1e6
+        # A single catastrophic overrun trips at once -- see class docstring.
+        if overrun_ns >= self._hard_overrun_ns:
+            self._consecutive_overruns += 1
+            return (
+                f"deadline_overrun: single cycle late by {overrun_ms:.2f} ms > "
+                f"{self.hard_overrun_multiple:g}x max_deadline_ms "
+                f"({self.max_deadline_ms:g} ms)"
+            )
+        if overrun_ns > self._max_deadline_ns:
+            self._consecutive_overruns += 1
+            if self._consecutive_overruns >= self.max_consecutive_overruns:
+                return (
+                    f"deadline_overrun: {self._consecutive_overruns} consecutive cycles "
+                    f"late by > max_deadline_ms ({self.max_deadline_ms:g} ms); "
+                    f"latest {overrun_ms:.2f} ms"
+                )
+        else:
+            self._consecutive_overruns = 0
+        return None
+
+
+class StaleStateMonitor:
+    """Detects a frozen-but-non-erroring RTDE stream during motion.
+
+    ``ur_rtde``'s receive interface can return the *last buffered* value
+    without raising when the underlying stream stalls, so ``read_state()``'s
+    "never returns stale data" guarantee only covers the raise-on-exception
+    case -- not a stream that keeps handing back the same frozen sample. This
+    monitor compares the robot's own clock (``getTimestamp()`` ->
+    ``UR5eState.robot_timestamp_s``) across cycles: if it stops advancing for
+    more than ``max_frozen_cycles`` consecutive reads *while the host clock
+    keeps advancing*, the stream has stalled and the loop must abort.
+
+    Why not trip on a single repeated timestamp: when the control/monitor loop
+    polls faster than the robot's RTDE publish rate, two consecutive reads can
+    legitimately return the same robot timestamp (we read between robot
+    updates). ``max_frozen_cycles`` defaults to 5 -- large enough that ordinary
+    poll-faster-than-publish duplicates never trip it, small enough that a
+    genuine stall is caught within a bounded window (~10 ms at 500 Hz, ~40 ms
+    at 125 Hz). At the 125 Hz position/monitor loops the robot clock advances
+    ~4x per read, so a duplicate never occurs normally and 5-in-a-row is
+    unambiguously a stall.
+
+    ``robot_timestamp_s=None`` (``getTimestamp`` not exposed on this
+    robot/simulator) is treated as "can't verify," never as stale -- consistent
+    with ``is_robot_safety_normal(None)``. ``record()`` returns an abort-reason
+    string the first time it trips, else ``None``.
+    """
+
+    def __init__(self, *, max_frozen_cycles: int = 5) -> None:
+        if max_frozen_cycles < 1:
+            raise ValueError("max_frozen_cycles must be >= 1")
+        self.max_frozen_cycles = int(max_frozen_cycles)
+        self._prev_robot_ts: float | None = None
+        self._prev_host_ns: int | None = None
+        self._frozen_count = 0
+
+    @property
+    def frozen_count(self) -> int:
+        return self._frozen_count
+
+    def record(self, robot_timestamp_s: float | None, host_stamp_ns: int) -> str | None:
+        host_ns = int(host_stamp_ns)
+        if robot_timestamp_s is None:
+            # Can't verify -- drop any prior baseline so a stream that starts
+            # exposing a clock later begins counting cleanly from that point.
+            self._prev_robot_ts = None
+            self._prev_host_ns = host_ns
+            self._frozen_count = 0
+            return None
+        ts = float(robot_timestamp_s)
+        if self._prev_robot_ts is not None and self._prev_host_ns is not None:
+            host_advanced = host_ns > self._prev_host_ns
+            robot_advanced = ts > self._prev_robot_ts + 1e-9
+            if host_advanced and not robot_advanced:
+                self._frozen_count += 1
+                if self._frozen_count >= self.max_frozen_cycles:
+                    return (
+                        f"stale_state: robot timestamp frozen at {ts:.6f} s for "
+                        f"{self._frozen_count} consecutive cycles while host clock "
+                        f"advanced -- RTDE stream stalled"
+                    )
+            else:
+                self._frozen_count = 0
+        self._prev_robot_ts = ts
+        self._prev_host_ns = host_ns
+        return None
+
+
 class EStopTripped(RuntimeError):
     """Raised by ``EStopLatch.raise_if_tripped()`` once the latch has tripped."""
 

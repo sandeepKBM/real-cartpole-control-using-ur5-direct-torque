@@ -22,7 +22,15 @@ from transport_metrics import compute_valid_move_hold_metrics, summarize_move_ho
 from .direct_torque_link import UR5eDirectTorqueLink
 from .link import RTDEStateError, UR5eLink
 from .local_dynamics import LocalMujocoDynamics
-from .safety import CartesianMoveLimits, CartesianMoveMonitor, EStopLatch, is_robot_safety_normal
+from .safety import (
+    CartesianMoveLimits,
+    CartesianMoveMonitor,
+    DeadlineMonitor,
+    EStopLatch,
+    StaleStateMonitor,
+    UR5eSafetyLimits,
+    is_robot_safety_normal,
+)
 
 
 @dataclass
@@ -123,6 +131,13 @@ def run_x_transport_position(
     t_s = 0.0
     last_state = state0
 
+    # Enforce the previously-unchecked max_deadline_ms, and catch a
+    # frozen-but-non-raising RTDE stream, on every cycle (see hardware/safety.py
+    # DeadlineMonitor/StaleStateMonitor for the trip-condition reasoning).
+    safety_limits = getattr(link, "limits", None) or UR5eSafetyLimits()
+    deadline_monitor = DeadlineMonitor(safety_limits.max_deadline_ms)
+    stale_monitor = StaleStateMonitor()
+
     try:
         while t_s < duration_s - 1e-12:
             estop.raise_if_tripped()
@@ -155,6 +170,13 @@ def run_x_transport_position(
                 break
 
             last_state = link_state
+
+            stale_reason = stale_monitor.record(link_state.robot_timestamp_s, link_state.host_stamp_ns)
+            if stale_reason:
+                termination_reason = stale_reason
+                estop.trip(termination_reason)
+                break
+
             orientation_error_rad = float(np.linalg.norm(link_state.tcp_pose[3:] - start_pose[3:]))
             decision = monitor.check(
                 q=link_state.q,
@@ -206,6 +228,15 @@ def run_x_transport_position(
             t_s += dt_s
 
             elapsed_s = time.monotonic() - cycle_start
+            # Overrun = cycle work past its period budget; the sleep below
+            # otherwise absorbs it silently, so this is where lateness aborts.
+            overrun_ns = int(max(0.0, elapsed_s - dt_s) * 1e9)
+            deadline_reason = deadline_monitor.record(overrun_ns)
+            if deadline_reason:
+                termination_reason = deadline_reason
+                estop.trip(termination_reason)
+                break
+
             sleep_s = dt_s - elapsed_s
             if sleep_s > 0:
                 time.sleep(sleep_s)

@@ -60,6 +60,7 @@ class _FakeReceive:
         self._i = -1
         self.q = [0.0] * 6
         self.qd = [0.0] * 6
+        self._ts = 0.0
 
     def getActualQ(self):
         return list(self.q)
@@ -72,7 +73,9 @@ class _FakeReceive:
         return list(self._sequence[self._i])
 
     def getTimestamp(self):
-        return 0.0
+        # A healthy stream advances its clock every read (500 Hz robot).
+        self._ts += 0.002
+        return self._ts
 
     def disconnect(self):
         pass

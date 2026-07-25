@@ -25,7 +25,14 @@ from dataclasses import dataclass
 import numpy as np
 
 from .link import RTDEStateError, UR5eLink
-from .safety import CartesianMoveMonitor, EStopLatch, is_robot_safety_normal
+from .safety import (
+    CartesianMoveMonitor,
+    DeadlineMonitor,
+    EStopLatch,
+    StaleStateMonitor,
+    UR5eSafetyLimits,
+    is_robot_safety_normal,
+)
 
 
 @dataclass
@@ -136,6 +143,13 @@ def move_cartesian_bounded(
     # period for smooth blending between waypoints.
     servo_time_s = dt_s * 1.5
 
+    # Enforce the previously-unchecked max_deadline_ms, and catch a
+    # frozen-but-non-raising RTDE stream, on every cycle (see hardware/safety.py
+    # DeadlineMonitor/StaleStateMonitor for the trip-condition reasoning).
+    safety_limits = getattr(link, "limits", None) or UR5eSafetyLimits()
+    deadline_monitor = DeadlineMonitor(safety_limits.max_deadline_ms)
+    stale_monitor = StaleStateMonitor()
+
     for i, waypoint in enumerate(waypoints):
         cycle_start = time.monotonic()
         try:
@@ -154,6 +168,18 @@ def move_cartesian_bounded(
             estop.trip(reason)
             return MoveResult(
                 ok=False, reason=reason, waypoints_sent=i, stopped_early=True, final_tcp_pose=None
+            )
+
+        stale_reason = stale_monitor.record(state.robot_timestamp_s, state.host_stamp_ns)
+        if stale_reason:
+            link.safe_stop(stale_reason)
+            estop.trip(stale_reason)
+            return MoveResult(
+                ok=False,
+                reason=stale_reason,
+                waypoints_sent=i + 1,
+                stopped_early=True,
+                final_tcp_pose=state.tcp_pose,
             )
 
         orientation_error_rad = float(np.linalg.norm(state.tcp_pose[3:] - start_pose[3:]))
@@ -190,6 +216,22 @@ def move_cartesian_bounded(
             )
 
         elapsed_s = time.monotonic() - cycle_start
+        # Overrun = how far this cycle's work ran past its period budget. The
+        # sleep below already absorbs any overrun silently (max(0, ...)), so
+        # this is the only place lateness is acted on.
+        overrun_ns = int(max(0.0, elapsed_s - dt_s) * 1e9)
+        deadline_reason = deadline_monitor.record(overrun_ns)
+        if deadline_reason:
+            link.safe_stop(deadline_reason)
+            estop.trip(deadline_reason)
+            return MoveResult(
+                ok=False,
+                reason=deadline_reason,
+                waypoints_sent=i + 1,
+                stopped_early=True,
+                final_tcp_pose=state.tcp_pose,
+            )
+
         sleep_s = dt_s - elapsed_s
         if sleep_s > 0:
             time.sleep(sleep_s)

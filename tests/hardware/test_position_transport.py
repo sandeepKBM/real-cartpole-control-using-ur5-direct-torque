@@ -22,6 +22,7 @@ class _FakeReceive:
         self._tcp_x = float(tcp_x)
         self.q = [0.0, -0.835, -1.2, -0.985, 0.0, 0.0]
         self.qd = [0.0] * 6
+        self._ts = 0.0
 
     def getActualQ(self):
         return list(self.q)
@@ -33,7 +34,9 @@ class _FakeReceive:
         return [self._tcp_x, -0.2, 0.3, 0.0, 3.14, 0.0]
 
     def getTimestamp(self):
-        return 0.0
+        # A healthy stream advances its clock every read (500 Hz robot).
+        self._ts += 0.002
+        return self._ts
 
     def disconnect(self):
         pass

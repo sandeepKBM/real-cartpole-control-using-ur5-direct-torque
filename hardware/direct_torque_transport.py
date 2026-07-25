@@ -23,7 +23,15 @@ from .direct_torque_link import UR5eDirectTorqueLink
 from .latency import PhaseLatencyRecorder
 from .link import RTDEStateError
 from .local_dynamics import LocalPinocchioDynamics, normalize_dynamics_source
-from .safety import CartesianMoveLimits, CartesianMoveMonitor, EStopLatch, is_robot_safety_normal
+from .safety import (
+    CartesianMoveLimits,
+    CartesianMoveMonitor,
+    DeadlineMonitor,
+    EStopLatch,
+    StaleStateMonitor,
+    UR5eSafetyLimits,
+    is_robot_safety_normal,
+)
 from .timing import TimingTracker, monotonic_ns
 
 
@@ -126,6 +134,15 @@ def run_x_transport_direct_torque(
     next_deadline_ns = monotonic_ns() + tracker.period_ns
     prev_cycle_start_ns: int | None = None
 
+    # Enforce the previously-unchecked max_deadline_ms, and catch a
+    # frozen-but-non-raising RTDE stream, on every cycle (see hardware/safety.py
+    # DeadlineMonitor/StaleStateMonitor for the trip-condition reasoning). This
+    # loop already tracks per-cycle start-lateness (lateness_ns below), so the
+    # deadline monitor is fed that directly rather than a separate measure.
+    safety_limits = getattr(link, "limits", None) or UR5eSafetyLimits()
+    deadline_monitor = DeadlineMonitor(safety_limits.max_deadline_ms)
+    stale_monitor = StaleStateMonitor()
+
     try:
         while t_s < duration_s - 1e-12:
             if estop.tripped:
@@ -137,11 +154,23 @@ def run_x_transport_direct_torque(
             if phases is not None:
                 phases.record("lateness_ns", lateness_ns)
 
+            deadline_reason = deadline_monitor.record(lateness_ns)
+            if deadline_reason:
+                termination_reason = deadline_reason
+                estop.trip(deadline_reason)
+                break
+
             t_read = monotonic_ns()
             link_state = link.read_state()
             if phases is not None:
                 phases.record("read_state_ns", monotonic_ns() - t_read)
             last_link_state = link_state
+
+            stale_reason = stale_monitor.record(link_state.robot_timestamp_s, link_state.host_stamp_ns)
+            if stale_reason:
+                termination_reason = stale_reason
+                estop.trip(stale_reason)
+                break
 
             target_x, target_x_vel = x_profile_target(
                 "min_jerk_move_hold",
