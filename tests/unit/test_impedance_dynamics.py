@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -203,6 +204,130 @@ def test_diagonal_shaping_leaves_nullspace_posture_unaffected():
         lambda_diagonal_shaping=True,
     ).compute(state)
     np.testing.assert_allclose(on.tau_posture, off.tau_posture, atol=1e-12)
+
+
+def test_adaptive_regularization_off_matches_static_eps():
+    # Off by default: eps is always cfg.lambda_regularization, regardless of
+    # cond(J) (regression guard for the new flag not changing anything).
+    m = np.diag([2.0, 3.0, 4.0, 1.0, 1.0, 1.0])
+    static = _controller(task_space_inertia_shaping=True, lambda_regularization=0.05).compute(
+        _make_state(mass_matrix=m)
+    )
+    off = _controller(
+        task_space_inertia_shaping=True, lambda_regularization=0.05,
+        lambda_adaptive_regularization=False,
+    ).compute(_make_state(mass_matrix=m))
+    np.testing.assert_allclose(off.tau, static.tau, atol=1e-12)
+    assert off.lambda_regularization_effective == 0.05
+    assert not off.lambda_adaptive_regularization_active
+
+
+def test_adaptive_regularization_uses_far_value_when_well_conditioned():
+    # J = I is perfectly conditioned (cond=1), far below lambda_cond_low:
+    # eps should resolve to lambda_regularization_far exactly.
+    ctl = _controller(
+        task_space_inertia_shaping=True,
+        lambda_adaptive_regularization=True,
+        lambda_regularization=0.1,
+        lambda_regularization_far=1e-4,
+        lambda_cond_low=1e4,
+        lambda_cond_high=1e8,
+    )
+    out = ctl.compute(_make_state(mass_matrix=np.eye(6)))
+    assert out.lambda_adaptive_regularization_active
+    assert out.lambda_regularization_effective == pytest.approx(1e-4)
+
+
+def test_adaptive_regularization_uses_near_value_when_ill_conditioned():
+    # A near-singular J (cond >> lambda_cond_high): eps should resolve to the
+    # unchanged near-singularity ceiling, lambda_regularization.
+    J = np.diag([1.0, 1.0, 1.0, 1.0, 1.0, 1e-10])  # cond ~ 1e10
+    ctl = _controller(
+        task_space_inertia_shaping=True,
+        lambda_adaptive_regularization=True,
+        lambda_regularization=0.1,
+        lambda_regularization_far=1e-4,
+        lambda_cond_low=1e4,
+        lambda_cond_high=1e8,
+    )
+    out = ctl.compute(_make_state(J=J, mass_matrix=np.eye(6)))
+    assert out.lambda_regularization_effective == pytest.approx(0.1)
+
+
+def test_adaptive_regularization_interpolates_monotonically():
+    ctl_kwargs = dict(
+        task_space_inertia_shaping=True,
+        lambda_adaptive_regularization=True,
+        lambda_regularization=0.1,
+        lambda_regularization_far=1e-4,
+        lambda_cond_low=1e4,
+        lambda_cond_high=1e8,
+    )
+    conds = [1.0, 1e2, 1e4, 1e6, 1e8, 1e10]
+    effective = []
+    for c in conds:
+        c = max(c, 1.0 + 1e-6)
+        J = np.diag([1.0, 1.0, 1.0, 1.0, 1.0, 1.0 / c])
+        out = _controller(**ctl_kwargs).compute(_make_state(J=J, mass_matrix=np.eye(6)))
+        effective.append(out.lambda_regularization_effective)
+    assert effective == sorted(effective)  # monotonically non-decreasing in cond(J)
+    assert effective[0] == pytest.approx(1e-4)
+    assert effective[-1] == pytest.approx(0.1)
+
+
+def test_adaptive_regularization_does_not_affect_wrench_shaping():
+    # The adaptive schedule must only change the nullspace projector's Lambda,
+    # never the wrench-shaping Lambda -- a static, previously-validated eps
+    # for wrench shaping is load-bearing (reducing it was found, via a live
+    # sim sweep, to destabilize joint velocity well short of the singularity;
+    # that regression is what this test guards against).
+    m = np.diag([2.0, 5.0, 3.0, 1.0, 1.0, 1.0])
+    state = _make_state(mass_matrix=m)
+    no_adaptive = _controller(
+        task_space_inertia_shaping=True, lambda_regularization=0.1,
+        lambda_adaptive_regularization=False,
+    ).compute(state)
+    with_adaptive = _controller(
+        task_space_inertia_shaping=True, lambda_regularization=0.1,
+        lambda_adaptive_regularization=True, lambda_regularization_far=1e-4,
+        lambda_cond_low=1e4, lambda_cond_high=1e8,
+    ).compute(state)
+    # J = I here so cond(J) = 1, far below lambda_cond_low -- eps_effective
+    # (nullspace-only) would resolve to ~1e-4, very different from 0.1 --
+    # but tau_task_nominal (wrench shaping) must be unchanged regardless.
+    np.testing.assert_allclose(with_adaptive.tau_task_nominal, no_adaptive.tau_task_nominal, atol=1e-12)
+    assert with_adaptive.lambda_regularization_effective == pytest.approx(1e-4)
+
+
+def test_adaptive_regularization_yaml_parsing():
+    ctrl_section = {
+        "gains": {},
+        "torque_limits_mode": "initial",
+        "torque_limits_initial": {
+            name: 100.0
+            for name in (
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            )
+        },
+        "lambda_adaptive_regularization": True,
+        "lambda_regularization_far": 1e-5,
+        "lambda_cond_low": 500.0,
+        "lambda_cond_high": 5e6,
+    }
+    cfg = CartesianImpedanceConfig.from_controller_yaml_section(ctrl_section)
+    assert cfg.lambda_adaptive_regularization is True
+    assert cfg.lambda_regularization_far == 1e-5
+    assert cfg.lambda_cond_low == 500.0
+    assert cfg.lambda_cond_high == 5e6
+    default_cfg = CartesianImpedanceConfig.from_controller_yaml_section(
+        {k: v for k, v in ctrl_section.items() if not k.startswith(("lambda_adaptive", "lambda_regularization_far", "lambda_cond"))}
+    )
+    assert default_cfg.lambda_adaptive_regularization is False
 
 
 def test_diagonal_shaping_yaml_parsing():

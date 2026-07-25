@@ -1,0 +1,129 @@
+# Variant of config/ur5e_mujoco_torque_osc_tuned_diagonal_lambda.yaml (preserved unmodified)
+# with lambda_adaptive_regularization: true added (lambda_diagonal_shaping stays on too --
+# the two flags target independent leaks and are not mutually exclusive).
+#
+# Why: the diagonal-shaping fix (previous config) was validated to remove the measured
+# Lambda off-diagonal X->Z wrench leak, but a same-day validation sweep showed it did NOT
+# extend the achievable X-displacement range -- at alpha=0.1, dx>=0.30 still failed, just via
+# orientation-error instead of Z-drift, and the orientation-error growth curve was nearly
+# identical with or without the fix. That ruled out the wrench-shaping leak as the dominant
+# cause and pointed at the nullspace-posture projector instead (the only orientation-
+# restoring mechanism, since kp_rot=0 is damping-only).
+#
+# Direct verification (static recompute at a representative failure-boundary pose,
+# wrist_2=-0.006 rad, cond(J)=719 -- well-conditioned, not near-singular): applying the
+# nullspace projector to a representative posture-restoring torque at the config's actual
+# eps=0.1 leaks a real 0.074 rad/s^2 task acceleration (0.015-0.05 rad/s^2 per rotational
+# axis) instead of nulling it. At eps=0 the SAME projector correctly nulls the torque's
+# task-space effect entirely (0.0 leak), matching theory for a full-rank, well-conditioned
+# 6-DOF task ("no nullspace" -- already documented for this controller). So the persistent
+# orientation drift traces to the nullspace projector being corrupted by over-regularization,
+# not (primarily) to the wrench-shaping coupling the previous config fixed.
+#
+# But eps=0.1 exists for a real reason: at the EXACT wrist_2=0 singularity (cond(J)~5.4e16),
+# dropping eps from 0.1 to 0.01 makes Lambda's diagonal blow up (measured Lambda[3,3]:
+# 9.8 -> 88 -> 670 as eps goes 0.1 -> 0.01 -> 0.001) -- exactly the wrench-shaping
+# instability eps=0.1 was chosen to tame. A single static eps cannot be correct both at the
+# singularity and away from it.
+#
+# The fix: lambda_adaptive_regularization interpolates eps in log(cond(J)) space between
+# lambda_regularization_far (0.0001, used when cond(J) <= lambda_cond_low = 1e4, i.e. most
+# of a transport move) and lambda_regularization (0.1, used unchanged as the near-
+# singularity ceiling when cond(J) >= lambda_cond_high = 1e8) -- but ONLY for the
+# nullspace-posture projector's Lambda. First validation attempt scheduled eps for BOTH the
+# wrench-shaping and nullspace uses of Lambda and caused a real regression: previously-
+# trivial cases (alpha=0, dx=0.15/0.20, always a clean pass before) failed with joint
+# velocity exceeding 3.0 rad/s at cond(J) values nowhere near the singularity. Reducing eps
+# also amplifies the wrench-shaping Lambda's diagonal in ways the tuned gains were never
+# validated against -- a separate sensitivity from the nullspace-projector leak. Fixed by
+# splitting the two uses: wrench shaping always uses the static, previously-validated
+# lambda_regularization (0.1, unaffected by this flag); only the nullspace projector's
+# Lambda is cond-scheduled. See the code comment on lambda_adaptive_regularization in
+# controller_core/x_axis_cartesian_impedance.py for the exact split.
+#
+# Not yet validated against the full canonical/long-hold/large-displacement/torque-scale
+# sweep -- this config exists to run that validation. See docs/CURRENT_STATUS.md once it
+# lands.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  lambda_diagonal_shaping: true
+  lambda_adaptive_regularization: true
+  lambda_regularization_far: 1.0e-4
+  lambda_cond_low: 1.0e4
+  lambda_cond_high: 1.0e8
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

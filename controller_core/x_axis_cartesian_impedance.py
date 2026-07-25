@@ -70,6 +70,36 @@ class CartesianImpedanceConfig:
     # it is a separate, unaffected term (measured healthy across the same dx
     # sweep that exposed the wrench-shaping coupling).
     lambda_diagonal_shaping: bool = False
+    # Adaptive lambda_regularization (default off = historical behavior: a
+    # single static eps == lambda_regularization everywhere). Root cause found
+    # 2026-07-25: a static eps cannot be correct both at the singularity and
+    # away from it. At the exact wrist_2=0 singularity (cond(J)~5e16) a small
+    # eps makes Lambda's diagonal blow up (measured Lambda[3,3] 9.8->88->670 as
+    # eps drops 0.1->0.01->0.001) -- eps=0.1 tames that. But away from the
+    # singularity (cond(J)~700, well within the well-conditioned range the arm
+    # spends most of a transport move in), that same eps=0.1 corrupts the
+    # nullspace-posture projector: at eps=0 the projector correctly nulls a
+    # representative posture torque's task-space effect (0.0 leak, matching
+    # theory for a full-rank task), but at eps=0.1 it leaks a real, sustained
+    # 0.074 rad/s^2 task acceleration (0.015-0.05 rad/s^2 per rotational axis)
+    # -- a direct, mechanistic explanation for the orientation drift that
+    # eventually trips the safety guard at large X-displacement. With this
+    # flag on, eps is interpolated in log(cond(J)) space between
+    # lambda_regularization_far (used when cond(J) <= lambda_cond_low, i.e.
+    # most of a transport move) and lambda_regularization (used unchanged as
+    # the near-singularity ceiling when cond(J) >= lambda_cond_high), instead
+    # of being a single fixed value -- but ONLY for the nullspace-posture
+    # projector's Lambda. A first attempt also scheduled the wrench-shaping
+    # Lambda and caused a real regression (joint velocity >3.0 rad/s in
+    # previously-trivial cases at cond(J) values far from the singularity,
+    # e.g. alpha=0/dx=0.15-0.20): reducing eps amplifies the wrench-shaping
+    # Lambda's diagonal in ways the tuned gains were never validated against.
+    # Wrench shaping therefore always uses the static lambda_regularization,
+    # unaffected by this flag.
+    lambda_adaptive_regularization: bool = False
+    lambda_regularization_far: float = 1.0e-4
+    lambda_cond_low: float = 1.0e4
+    lambda_cond_high: float = 1.0e8
     # Posture re-anchoring (default off = historical behavior). In move+hold
     # trajectories ``_q_rest`` stays the reset pose, so during the hold the
     # posture anchor fights the task force; at a task singularity that force
@@ -117,6 +147,10 @@ class CartesianImpedanceConfig:
             nullspace_posture=bool(ctrl.get("nullspace_posture", False)),
             lambda_regularization=float(ctrl.get("lambda_regularization", 1.0e-6)),
             lambda_diagonal_shaping=bool(ctrl.get("lambda_diagonal_shaping", False)),
+            lambda_adaptive_regularization=bool(ctrl.get("lambda_adaptive_regularization", False)),
+            lambda_regularization_far=float(ctrl.get("lambda_regularization_far", 1.0e-4)),
+            lambda_cond_low=float(ctrl.get("lambda_cond_low", 1.0e4)),
+            lambda_cond_high=float(ctrl.get("lambda_cond_high", 1.0e8)),
             posture_reanchor_on_settle=bool(ctrl.get("posture_reanchor_on_settle", False)),
             reanchor_x_tol_m=float(ctrl.get("reanchor_x_tol_m", 2.0e-3)),
             reanchor_qd_tol_radps=float(ctrl.get("reanchor_qd_tol_radps", 0.05)),
@@ -147,6 +181,8 @@ class CartesianImpedanceOutput:
     orientation_error_norm: float
     inertia_shaping_active: bool = False
     lambda_diagonal_shaping_active: bool = False
+    lambda_adaptive_regularization_active: bool = False
+    lambda_regularization_effective: float = 0.0
     nullspace_posture_active: bool = False
     mass_matrix_provided: bool = False
     posture_reanchored: bool = False
@@ -222,6 +258,19 @@ class XAxisCartesianImpedanceController:
         tau = np.asarray(tau, dtype=np.float64).reshape(6)
         limit = np.asarray(limit, dtype=np.float64).reshape(6)
         return bool(np.all(np.abs(tau) <= limit + 1e-12))
+
+    def _scheduled_lambda_regularization(self, cond: float) -> float:
+        """Interpolate eps in log(cond(J)) space between the far-field value
+        (used when the task is well-conditioned) and ``lambda_regularization``
+        (used unchanged as the near-singularity ceiling)."""
+        eps_far = max(float(self.cfg.lambda_regularization_far), 0.0)
+        eps_near = max(float(self.cfg.lambda_regularization), 0.0)
+        cond_low = max(float(self.cfg.lambda_cond_low), 1.0)
+        cond_high = max(float(self.cfg.lambda_cond_high), cond_low * (1.0 + 1e-9))
+        cond = max(float(cond), 1.0)
+        log_frac = (np.log(cond) - np.log(cond_low)) / (np.log(cond_high) - np.log(cond_low))
+        log_frac = float(np.clip(log_frac, 0.0, 1.0))
+        return eps_far + log_frac * (eps_near - eps_far)
 
     def _backtrack_task_scale(
         self,
@@ -324,23 +373,40 @@ class XAxisCartesianImpedanceController:
 
         wrench = np.array([Fx, Fy, Fz, M[0], M[1], M[2]], dtype=np.float64)
 
+        # Jacobian conditioning: needed both for singular_scale below and,
+        # when lambda_adaptive_regularization is on, to schedule eps.
+        cond = float(np.linalg.cond(J))
+
         # Operational-space terms (P3, flag-gated; default off).
         use_shaping = bool(self.cfg.task_space_inertia_shaping)
         use_nullspace = bool(self.cfg.nullspace_posture)
+        use_adaptive_eps = bool(self.cfg.lambda_adaptive_regularization)
         mass_matrix_provided = "mass_matrix" in st and st["mass_matrix"] is not None
         lambda_mat: np.ndarray | None = None
+        lambda_mat_nullspace: np.ndarray | None = None
         m_inv: np.ndarray | None = None
+        eps_wrench = max(float(self.cfg.lambda_regularization), 0.0)
+        eps_effective = eps_wrench
         if use_shaping or use_nullspace:
             if mass_matrix_provided:
                 m_mat = np.asarray(st["mass_matrix"], dtype=np.float64).reshape(6, 6)
             else:
                 m_mat = np.eye(6, dtype=np.float64)
             m_inv = np.linalg.inv(m_mat)
-            eps = max(float(self.cfg.lambda_regularization), 0.0)
-            lambda_mat = np.linalg.inv(J @ m_inv @ J.T + eps * np.eye(6))
+            # lambda_mat (wrench shaping) always uses the static, previously-
+            # validated eps: reducing it destabilizes the shaped wrench itself
+            # (measured joint-velocity blowup at cond(J)~1e3-1e4, well short of
+            # the exact singularity) -- a separate failure mode from the
+            # nullspace-projector leak the adaptive schedule targets. Only the
+            # nullspace projector's Lambda is scheduled.
+            a_mat = J @ m_inv @ J.T
+            lambda_mat = np.linalg.inv(a_mat + eps_wrench * np.eye(6))
+            if use_adaptive_eps:
+                eps_effective = self._scheduled_lambda_regularization(cond)
+                lambda_mat_nullspace = np.linalg.inv(a_mat + eps_effective * np.eye(6))
+            else:
+                lambda_mat_nullspace = lambda_mat
 
-        # Jacobian conditioning: scale wrench down near singularities.
-        cond = float(np.linalg.cond(J))
         singular_scale = 1.0
         if cond > self.cfg.jacobian_singular_cond_max > 0.0:
             singular_scale = float(self.cfg.jacobian_singular_cond_max / cond)
@@ -358,10 +424,12 @@ class XAxisCartesianImpedanceController:
         tau_task_nominal = J.T @ wrench_scaled
         tau_damping = -self.cfg.kd_joint * qd
         tau_posture = self.cfg.kp_posture * (self._q_rest - q) - self.cfg.kd_posture * qd
-        if use_nullspace and lambda_mat is not None and m_inv is not None:
+        if use_nullspace and lambda_mat_nullspace is not None and m_inv is not None:
             # Dynamically consistent nullspace projector: posture torques can
-            # no longer produce task-space acceleration.
-            j_bar = m_inv @ J.T @ lambda_mat
+            # no longer produce task-space acceleration. Uses
+            # lambda_mat_nullspace (== lambda_mat unless lambda_adaptive_
+            # regularization is on), not the wrench-shaping lambda_mat.
+            j_bar = m_inv @ J.T @ lambda_mat_nullspace
             nullspace_proj = np.eye(6) - J.T @ j_bar.T
             tau_posture = nullspace_proj @ tau_posture
 
@@ -415,6 +483,8 @@ class XAxisCartesianImpedanceController:
             orientation_error_norm=ori_norm,
             inertia_shaping_active=use_shaping,
             lambda_diagonal_shaping_active=bool(use_shaping and use_diagonal_shaping),
+            lambda_adaptive_regularization_active=bool((use_shaping or use_nullspace) and use_adaptive_eps),
+            lambda_regularization_effective=float(eps_effective),
             nullspace_posture_active=use_nullspace,
             mass_matrix_provided=bool(mass_matrix_provided),
             posture_reanchored=bool(self._posture_reanchored),
