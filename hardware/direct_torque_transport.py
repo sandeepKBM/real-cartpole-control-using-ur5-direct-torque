@@ -33,6 +33,7 @@ from .safety import (
     is_robot_safety_normal,
 )
 from .timing import TimingTracker, monotonic_ns
+from .transport_common import impedance_safety_config_from_section, max_abs_qd_from_trace
 
 
 @dataclass
@@ -48,13 +49,7 @@ def _load_impedance_bundle(config_path: Path) -> tuple[CartesianImpedanceConfig,
     ctrl = cfg.get("controller", {}) or {}
     safety_raw = ctrl.get("safety", {}) or {}
     impedance_cfg = CartesianImpedanceConfig.from_controller_yaml_section(ctrl)
-    safety_cfg = ImpedanceSafetyConfig(
-        max_abs_y_drift_m=float(safety_raw.get("max_abs_y_drift_m", 0.03)),
-        max_abs_z_drift_m=float(safety_raw.get("max_abs_z_drift_m", 0.03)),
-        max_abs_orthogonal_drift_m=float(safety_raw.get("max_abs_orthogonal_drift_m", 0.03)),
-        max_orientation_error_rad=float(safety_raw.get("max_orientation_error_rad", 0.25)),
-        max_joint_velocity_radps=float(safety_raw.get("max_joint_velocity_radps", 3.0)),
-    )
+    safety_cfg = impedance_safety_config_from_section(safety_raw)
     frequency_hz = float(cfg.get("hardware", {}).get("rtde_frequency_hz", 500.0))
     return impedance_cfg, safety_cfg, frequency_hz
 
@@ -118,11 +113,7 @@ def run_x_transport_direct_torque(
     # this (live-torque) mode was missing. Reuse safety_cfg's already-active
     # thresholds for qd/drift/orientation so this doesn't introduce a second,
     # different trip point for a check that already exists.
-    move_limits = CartesianMoveLimits(
-        qd_max_radps=safety_cfg.max_joint_velocity_radps,
-        max_off_axis_drift_m=min(safety_cfg.max_abs_y_drift_m, safety_cfg.max_abs_z_drift_m),
-        max_orientation_error_rad=safety_cfg.max_orientation_error_rad,
-    )
+    move_limits = CartesianMoveLimits.from_impedance_safety_config(safety_cfg)
     move_monitor = CartesianMoveMonitor(move_limits)
     move_monitor.set_start(state0.tcp_pose, move_axis_index=0)
 
@@ -307,9 +298,7 @@ def run_x_transport_direct_torque(
     final_state = last_link_state
     achieved_x_delta_m = float(final_state.tcp_pose[0] - x0)
     hold_duration_s = max(duration_s - move_duration_s, 0.0)
-    max_abs_qd = float(
-        max((max(abs(v) for v in row.get("qd", [0.0] * 6)) for row in trace_rows), default=0.0)
-    )
+    max_abs_qd = max_abs_qd_from_trace(trace_rows)
 
     summary = {
         "backend": "ursim_rtde_direct_torque",

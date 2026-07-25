@@ -31,6 +31,7 @@ from .safety import (
     UR5eSafetyLimits,
     is_robot_safety_normal,
 )
+from .transport_common import max_abs_qd_from_trace
 
 
 @dataclass
@@ -245,9 +246,7 @@ def run_x_transport_position(
         link.safe_stop("transport_exit")
 
     achieved_x_delta_m = float(last_state.tcp_pose[0] - x0)
-    max_abs_qd = float(
-        max((max(abs(v) for v in row.get("qd", [0.0] * 6)) for row in trace_rows), default=0.0)
-    )
+    max_abs_qd = max_abs_qd_from_trace(trace_rows)
     summary = {
         "backend": "servoL_position",
         "control_mode": "position",

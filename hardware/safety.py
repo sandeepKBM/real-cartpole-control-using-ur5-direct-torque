@@ -426,6 +426,25 @@ class CartesianMoveLimits:
             raise ValueError("max_axis_error_growth_steps must be >= 1")
 
     @classmethod
+    def from_impedance_safety_config(cls, safety_cfg) -> "CartesianMoveLimits":
+        """Layer Cartesian speed/accel/waypoint-jump guards on top of an
+        already-active ``ImpedanceSafetyConfig`` (duck-typed on its
+        ``max_joint_velocity_radps``/``max_abs_y_drift_m``/``max_abs_z_drift_m``/
+        ``max_orientation_error_rad`` attributes).
+
+        The qd/drift/orientation trip points are reused from ``safety_cfg`` so
+        this doesn't introduce a second, different trip point for a check that
+        already exists; the genuinely new speed/accel/waypoint-jump ceilings come
+        from this class's own defaults. Byte-identical to the construction that
+        was duplicated in ``direct_torque_transport`` and ``urscript_transport``.
+        """
+        return cls(
+            qd_max_radps=safety_cfg.max_joint_velocity_radps,
+            max_off_axis_drift_m=min(safety_cfg.max_abs_y_drift_m, safety_cfg.max_abs_z_drift_m),
+            max_orientation_error_rad=safety_cfg.max_orientation_error_rad,
+        )
+
+    @classmethod
     def for_robot(cls, robot_ip: str, *, base: "CartesianMoveLimits | None" = None, **overrides) -> "CartesianMoveLimits":
         """Build limits for a target host; relax TCP kinematic guards on URSim."""
         limits = replace(base or cls(), **overrides) if overrides else (base or cls())

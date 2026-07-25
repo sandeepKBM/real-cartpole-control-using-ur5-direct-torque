@@ -24,6 +24,7 @@ from .safety import (
     UR5eSafetyLimits,
     is_robot_safety_normal,
 )
+from .transport_common import impedance_safety_config_from_section
 from .urscript_gen import (
     DEFAULT_CONFIG,
     UrscriptOscParams,
@@ -56,13 +57,7 @@ class UrscriptTransportResult:
 def _load_safety_cfg(config_path: Path) -> ImpedanceSafetyConfig:
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     safety_raw = (cfg.get("controller", {}) or {}).get("safety", {}) or {}
-    return ImpedanceSafetyConfig(
-        max_abs_y_drift_m=float(safety_raw.get("max_abs_y_drift_m", 0.03)),
-        max_abs_z_drift_m=float(safety_raw.get("max_abs_z_drift_m", 0.03)),
-        max_abs_orthogonal_drift_m=float(safety_raw.get("max_abs_orthogonal_drift_m", 0.03)),
-        max_orientation_error_rad=float(safety_raw.get("max_orientation_error_rad", 0.25)),
-        max_joint_velocity_radps=float(safety_raw.get("max_joint_velocity_radps", 3.0)),
-    )
+    return impedance_safety_config_from_section(safety_raw)
 
 
 def _read_state_from_receive(receive: Any) -> UR5eState:
@@ -198,11 +193,7 @@ def run_urscript_x_transport(
         # qd/drift/orientation (so this doesn't introduce a second, different trip
         # point for a check that already exists) and CartesianMoveLimits' own
         # conservative defaults for the genuinely new speed/accel/jump checks.
-        move_limits = CartesianMoveLimits(
-            qd_max_radps=safety_cfg.max_joint_velocity_radps,
-            max_off_axis_drift_m=min(safety_cfg.max_abs_y_drift_m, safety_cfg.max_abs_z_drift_m),
-            max_orientation_error_rad=safety_cfg.max_orientation_error_rad,
-        )
+        move_limits = CartesianMoveLimits.from_impedance_safety_config(safety_cfg)
         move_monitor = CartesianMoveMonitor(move_limits)
         move_monitor.set_start(state0.tcp_pose, move_axis_index=0)
         target_tcp_pose = state0.tcp_pose.copy()
