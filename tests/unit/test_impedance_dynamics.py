@@ -138,6 +138,98 @@ def test_missing_mass_matrix_falls_back_to_identity():
     np.testing.assert_allclose(shaped.tau, legacy.tau, atol=1e-9)
 
 
+def test_diagonal_shaping_off_matches_full_lambda():
+    # Off by default: same as full-Lambda shaping (regression guard for the
+    # new flag not changing anything when unset).
+    m = np.diag([2.0, 5.0, 3.0, 1.0, 1.0, 1.0])
+    plain = _controller(task_space_inertia_shaping=True, lambda_regularization=0.0).compute(
+        _make_state(mass_matrix=m)
+    )
+    off = _controller(
+        task_space_inertia_shaping=True, lambda_regularization=0.0, lambda_diagonal_shaping=False
+    ).compute(_make_state(mass_matrix=m))
+    np.testing.assert_allclose(off.tau, plain.tau, atol=1e-12)
+    assert not off.lambda_diagonal_shaping_active
+
+
+def test_diagonal_shaping_removes_off_axis_coupling():
+    # J = I so tau_task_nominal == the shaped wrench directly (no further
+    # J.T mixing to disentangle). A mass matrix with X-Z coupling then gives
+    # Lambda = M exactly (eps=0), i.e. a non-diagonal Lambda purely from M.
+    # With an X-only raw wrench (y/z/orientation already at reference), full
+    # shaping must leak the X force into the Z row via Lambda[2,0]=M[2,0];
+    # diagonal shaping must not.
+    m = np.array(
+        [
+            [2.0, 0.0, 0.5, 0.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0, 0.0, 0.0, 0.0],
+            [0.5, 0.0, 4.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+    state = _make_state(ee_pos=(0.3, 0.1, 0.5), target_x=0.5, J=np.eye(6), mass_matrix=m)
+
+    full = _controller(task_space_inertia_shaping=True, lambda_regularization=0.0).compute(state)
+    diag = _controller(
+        task_space_inertia_shaping=True, lambda_regularization=0.0, lambda_diagonal_shaping=True
+    ).compute(state)
+
+    assert diag.lambda_diagonal_shaping_active
+    assert not full.lambda_diagonal_shaping_active
+    assert abs(float(full.wrench[0])) > 1e-6  # sanity: X wrench is actually nonzero
+    assert abs(float(full.wrench[2])) < 1e-12  # raw Z wrench is exactly zero (z_err=0)
+    assert abs(float(full.tau_task_nominal[2])) > 1e-6  # full shaping: X leaks into Z
+    assert abs(float(diag.tau_task_nominal[2])) < 1e-12  # diagonal shaping: no leak
+
+
+def test_diagonal_shaping_leaves_nullspace_posture_unaffected():
+    # The nullspace projector must use the full Lambda regardless of
+    # lambda_diagonal_shaping -- it's a separate mechanism (dynamically
+    # consistent pseudoinverse for posture), not the wrench-shaping step.
+    rng = np.random.default_rng(11)
+    J = np.eye(6) + 0.3 * rng.standard_normal((6, 6))
+    A = rng.standard_normal((6, 6))
+    M = A @ A.T + 6.0 * np.eye(6)
+    state = _make_state(q=np.full(6, 0.5), J=J, mass_matrix=M)
+
+    off = _controller(
+        nullspace_posture=True, lambda_regularization=0.0, kp_posture=10.0, kd_posture=0.0,
+        lambda_diagonal_shaping=False,
+    ).compute(state)
+    on = _controller(
+        nullspace_posture=True, lambda_regularization=0.0, kp_posture=10.0, kd_posture=0.0,
+        lambda_diagonal_shaping=True,
+    ).compute(state)
+    np.testing.assert_allclose(on.tau_posture, off.tau_posture, atol=1e-12)
+
+
+def test_diagonal_shaping_yaml_parsing():
+    ctrl_section = {
+        "gains": {},
+        "torque_limits_mode": "initial",
+        "torque_limits_initial": {
+            name: 100.0
+            for name in (
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            )
+        },
+        "lambda_diagonal_shaping": True,
+    }
+    cfg = CartesianImpedanceConfig.from_controller_yaml_section(ctrl_section)
+    assert cfg.lambda_diagonal_shaping is True
+    default_cfg = CartesianImpedanceConfig.from_controller_yaml_section(
+        {k: v for k, v in ctrl_section.items() if k != "lambda_diagonal_shaping"}
+    )
+    assert default_cfg.lambda_diagonal_shaping is False
+
+
 def test_yaml_section_parses_flags():
     ctrl_section = {
         "gains": {},

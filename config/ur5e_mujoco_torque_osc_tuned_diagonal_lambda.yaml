@@ -1,0 +1,112 @@
+# Variant of config/ur5e_mujoco_torque_osc_tuned_no_singular_scale.yaml (preserved
+# unmodified) with lambda_diagonal_shaping: true added.
+#
+# Why: mechanism analysis 2026-07-25 (recomputing Lambda(q) and the nullspace projector
+# post-hoc from q(t) logged in production-tool traces at alpha=0.1, dx in
+# {0.10,0.20,0.25,0.30,0.35,0.40}) found that the ~0.25-0.3m X-displacement ceiling is not
+# really a displacement limit -- it's a wrist_2-deviation limit. Away from the wrist_2=0
+# singularity, Lambda = (J M^-1 J^T + eps I)^-1 develops a large off-diagonal X-Z term
+# (Lambda[2,0] grows from ~0.32 at wrist_2=0 to ~2.0 by wrist_2=-0.006 rad, a third of a
+# degree off the singularity) because the eps=0.1 regularizer that suppresses it right at
+# the singularity stops dominating once J M^-1 J^T is no longer itself singular. Since the
+# shaped wrench's Z-row is Lambda[2,0]*Fx + Lambda[2,2]*Fz + ..., the large X-restoring
+# force (kp_x=400, the stiffest gain) leaks directly into a spurious Z command even with
+# zero Z tracking error -- destroying the intended per-axis decoupling of the task-space PD
+# law. All three failing displacements (dx=0.30/0.35/0.40) broke at essentially the same
+# wrist_2 excursion (~-0.006 rad) and Lambda_xz (~2.0), not at increasingly bad numbers as
+# dx grew -- confirming wrist_2 deviation, not dx, is the causal variable. This also
+# explains why a hand-tuned kp_z/kp_posture distance-based gain schedule (tested the same
+# day, not landed) failed to extend the range: it scaled the true Z-restoring authority, but
+# Lambda re-mixes the *entire* wrench through the same coupling ratio afterward, so the
+# "fix" and the disease moved together; kp_posture doesn't touch this at all since posture
+# is nullspace-projected, a separate term from the wrench math.
+#
+# The fix: lambda_diagonal_shaping only affects the wrench-shaping step (only diag(Lambda)
+# premultiplies the raw wrench, eliminating the injected X->Z leak at its source). The
+# nullspace-posture projector is untouched -- it always uses the full undiagonalized
+# Lambda, since that math needs the true dynamically-consistent pseudoinverse and is a
+# separate, unaffected mechanism (its Frobenius norm stayed healthy, ~2.0-2.2, across the
+# same sweep that exposed the wrench-shaping coupling).
+#
+# Not yet validated against the full canonical/long-hold/large-displacement/torque-scale
+# sweep the no-singular-scale config carries -- this config exists to run that validation,
+# not as a claim it already passed. See docs/CURRENT_STATUS.md once that sweep lands.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  lambda_diagonal_shaping: true
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

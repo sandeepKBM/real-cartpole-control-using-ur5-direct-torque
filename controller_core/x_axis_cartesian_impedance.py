@@ -57,6 +57,19 @@ class CartesianImpedanceConfig:
     task_space_inertia_shaping: bool = False
     nullspace_posture: bool = False
     lambda_regularization: float = 1.0e-6
+    # Diagonal-only Lambda for the wrench shaping step (default off = historical
+    # P3 behavior). Root cause of the Z-drift/orientation-coupling ceiling found
+    # 2026-07-25: away from the wrist_2=0 singularity, Lambda = (J M^-1 J^T +
+    # eps I)^-1 develops large off-diagonal terms (e.g. X-Z), so the shaped
+    # wrench's Z-row picks up Lambda[2,0]*Fx even when z_err is ~0 -- the large
+    # X-restoring force leaks into a spurious Z command. With this on, only
+    # diag(Lambda) is used to shape the wrench (each task-space channel only
+    # responds to its own raw-wrench component), eliminating that leak; the
+    # nullspace-posture projector still uses the full (undiagonalized) Lambda,
+    # since that math needs the true dynamically-consistent pseudoinverse, and
+    # it is a separate, unaffected term (measured healthy across the same dx
+    # sweep that exposed the wrench-shaping coupling).
+    lambda_diagonal_shaping: bool = False
     # Posture re-anchoring (default off = historical behavior). In move+hold
     # trajectories ``_q_rest`` stays the reset pose, so during the hold the
     # posture anchor fights the task force; at a task singularity that force
@@ -103,6 +116,7 @@ class CartesianImpedanceConfig:
             task_space_inertia_shaping=bool(ctrl.get("task_space_inertia_shaping", False)),
             nullspace_posture=bool(ctrl.get("nullspace_posture", False)),
             lambda_regularization=float(ctrl.get("lambda_regularization", 1.0e-6)),
+            lambda_diagonal_shaping=bool(ctrl.get("lambda_diagonal_shaping", False)),
             posture_reanchor_on_settle=bool(ctrl.get("posture_reanchor_on_settle", False)),
             reanchor_x_tol_m=float(ctrl.get("reanchor_x_tol_m", 2.0e-3)),
             reanchor_qd_tol_radps=float(ctrl.get("reanchor_qd_tol_radps", 0.05)),
@@ -132,6 +146,7 @@ class CartesianImpedanceOutput:
     orientation_error_vec: np.ndarray
     orientation_error_norm: float
     inertia_shaping_active: bool = False
+    lambda_diagonal_shaping_active: bool = False
     nullspace_posture_active: bool = False
     mass_matrix_provided: bool = False
     posture_reanchored: bool = False
@@ -329,10 +344,14 @@ class XAxisCartesianImpedanceController:
         singular_scale = 1.0
         if cond > self.cfg.jacobian_singular_cond_max > 0.0:
             singular_scale = float(self.cfg.jacobian_singular_cond_max / cond)
+        use_diagonal_shaping = bool(self.cfg.lambda_diagonal_shaping)
         if use_shaping and lambda_mat is not None:
             # Wrench is treated as a desired task acceleration; Lambda maps it
-            # to a dynamically consistent task force.
-            wrench_effective = lambda_mat @ wrench
+            # to a dynamically consistent task force. The nullspace projector
+            # below always uses the full (undiagonalized) lambda_mat -- only
+            # the wrench-shaping step is affected by lambda_diagonal_shaping.
+            lambda_for_wrench = np.diag(np.diag(lambda_mat)) if use_diagonal_shaping else lambda_mat
+            wrench_effective = lambda_for_wrench @ wrench
         else:
             wrench_effective = wrench
         wrench_scaled = wrench_effective * singular_scale
@@ -395,6 +414,7 @@ class XAxisCartesianImpedanceController:
             orientation_error_vec=e_rot,
             orientation_error_norm=ori_norm,
             inertia_shaping_active=use_shaping,
+            lambda_diagonal_shaping_active=bool(use_shaping and use_diagonal_shaping),
             nullspace_posture_active=use_nullspace,
             mass_matrix_provided=bool(mass_matrix_provided),
             posture_reanchored=bool(self._posture_reanchored),
