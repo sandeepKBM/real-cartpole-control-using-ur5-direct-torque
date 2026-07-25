@@ -214,6 +214,40 @@ controller (`config/ur5e_mujoco_torque_osc_tuned.yaml`) for real-world testing n
 already validates 100% at height_alpha=0.5 across the full displacement range on this same eval
 grid. Treat RL gain-scheduling as a longer-term improvement track, not a near-term dependency.
 
+**2026-07-25 -- credible root cause found (read-only audit, not yet implemented or tested):**
+under the current weights, "sit still" is genuinely *not* the reward optimum -- a clean move
+scores roughly 1200 points higher over an episode (`-1220` sit-still vs. `-20` clean-move,
+worked out from the actual reward terms and episode length) -- so this is an
+exploration/deceptive-local-optimum failure, not a reward-magnitude bug as previously assumed.
+Two concrete, confirmed-by-reading-the-code mechanisms:
+1. `x_error` (`gain_scheduling_env.py`) is the *only* reward term reduced by moving; every
+   other dense term (`y_error`, `z_error`, `orientation` -- all ≈0 when stationary because the
+   arm is parked at the wrist singularity, so *any* motion excites them; `gain_smooth`,
+   `torque_smooth`) is minimized by not moving. The `+200` terminal-quality bonus only pays out
+   for a *fully completed* move, giving no gradient across the plateau between "sit still" and
+   "clean move." The path between them runs through "move clumsily," which scores far worse
+   than either endpoint (guard trips, orientation/z excitation) -- a rugged, deceptive
+   landscape with no dense signal pointing toward the far, narrow optimum.
+2. `ent_coef` is never set in `train_ppo_gain_scheduler.py` -> SB3 default `0.0`, i.e. zero
+   exploration pressure, combined with PPO's `log_std=0` initialization (action std starts at
+   1.0 across an claimed [-1,1] gain-remap range). Early rollouts apply near-random,
+   chaotically-jittering gains every 2ms, which is violently destabilizing and immediately
+   punished by the dense penalties above -- the policy learns to suppress action variance
+   entirely, gains collapse toward constants, and it can never re-expand to rediscover the
+   coordinated high-gain move once collapsed. Matches every reported symptom exactly
+   (`kp_x->0`, `explained_variance->1.0`, guard trips during "clumsy" early rollouts).
+
+Proposed fix recipe (not implemented): potential-based progress shaping on `x_error` (dense,
+policy-invariant positive gradient for moving toward target); gate/down-weight the off-axis and
+orientation penalties during the move phase specifically, since any move at this singular pose
+excites them regardless of policy quality; set `ent_coef` (~0.005-0.01) to prevent premature
+collapse; decimate the action rate (currently full 500Hz gain rewrites -- 50-100Hz would reduce
+early-rollout chaos); add `VecNormalize`. Separately confirmed: the *current* environment
+cannot make the end-effector faster than fixed gains even if training worked -- `move_duration_s`
+is a fixed target profile and `x_error` tracking is symmetric (ahead of target penalized same as
+behind) -- speed would need its own reward redesign (a velocity/time-to-target term), a real but
+separate follow-on question from just fixing convergence.
+
 ## Next
 
 Nothing is currently blocking or in-progress on the MuJoCo controller/tuning side (OSC config
@@ -229,8 +263,9 @@ above). Open items, none urgent:
   concrete reason.
 - RL gain-scheduling policy is unresolved (see section above) — the `data.time` reset bug is
   fixed and confirmed real, but the underlying never-move reward collapse persists even with
-  the fix and a single-height-only task. Next step needs actual reward redesign (a
-  progress-based move-phase term, most likely) or exploration-setting changes, not another
+  the fix and a single-height-only task. A credible root cause was found 2026-07-25 (deceptive
+  reward landscape + zero exploration pressure, not a magnitude bug) with a concrete fix
+  recipe — next step is implementing and testing it, not another
   blind config nudge. Not currently blocking real-world testing — use the fixed-gain baseline.
 - Hardware lane is code-complete and unit-tested but has never touched a real robot — first
   physical contact is the next real-world milestone, not further code changes.
