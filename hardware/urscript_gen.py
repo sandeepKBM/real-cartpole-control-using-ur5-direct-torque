@@ -49,6 +49,14 @@ class UrscriptOscParams:
     viscous_scale: tuple[float, float, float, float, float, float] = tuple(DEFAULT_VISCOUS)
     coulomb_scale: tuple[float, float, float, float, float, float] = tuple(DEFAULT_COULOMB)
     stop_input_int_reg: int = 18
+    # Rotational stiffness. Carried through so the generator is AWARE of it, but
+    # the current on-robot template implements damping-only rotation
+    # (Mx/My/Mz = -kd_rot*omega, no orientation-error term), so it cannot honor a
+    # nonzero kp_rot. render_urscript() raises rather than silently dropping it --
+    # previously kp_rot was not a field at all, so a config with rotational
+    # stiffness would have been silently ignored on the real arm. Defaulted to 0
+    # so existing callers keep working (the tuned config has kp_rot=0).
+    kp_rot: float = 0.0
 
 
 def load_params_from_yaml(
@@ -76,6 +84,7 @@ def load_params_from_yaml(
         kp_z=float(gains.get("kp_z", 120.0)),
         kd_z=float(gains.get("kd_z", 20.0)),
         kd_rot=float(gains.get("kd_rot", 10.0)),
+        kp_rot=float(gains.get("kp_rot", 0.0)),
         kp_posture=float(gains.get("kp_posture", 25.0)),
         kd_posture=float(gains.get("kd_posture", 6.0)),
         kd_joint=float(gains.get("kd_joint", 4.0)),
@@ -93,6 +102,20 @@ def render_urscript(
     *,
     template_path: Path = DEFAULT_TEMPLATE,
 ) -> str:
+    # The on-robot template implements damping-only rotation
+    # (Mx/My/Mz = -kd_rot*omega); it has no orientation-error term, so it cannot
+    # apply a rotational-stiffness torque. Refuse to generate a script for a
+    # config with nonzero kp_rot rather than silently dropping the term on the
+    # real arm (the validated tuned config uses kp_rot=0). Honoring kp_rot would
+    # require adding quaternion orientation-error math to the on-robot script --
+    # a control-law change that has to be validated on hardware first.
+    if float(params.kp_rot) != 0.0:
+        raise ValueError(
+            "URScript OSC template implements damping-only rotation (no "
+            f"orientation-error term); cannot honor kp_rot={params.kp_rot!r}. "
+            "Set kp_rot=0 for the URScript lane, or extend the template with a "
+            "validated orientation-error term before using rotational stiffness."
+        )
     template = template_path.read_text(encoding="utf-8")
     repl = {
         "{{TARGET_X_DELTA}}": f"{params.target_x_delta_m:.12g}",
