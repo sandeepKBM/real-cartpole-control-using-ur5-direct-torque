@@ -119,6 +119,7 @@ python tools/ur5e_direct_torque_height_latency_test.py --robot-ip <IP> \
 | [`POLYSCOPE_PANEL_CHECKLIST.md`](POLYSCOPE_PANEL_CHECKLIST.md) | **At the robot** — teach-pendant switches |
 | [`URSIM_REMOTE_CONTROL.md`](URSIM_REMOTE_CONTROL.md) | URSim Docker / remote control / fieldbus |
 | [`URSCRIPT_INNER_LOOP.md`](URSCRIPT_INNER_LOOP.md) | Mode 3 details |
+| [`AUTO_TUNING_PLAN.md`](AUTO_TUNING_PLAN.md) | Design-only plan for sim-gated Bayesian gain calibration on real hardware — not implemented yet |
 
 ### Not hardware (do not confuse)
 
