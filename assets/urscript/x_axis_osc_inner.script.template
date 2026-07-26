@@ -6,20 +6,27 @@
 # Differences vs Python XAxisCartesianImpedanceController (verified by
 # tests/hardware/test_urscript_parity.py, which reimplements this exact math in
 # Python and diffs it against the ground-truth controller):
-#   - nullspace_posture projection omitted: posture torque is applied in full
-#     joint space. The tuned config sets nullspace_posture=true, so this DOES
-#     diverge from the validated Python behavior (~0.5-1 Nm on posture torque).
-#   - torque feasibility uses per-joint clamp, not geometric backtracking. When
-#     any joint saturates this distorts the joint-torque DIRECTION; the parity
-#     test measures up to ~12 Nm of difference on a saturating step. Peak
-#     magnitude is still bounded by the same hard tau_lim.
-#   - singular-value (cond(J)) wrench scaling omitted. This now MATCHES the
+#   - nullspace_posture projection (2026-07-26): now implemented, gated by
+#     use_nullspace (baked from the config's nullspace_posture flag). Matches
+#     the Python dynamically-consistent projector to floating-point tolerance
+#     in the parity test's unsaturated regime.
+#   - torque feasibility (2026-07-26): now uses geometric task-scale
+#     backtracking (backtrack_task_scale below), the same algorithm as
+#     CartesianImpedanceConfig.task_resample_* / _backtrack_task_scale, instead
+#     of a per-joint clamp. Preserves torque DIRECTION under saturation instead
+#     of distorting it. A final hard clamp_vec6 against tau_lim remains as the
+#     absolute safety backstop, matching the Python controller's own
+#     backtrack-then-hard-clip structure.
+#   - singular-value (cond(J)) wrench scaling omitted. This MATCHES the
 #     intended direction of config/ur5e_mujoco_torque_osc_tuned_no_singular_scale
 #     .yaml (2026-07-25), which disables that global scalar because it nulls task
 #     authority at the wrist-singular start pose. It does NOT match the BASE
 #     config/ur5e_mujoco_torque_osc_tuned.yaml, whose 1e5 cond threshold still
 #     collapses task torque near the singularity. Treat this script as targeting
-#     the no-singular-scale semantics.
+#     the no-singular-scale semantics. This is a deliberate, not-yet-closed gap:
+#     porting cond(J)-based scaling was not requested and the mechanism-analysis
+#     work of 2026-07-25/26 found the underlying singular_scale term counter-
+#     productive in the Python controller too (see AGENTS.md Sec 3/4).
 #   - rotation is damping-only (Mx/My/Mz = -kd_rot*omega); there is no
 #     orientation-error / kp_rot term. The generator refuses nonzero kp_rot.
 # NONE of the above has been validated on real hardware. Numerical parity vs the
@@ -40,6 +47,56 @@ def clamp_vec6(v, lim):
     i = i + 1
   end
   return out
+end
+
+def scale_vec6(v, s):
+  out = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  i = 0
+  while i < 6:
+    out[i] = v[i] * s
+    i = i + 1
+  end
+  return out
+end
+
+def within_limits_vec6(v, lim):
+  i = 0
+  ok = True
+  while i < 6:
+    if v[i] > lim[i] + 1.0e-12:
+      ok = False
+    end
+    if v[i] < -lim[i] - 1.0e-12:
+      ok = False
+    end
+    i = i + 1
+  end
+  return ok
+end
+
+def backtrack_task_scale(tau_nominal, tau_limit, resample_factor, min_scale, max_iters):
+  # Geometric whole-vector shrink, preserving torque DIRECTION -- mirrors
+  # CartesianImpedanceConfig.task_resample_* / _backtrack_task_scale exactly
+  # (same iteration structure, same defaults: factor=0.5, min_scale=1/16384,
+  # max_iters=14). A per-joint clamp instead distorts direction on saturation.
+  task_scale = 1.0
+  tau_candidate = tau_nominal
+  feasible = within_limits_vec6(tau_candidate, tau_limit)
+  iters = 0
+  while feasible == False and iters < max_iters and task_scale > min_scale + 1.0e-12:
+    next_scale = task_scale * resample_factor
+    if next_scale < min_scale:
+      next_scale = min_scale
+    end
+    if next_scale >= task_scale - 1.0e-12:
+      break
+    end
+    task_scale = next_scale
+    tau_candidate = scale_vec6(tau_nominal, task_scale)
+    feasible = within_limits_vec6(tau_candidate, tau_limit)
+    iters = iters + 1
+  end
+  return tau_candidate
 end
 
 def min_jerk_move_hold_x(t, x0, dx, move_dur, total_dur):
@@ -77,6 +134,10 @@ def osc_x_axis_transport():
   kd_joint = {{KD_JOINT}}
   lambda_reg = {{LAMBDA_REG}}
   use_lambda = {{USE_LAMBDA}}
+  use_nullspace = {{USE_NULLSPACE}}
+  resample_factor = {{TASK_RESAMPLE_FACTOR}}
+  resample_min_scale = {{TASK_RESAMPLE_MIN_SCALE}}
+  resample_max_iters = {{TASK_RESAMPLE_MAX_ITERS}}
   headroom = {{TORQUE_HEADROOM}}
   x_tol = {{REANCHOR_X_TOL}}
   qd_tol = {{REANCHOR_QD_TOL}}
@@ -160,10 +221,16 @@ def osc_x_axis_transport():
     Mz = -kd_rot * wz
     wrench = [Fx, Fy, Fz, Mx, My, Mz]
 
-    if use_lambda == 1:
+    # Lambda is needed for wrench shaping (use_lambda) AND/OR the nullspace
+    # projector (use_nullspace) -- computed once whenever either is active,
+    # matching XAxisCartesianImpedanceController.compute().
+    if use_lambda == 1 or use_nullspace == 1:
       Minv = inv(M)
       JT = transpose(J)
       Lambda = inv(J * Minv * JT + lambda_reg * I6)
+    end
+
+    if use_lambda == 1:
       wrench_eff = Lambda * wrench
     else:
       wrench_eff = wrench
@@ -171,22 +238,36 @@ def osc_x_axis_transport():
 
     tau_task = transpose(J) * wrench_eff
     tau_damp = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    tau_post = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    tau_post_raw = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     i = 0
     while i < 6:
       tau_damp[i] = -kd_joint * qd[i]
-      tau_post[i] = kp_post * (q_rest[i] - q[i]) - kd_post * qd[i]
+      tau_post_raw[i] = kp_post * (q_rest[i] - q[i]) - kd_post * qd[i]
       i = i + 1
     end
 
-    tau = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    if use_nullspace == 1:
+      # Dynamically consistent nullspace projector: posture torque can no
+      # longer produce task-space acceleration. Mirrors
+      # controller_core.x_axis_cartesian_impedance's j_bar/nullspace_proj.
+      Jbar = Minv * JT * Lambda
+      NullProj = I6 - JT * transpose(Jbar)
+      tau_post = NullProj * tau_post_raw
+    else:
+      tau_post = tau_post_raw
+    end
+
+    tau_nominal = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     i = 0
     while i < 6:
-      tau[i] = tau_task[i] + tau_damp[i] + tau_post[i]
+      tau_nominal[i] = tau_task[i] + tau_damp[i] + tau_post[i]
       i = i + 1
     end
 
-    tau = clamp_vec6(tau, lim_head)
+    # Geometric backtracking against the headroom limit, then a hard clamp
+    # against the full limit as the absolute safety backstop -- mirrors
+    # XAxisCartesianImpedanceController's _backtrack_task_scale + final clip.
+    tau = backtrack_task_scale(tau_nominal, lim_head, resample_factor, resample_min_scale, resample_max_iters)
     tau = clamp_vec6(tau, tau_lim)
 
     direct_torque(tau, viscous_scale=viscous, coulomb_scale=coulomb)

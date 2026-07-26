@@ -11,14 +11,16 @@ and diffs it against the ground-truth controller over a battery of shared states
 
 Two jobs:
   1. In the regime where the two are *supposed* to agree (singular-value scaling
-     disabled -- matching the no-singular-scale config direction -- nullspace off,
-     no saturation, gravity added by PolyScope not Python) they must match to
-     floating-point tolerance. This is the regression net: any future edit to
-     either side that breaks the agreement trips this test.
-  2. The three known, deliberate divergences (nullspace-posture projection,
-     cond(J) singular scaling, geometric-backtracking vs per-joint clamp) are
-     measured and asserted to still be present and bounded, so a change that
-     silently *closes* or *widens* a gap also trips a test rather than sliding by.
+     disabled -- matching the no-singular-scale config direction -- no saturation,
+     gravity added by PolyScope not Python) they must match to floating-point
+     tolerance, INCLUDING nullspace-posture projection and geometric task-scale
+     backtracking (both fixed 2026-07-26 -- see the template header). This is the
+     regression net: any future edit to either side that breaks the agreement
+     trips this test.
+  2. The one remaining, deliberate divergence (cond(J) singular scaling, omitted
+     on the robot -- matches the no-singular-scale config's own direction, see
+     the template header) is measured and asserted to still be present and
+     bounded, so a change that silently closes or widens it also trips a test.
 
 NOTE: this proves numerical parity of the control math only. It says nothing
 about whether the URScript runs at 500 Hz on real hardware or behaves correctly
@@ -59,6 +61,27 @@ def _jac_with_cond(rng: np.random.Generator, cond: float) -> np.ndarray:
     return u @ np.diag(s) @ vt
 
 
+def _urscript_backtrack_task_scale(
+    tau_nominal: np.ndarray, tau_limit: np.ndarray, *, resample_factor: float, min_scale: float, max_iters: int
+) -> np.ndarray:
+    """Python transcription of the ``backtrack_task_scale`` URScript helper."""
+    task_scale = 1.0
+    tau_candidate = tau_nominal.copy()
+    feasible = bool(np.all(np.abs(tau_candidate) <= tau_limit + 1e-12))
+    iters = 0
+    while (not feasible) and (iters < max_iters) and (task_scale > min_scale + 1e-12):
+        next_scale = task_scale * resample_factor
+        if next_scale < min_scale:
+            next_scale = min_scale
+        if next_scale >= task_scale - 1e-12:
+            break
+        task_scale = next_scale
+        tau_candidate = task_scale * tau_nominal
+        feasible = bool(np.all(np.abs(tau_candidate) <= tau_limit + 1e-12))
+        iters += 1
+    return tau_candidate
+
+
 def _urscript_reference_tau(
     *,
     J: np.ndarray,
@@ -76,41 +99,61 @@ def _urscript_reference_tau(
     headroom: float,
     use_lambda: bool,
     lambda_reg: float,
+    use_nullspace: bool = False,
+    resample_factor: float = 0.5,
+    resample_min_scale: float = 1.0 / 16384.0,
+    resample_max_iters: int = 14,
 ) -> dict[str, np.ndarray]:
     """Faithful Python transcription of ``x_axis_osc_inner.script.template``.
 
     Line references are to that template. This is the on-robot math, in Python,
     used only as a parity oracle -- it is never shipped to the robot.
     """
-    twist = J @ qd  # template L101: twist = J * qd
-    vx, vy, vz, wx, wy, wz = twist  # L102-107
-    x_err = x_des - tcp[0]  # L109
-    y_err = y0 - tcp[1]  # L110
-    z_err = z0 - tcp[2]  # L111
-    Fx = gains["kp_x"] * x_err + gains["kd_x"] * (x_vel_des - vx)  # L138
-    Fy = gains["kp_y"] * y_err - gains["kd_y"] * vy  # L139
-    Fz = gains["kp_z"] * z_err - gains["kd_z"] * vz  # L140
-    Mx = -gains["kd_rot"] * wx  # L141 -- damping only, no kp_rot term
-    My = -gains["kd_rot"] * wy  # L142
-    Mz = -gains["kd_rot"] * wz  # L143
-    wrench = np.array([Fx, Fy, Fz, Mx, My, Mz], dtype=np.float64)  # L144
+    twist = J @ qd  # template: twist = J * qd
+    vx, vy, vz, wx, wy, wz = twist
+    x_err = x_des - tcp[0]
+    y_err = y0 - tcp[1]
+    z_err = z0 - tcp[2]
+    Fx = gains["kp_x"] * x_err + gains["kd_x"] * (x_vel_des - vx)
+    Fy = gains["kp_y"] * y_err - gains["kd_y"] * vy
+    Fz = gains["kp_z"] * z_err - gains["kd_z"] * vz
+    Mx = -gains["kd_rot"] * wx  # damping only, no kp_rot term
+    My = -gains["kd_rot"] * wy
+    Mz = -gains["kd_rot"] * wz
+    wrench = np.array([Fx, Fy, Fz, Mx, My, Mz], dtype=np.float64)
 
-    if use_lambda:  # L146-153
+    lam: np.ndarray | None = None
+    m_inv: np.ndarray | None = None
+    if use_lambda or use_nullspace:
         m_inv = np.linalg.inv(M)
         lam = np.linalg.inv(J @ m_inv @ J.T + lambda_reg * np.eye(6))
+
+    if use_lambda:
         wrench_eff = lam @ wrench
     else:
         wrench_eff = wrench
 
-    tau_task = J.T @ wrench_eff  # L155  (NB: no cond(J) singular_scale)
-    tau_damp = -gains["kd_joint"] * qd  # L160
-    tau_post = gains["kp_posture"] * (q_rest - q) - gains["kd_posture"] * qd  # L161
-    #   ^ NB: no nullspace projection; joint-space posture torque
-    tau = tau_task + tau_damp + tau_post  # L168  (NB: no gravity; PolyScope adds it)
+    tau_task = J.T @ wrench_eff  # NB: no cond(J) singular_scale -- the one remaining gap
+    tau_damp = -gains["kd_joint"] * qd
+    tau_post_raw = gains["kp_posture"] * (q_rest - q) - gains["kd_posture"] * qd
 
-    lim_head = headroom * tau_lim  # L70
-    tau_clamped = np.clip(tau, -lim_head, lim_head)  # L172 clamp_vec6(tau, lim_head)
-    tau_clamped = np.clip(tau_clamped, -tau_lim, tau_lim)  # L173 clamp_vec6(tau, tau_lim)
+    if use_nullspace:
+        # Dynamically consistent nullspace projector, mirrors
+        # controller_core's j_bar/nullspace_proj exactly.
+        j_bar = m_inv @ J.T @ lam
+        nullspace_proj = np.eye(6) - J.T @ j_bar.T
+        tau_post = nullspace_proj @ tau_post_raw
+    else:
+        tau_post = tau_post_raw
+
+    tau_nominal = tau_task + tau_damp + tau_post  # NB: no gravity; PolyScope adds it
+
+    lim_head = headroom * tau_lim
+    tau_backtracked = _urscript_backtrack_task_scale(
+        tau_nominal, lim_head, resample_factor=resample_factor,
+        min_scale=resample_min_scale, max_iters=resample_max_iters,
+    )
+    tau_clamped = np.clip(tau_backtracked, -tau_lim, tau_lim)  # final hard clamp_vec6(tau, tau_lim)
 
     return {
         "wrench": wrench,
@@ -119,7 +162,7 @@ def _urscript_reference_tau(
         "tau_damp": tau_damp,
         "tau_post": tau_post,
         "tau": tau_clamped,
-        "tau_preclamp": tau,
+        "tau_preclamp": tau_nominal,
     }
 
 
@@ -252,15 +295,15 @@ def test_faithful_regime_matches_python() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 3. Gap 1 -- nullspace projection omitted on the robot.
+# 3. Nullspace-posture projection now matches (fixed 2026-07-26; was Gap 1).
 # --------------------------------------------------------------------------- #
-def test_gap_nullspace_projection_present_and_quantified() -> None:
+def test_nullspace_projection_matches_python() -> None:
     rng = np.random.default_rng(7)
     params = load_params_from_yaml(
         DEFAULT_CONFIG, target_x_delta_m=0.02, move_duration_s=1.0, duration_s=3.0
     )
     gains = _parse_baked_gains(render_urscript(params))
-    max_div = 0.0
+    saw_nonzero_projection_effect = False
     for _ in range(30):
         s = _sample_state(rng, cond=50.0)
         s["tcp"] = s["tcp0"] + 0.02 * rng.normal(size=6)
@@ -276,16 +319,22 @@ def test_gap_nullspace_projection_present_and_quantified() -> None:
             z0=float(s["tcp0"][2]), q_rest=s["q0"], gains=gains,
             tau_lim=_HUGE_LIMIT, headroom=params.torque_headroom,
             use_lambda=True, lambda_reg=params.lambda_regularization,
+            use_nullspace=True,
         )
-        # task term still agrees; only posture diverges via the projector
         assert np.allclose(out.tau_task_nominal, ref["tau_task"], atol=1e-9)
-        max_div = max(max_div, float(np.max(np.abs(out.tau_posture - ref["tau_post"]))))
-    # The tuned config uses nullspace_posture=true, so this IS a live divergence.
-    assert max_div > 1e-3, "nullspace projection should measurably change posture torque"
+        assert np.allclose(out.tau_posture, ref["tau_post"], atol=1e-8)
+        assert np.allclose(out.tau, ref["tau"], atol=1e-8)
+        # Sanity: the projector must actually be doing something on these random
+        # states (else this test would pass trivially even with a broken
+        # projector on either side).
+        raw_posture = gains["kp_posture"] * (s["q0"] - s["q"]) - gains["kd_posture"] * s["qd"]
+        if float(np.max(np.abs(out.tau_posture - raw_posture))) > 1e-3:
+            saw_nonzero_projection_effect = True
+    assert saw_nonzero_projection_effect, "expected the projector to measurably change posture torque on some sample"
 
 
 # --------------------------------------------------------------------------- #
-# 4. Gap 2 -- cond(J) singular-value wrench scaling omitted on the robot.
+# 4. cond(J) singular-value wrench scaling -- the one remaining, deliberate gap.
 # --------------------------------------------------------------------------- #
 def test_gap_singular_scaling() -> None:
     rng = np.random.default_rng(99)
@@ -327,9 +376,10 @@ def test_gap_singular_scaling() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 5. Gap 3 -- per-joint clamp vs geometric backtracking under saturation.
+# 5. Geometric backtracking under saturation now matches (fixed 2026-07-26;
+#    was Gap 3 -- previously a per-joint clamp that distorted torque direction).
 # --------------------------------------------------------------------------- #
-def test_gap_clamp_vs_backtracking_under_saturation() -> None:
+def test_backtracking_matches_python_under_saturation() -> None:
     rng = np.random.default_rng(2024)
     params = load_params_from_yaml(
         DEFAULT_CONFIG, target_x_delta_m=0.02, move_duration_s=1.0, duration_s=3.0
@@ -337,7 +387,7 @@ def test_gap_clamp_vs_backtracking_under_saturation() -> None:
     gains = _parse_baked_gains(render_urscript(params))
     tau_lim = np.array([150.0, 150.0, 150.0, 28.0, 28.0, 28.0])
 
-    found_divergence = False
+    saw_backtracking_engage = False
     for _ in range(60):
         s = _sample_state(rng, cond=50.0)
         # large x error to force saturation
@@ -358,8 +408,8 @@ def test_gap_clamp_vs_backtracking_under_saturation() -> None:
         # Safety invariant that MUST hold on both sides: never exceed the hard limit.
         assert np.all(np.abs(ref["tau"]) <= tau_lim + 1e-9)
         assert np.all(np.abs(out.tau) <= tau_lim + 1e-9)
+        # Same algorithm on both sides now -> must agree, saturating or not.
+        assert np.allclose(out.tau, ref["tau"], atol=1e-6)
         if out.task_backtrack_scale < 1.0 - 1e-9:
-            # backtracking engaged -> direction preserved; clamp distorts it
-            if np.max(np.abs(out.tau - ref["tau"])) > 1.0:
-                found_divergence = True
-    assert found_divergence, "expected a saturating case where clamp and backtracking differ"
+            saw_backtracking_engage = True
+    assert saw_backtracking_engage, "expected at least one sample to actually saturate and engage backtracking"

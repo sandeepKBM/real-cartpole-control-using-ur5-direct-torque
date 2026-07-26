@@ -46,6 +46,17 @@ class UrscriptOscParams:
     reanchor_x_tol_m: float
     reanchor_qd_tol_radps: float
     tau_limits_nm: tuple[float, float, float, float, float, float]
+    # Nullspace-posture projection (dynamically consistent pseudoinverse, same
+    # math as controller_core.x_axis_cartesian_impedance's nullspace_posture
+    # flag). Independent of use_lambda: Lambda is computed whenever EITHER is
+    # set, matching XAxisCartesianImpedanceController.compute().
+    use_nullspace: bool = False
+    # Geometric task-scale backtracking (replaces the old per-joint clamp,
+    # which distorted torque direction on saturation). Same algorithm and
+    # defaults as CartesianImpedanceConfig.task_resample_*.
+    task_resample_factor: float = 0.5
+    task_resample_min_scale: float = 1.0 / 16384.0
+    task_resample_max_iters: int = 14
     viscous_scale: tuple[float, float, float, float, float, float] = tuple(DEFAULT_VISCOUS)
     coulomb_scale: tuple[float, float, float, float, float, float] = tuple(DEFAULT_COULOMB)
     stop_input_int_reg: int = 18
@@ -73,6 +84,7 @@ def load_params_from_yaml(
     lim_dict = ctrl.get("torque_limits_initial", {}) or {}
     tau = tuple(float(lim_dict[name]) for name in JOINT_ORDER)
     shaping = bool(ctrl.get("task_space_inertia_shaping", False))
+    nullspace = bool(ctrl.get("nullspace_posture", False))
     return UrscriptOscParams(
         target_x_delta_m=float(target_x_delta_m),
         move_duration_s=float(move_duration_s),
@@ -94,6 +106,10 @@ def load_params_from_yaml(
         reanchor_x_tol_m=float(ctrl.get("reanchor_x_tol_m", 2.0e-3)),
         reanchor_qd_tol_radps=float(ctrl.get("reanchor_qd_tol_radps", 0.05)),
         tau_limits_nm=tau,  # type: ignore[arg-type]
+        use_nullspace=nullspace,
+        task_resample_factor=float(ctrl.get("task_resample_factor", 0.5)),
+        task_resample_min_scale=float(ctrl.get("task_resample_min_scale", 1.0 / 16384.0)),
+        task_resample_max_iters=int(ctrl.get("task_resample_max_iters", 14)),
     )
 
 
@@ -133,6 +149,10 @@ def render_urscript(
         "{{KD_JOINT}}": f"{params.kd_joint:.12g}",
         "{{LAMBDA_REG}}": f"{params.lambda_regularization:.12g}",
         "{{USE_LAMBDA}}": "1" if params.use_lambda else "0",
+        "{{USE_NULLSPACE}}": "1" if params.use_nullspace else "0",
+        "{{TASK_RESAMPLE_FACTOR}}": f"{params.task_resample_factor:.12g}",
+        "{{TASK_RESAMPLE_MIN_SCALE}}": f"{params.task_resample_min_scale:.12g}",
+        "{{TASK_RESAMPLE_MAX_ITERS}}": str(int(params.task_resample_max_iters)),
         "{{TORQUE_HEADROOM}}": f"{params.torque_headroom:.12g}",
         "{{REANCHOR_X_TOL}}": f"{params.reanchor_x_tol_m:.12g}",
         "{{REANCHOR_QD_TOL}}": f"{params.reanchor_qd_tol_radps:.12g}",
