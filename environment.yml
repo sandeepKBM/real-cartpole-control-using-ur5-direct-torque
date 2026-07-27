@@ -55,3 +55,4 @@ dependencies:
       - gymnasium==1.3.0           # rl_gain_scheduling/
       - stable-baselines3==2.9.0   # rl_gain_scheduling/ (PPO)
       - tensorboard==2.21.0        # rl_gain_scheduling/ (SB3 training-curve logging)
+      - optuna==4.1.0              # tools/ur5e_suggest_gains.py (real-hardware retune loop)
