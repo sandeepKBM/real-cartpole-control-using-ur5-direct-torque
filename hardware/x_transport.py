@@ -15,7 +15,32 @@ from .direct_torque_link import UR5eDirectTorqueLink
 from .direct_torque_transport import DirectTorqueTransportResult, run_x_transport_direct_torque
 from .link import UR5eLink
 from .position_transport import PositionTransportResult, run_x_transport_position
+from .safety import UR5eSafetyLimits
 from .urscript_transport import UrscriptTransportResult, run_urscript_x_transport
+
+
+def _validate_start_q_rad(start_q_rad: np.ndarray) -> np.ndarray:
+    """Sanity-check a caller-supplied start pose before it ever reaches the
+    robot: shape, finiteness, and the same absolute q_lower/q_upper ceiling
+    ``check_joint_state`` enforces post-move. Catches gross typos (e.g.
+    degrees instead of radians) before a moveJ is ever issued, rather than
+    relying solely on the robot's own firmware check or the post-move
+    ``verify_joint_pose`` -- the hardcoded HEIGHT_ALPHA_0_5_Q default never
+    needed this because it's a fixed, already-known-good constant; a
+    free-form CLI value does.
+    """
+    q = np.asarray(start_q_rad, dtype=np.float64).reshape(-1)
+    if q.shape[0] != 6:
+        raise ValueError(f"start_q_rad must have exactly 6 elements; got {q.shape[0]}")
+    if not np.all(np.isfinite(q)):
+        raise ValueError("start_q_rad contains NaN/Inf")
+    limits = UR5eSafetyLimits()
+    if np.any(q < limits.q_lower) or np.any(q > limits.q_upper):
+        raise ValueError(
+            f"start_q_rad {q.tolist()} exceeds absolute joint limits "
+            f"[{limits.q_lower.tolist()}, {limits.q_upper.tolist()}]"
+        )
+    return q
 
 
 @dataclass
@@ -45,8 +70,11 @@ def run_x_transport(
     shadow_osc: bool = True,
     skip_joint_move: bool = False,
     record_latency: bool = True,
+    start_q_rad: np.ndarray | None = None,
 ) -> XTransportResult:
     mode = normalize_control_mode(control_mode)
+    if start_q_rad is not None:
+        start_q_rad = _validate_start_q_rad(start_q_rad)
 
     if mode == "urscript":
         raw: UrscriptTransportResult = run_urscript_x_transport(
@@ -58,6 +86,7 @@ def run_x_transport(
             output_dir=output_dir,
             motion_opt_in=motion_opt_in,
             skip_joint_move=skip_joint_move,
+            joint_target_q=start_q_rad,
         )
         return XTransportResult(
             ok=raw.ok,
@@ -70,7 +99,7 @@ def run_x_transport(
     if mode == "position":
         link = UR5eLink(robot_ip, frequency_hz=125.0)
         if not skip_joint_move:
-            _joint_move_ur5e_link(link, motion_opt_in=motion_opt_in)
+            _joint_move_ur5e_link(link, motion_opt_in=motion_opt_in, target_q_rad=start_q_rad)
         raw_pos: PositionTransportResult = run_x_transport_position(
             link,
             config_path=config_path,
@@ -96,14 +125,15 @@ def run_x_transport(
         from .poses import HEIGHT_ALPHA_0_5_Q
         from .safety import EStopLatch
 
+        target_q_rad = HEIGHT_ALPHA_0_5_Q if start_q_rad is None else start_q_rad
         estop = EStopLatch()
         jres = move_joints_to_pose(
             link,
             estop,
-            target_q_rad=HEIGHT_ALPHA_0_5_Q,
+            target_q_rad=target_q_rad,
             motion_opt_in=motion_opt_in,
         )
-        ok_v, reason_v, _ = verify_joint_pose(link, target_q_rad=HEIGHT_ALPHA_0_5_Q)
+        ok_v, reason_v, _ = verify_joint_pose(link, target_q_rad=target_q_rad)
         if not jres.ok or not ok_v:
             link.safe_stop("joint_move_failed")
             return XTransportResult(
@@ -134,15 +164,17 @@ def run_x_transport(
     )
 
 
-def _joint_move_ur5e_link(link: UR5eLink, *, motion_opt_in: bool) -> None:
+def _joint_move_ur5e_link(
+    link: UR5eLink, *, motion_opt_in: bool, target_q_rad: np.ndarray | None = None
+) -> None:
     from .poses import HEIGHT_ALPHA_0_5_Q
 
     if not motion_opt_in:
         raise ValueError("motion_opt_in required")
+    target_q = HEIGHT_ALPHA_0_5_Q if target_q_rad is None else np.asarray(target_q_rad, dtype=np.float64).reshape(6)
     link.connect(with_control=True)
-    link.move_j(HEIGHT_ALPHA_0_5_Q, speed_rad_s=0.5, acceleration_rad_s2=0.5)
+    link.move_j(target_q, speed_rad_s=0.5, acceleration_rad_s2=0.5)
     deadline = time.monotonic() + 30.0
-    target_q = HEIGHT_ALPHA_0_5_Q
     while time.monotonic() < deadline:
         st = link.read_state()
         if float(np.max(np.abs(st.q - target_q))) <= 0.03:

@@ -29,6 +29,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
+
 from _bootstrap import ensure_repo_root
 
 ensure_repo_root()
@@ -51,6 +53,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--move-duration", type=float, default=1.0)
     p.add_argument("--duration", type=float, default=3.0)
     p.add_argument("--output-dir", type=Path, default=None)
+    p.add_argument(
+        "--start-q-rad",
+        type=float,
+        nargs=6,
+        default=None,
+        metavar=("Q1", "Q2", "Q3", "Q4", "Q5", "Q6"),
+        help=(
+            "Optional six-joint pose in radians to moveJ to before transport, "
+            "overriding the default HEIGHT_ALPHA_0_5_Q pose. E.g. the alpha=0.1 "
+            "pose used in sim validation: 0.0 -1.423717 -0.24 -1.453717 0.0 0.0"
+        ),
+    )
     p.add_argument("--skip-joint-move", action="store_true")
     p.add_argument("--no-shadow-osc", action="store_true", help="Position mode only: skip OSC shadow compute.")
     p.add_argument("--probe-only", action="store_true", help="Connect + read state only (no transport).")
@@ -122,6 +136,7 @@ def main() -> int:
             return 2
 
     output_dir = args.output_dir or _default_output_dir(str(args.control_mode))
+    start_q_rad = None if args.start_q_rad is None else np.asarray(args.start_q_rad, dtype=np.float64)
     try:
         result = run_x_transport(
             control_mode=str(args.control_mode),
@@ -135,9 +150,10 @@ def main() -> int:
             dynamics_source=str(args.dynamics_source),
             shadow_osc=not args.no_shadow_osc,
             skip_joint_move=bool(args.skip_joint_move),
+            start_q_rad=start_q_rad,
         )
-    except RTDELinkError as exc:
-        print(f"RTDE failed: {exc}", file=sys.stderr)
+    except (RTDELinkError, ValueError) as exc:
+        print(f"RTDE/start-pose failed: {exc}", file=sys.stderr)
         return 1
 
     print(json.dumps(result.summary, indent=2))
