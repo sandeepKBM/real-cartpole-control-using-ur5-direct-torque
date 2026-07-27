@@ -57,6 +57,74 @@ def test_local_jacobian_and_mass_match_mujoco(engines) -> None:
 
 
 @pytest.mark.hardware
+def test_local_coriolis_zero_at_zero_velocity(engines) -> None:
+    model, data, site_id, local = engines
+    rng = np.random.default_rng(1)
+    lo = model.jnt_range[:, 0].copy()
+    hi = model.jnt_range[:, 1].copy()
+    unlimited = lo >= hi
+    lo[unlimited], hi[unlimited] = -np.pi, np.pi
+    for _ in range(10):
+        q = rng.uniform(lo, hi)
+        coriolis = local.coriolis(q, np.zeros(6))
+        np.testing.assert_allclose(coriolis, np.zeros(6), atol=1e-10)
+
+
+@pytest.mark.hardware
+def test_local_coriolis_nonzero_at_nonzero_velocity(engines) -> None:
+    model, data, site_id, local = engines
+    rng = np.random.default_rng(2)
+    saw_nonzero = False
+    for _ in range(20):
+        q = rng.uniform(-1.0, 1.0, size=6)
+        qd = rng.uniform(-1.5, 1.5, size=6)
+        coriolis = local.coriolis(q, qd)
+        if float(np.max(np.abs(coriolis))) > 1e-4:
+            saw_nonzero = True
+    assert saw_nonzero, "expected nonzero Coriolis/centrifugal torque for some (q, qd) sample"
+
+
+@pytest.mark.hardware
+def test_jacobian_mass_and_coriolis_matches_separate_calls(engines) -> None:
+    model, data, site_id, local = engines
+    rng = np.random.default_rng(3)
+    for _ in range(10):
+        q = rng.uniform(-1.0, 1.0, size=6)
+        qd = rng.uniform(-1.0, 1.0, size=6)
+        J_combined, M_combined, C_combined = local.jacobian_mass_and_coriolis(q, qd)
+        J_separate, M_separate = local.jacobian_and_mass_matrix(q)
+        C_separate = local.coriolis(q, qd)
+        np.testing.assert_allclose(J_combined, J_separate, atol=1e-10)
+        np.testing.assert_allclose(M_combined, M_separate, atol=1e-8)
+        np.testing.assert_allclose(C_combined, C_separate, atol=1e-10)
+
+
+@pytest.mark.hardware
+def test_local_coriolis_matches_sim_adapter_mujoco_native_branch(engines) -> None:
+    # Cross-check against simulation.ur5e_mujoco_torque's own MuJoCo-native
+    # Coriolis computation (the algorithm this method was copied from), using
+    # a fresh, independent MjData rather than the sim adapter's scratch data.
+    model, data, site_id, local = engines
+    rng = np.random.default_rng(4)
+    ref_data = mujoco.MjData(model)
+    for _ in range(10):
+        q = rng.uniform(-1.0, 1.0, size=6)
+        qd = rng.uniform(-1.0, 1.0, size=6)
+
+        ref_data.qpos[:6] = q
+        ref_data.qvel[:6] = qd
+        mujoco.mj_forward(model, ref_data)
+        bias_live = np.asarray(ref_data.qfrc_bias, dtype=np.float64)[:6].copy()
+        ref_data.qvel[:6] = 0.0
+        mujoco.mj_forward(model, ref_data)
+        bias_static = np.asarray(ref_data.qfrc_bias, dtype=np.float64)[:6].copy()
+        expected = bias_live - bias_static
+
+        got = local.coriolis(q, qd)
+        np.testing.assert_allclose(got, expected, atol=1e-10)
+
+
+@pytest.mark.hardware
 def test_normalize_dynamics_source() -> None:
     from hardware.local_dynamics import normalize_dynamics_source
 

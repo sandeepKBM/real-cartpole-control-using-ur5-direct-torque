@@ -81,6 +81,17 @@ def parse_args() -> argparse.Namespace:
         default="local",
         help="direct_torque only: rtde=PolyScope J+M; local=MuJoCo J+M from q.",
     )
+    p.add_argument(
+        "--coriolis-feedforward",
+        action="store_true",
+        help=(
+            "direct_torque + dynamics-source=local only. The robot firmware "
+            "auto-compensates gravity but NOT Coriolis/centrifugal forces inside "
+            "directTorque() (confirmed against UR's own docs) -- this adds that "
+            "missing term via MuJoCo. Default off; negligible below ~0.5 rad/s "
+            "joint velocity, matters more for faster moves."
+        ),
+    )
     return p.parse_args()
 
 
@@ -151,6 +162,7 @@ def main() -> int:
             shadow_osc=not args.no_shadow_osc,
             skip_joint_move=bool(args.skip_joint_move),
             start_q_rad=start_q_rad,
+            coriolis_feedforward=bool(args.coriolis_feedforward),
         )
     except (RTDELinkError, ValueError) as exc:
         print(f"RTDE/start-pose failed: {exc}", file=sys.stderr)

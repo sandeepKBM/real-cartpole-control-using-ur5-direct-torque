@@ -65,11 +65,23 @@ def run_x_transport_direct_torque(
     motion_opt_in: bool,
     record_latency: bool = True,
     dynamics_source: str = "rtde",
+    coriolis_feedforward: bool = False,
 ) -> DirectTorqueTransportResult:
     if not motion_opt_in:
         raise ValueError("motion_opt_in must be True for a live direct-torque transport")
 
     dynamics_source = normalize_dynamics_source(dynamics_source)
+    if coriolis_feedforward and dynamics_source != "local":
+        # The robot's own firmware compensates gravity inside directTorque()
+        # (never add that in Python -- see AGENTS.md), but it does NOT
+        # automatically apply Coriolis/centrifugal compensation the way it
+        # does gravity; it only exposes the values for retrieval (confirmed
+        # against Universal Robots' own Direct Torque Control documentation,
+        # 2026-07-26). This flag adds that missing term via
+        # LocalMujocoDynamics.coriolis(), which needs dynamics_source=local's
+        # q/qd -> MuJoCo pipeline; the rtde dynamics_source path has no
+        # equivalent Coriolis getter wired up yet.
+        raise ValueError("coriolis_feedforward requires dynamics_source='local' (rtde path not implemented)")
     local_dynamics = LocalPinocchioDynamics() if dynamics_source == "local" else None
 
     impedance_cfg, safety_cfg, frequency_hz = _load_impedance_bundle(config_path)
@@ -173,8 +185,14 @@ def run_x_transport_direct_torque(
             )
 
             t_jac = monotonic_ns()
+            tau_coriolis = np.zeros(6, dtype=np.float64)
             if local_dynamics is not None:
-                jacobian, mass_matrix = local_dynamics.jacobian_and_mass_matrix(link_state.q)
+                if coriolis_feedforward:
+                    jacobian, mass_matrix, tau_coriolis = local_dynamics.jacobian_mass_and_coriolis(
+                        link_state.q, link_state.qd
+                    )
+                else:
+                    jacobian, mass_matrix = local_dynamics.jacobian_and_mass_matrix(link_state.q)
                 if phases is not None:
                     phases.record("local_dynamics_ns", monotonic_ns() - t_jac)
             else:
@@ -200,7 +218,11 @@ def run_x_transport_direct_torque(
 
             t_ctrl = monotonic_ns()
             output = controller.compute(robot_state)
-            tau = np.asarray(output.tau, dtype=np.float64).reshape(6)
+            tau_controller = np.asarray(output.tau, dtype=np.float64).reshape(6)
+            # tau_coriolis is zeros(6) unless coriolis_feedforward is on -- see
+            # the flag's docstring above. Gravity is deliberately NOT added
+            # here; PolyScope's directTorque() already compensates it.
+            tau = tau_controller + tau_coriolis
             if phases is not None:
                 phases.record("controller_ns", monotonic_ns() - t_ctrl)
 
@@ -277,7 +299,9 @@ def run_x_transport_direct_torque(
                     "target_x": target_x,
                     "x_error": float(output.x_error),
                     "orientation_error_norm": float(output.orientation_error_norm),
-                    "tau_controller": tau.tolist(),
+                    "tau_controller": tau_controller.tolist(),
+                    "tau_coriolis": tau_coriolis.tolist(),
+                    "coriolis_feedforward_active": bool(coriolis_feedforward),
                     "tau_applied": tau.tolist(),
                     "cycle_work_ms": work_ns / 1e6,
                     "lateness_ms": lateness_ns / 1e6,

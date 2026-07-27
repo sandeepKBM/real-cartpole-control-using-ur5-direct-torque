@@ -71,6 +71,7 @@ def run_x_transport(
     skip_joint_move: bool = False,
     record_latency: bool = True,
     start_q_rad: np.ndarray | None = None,
+    coriolis_feedforward: bool = False,
 ) -> XTransportResult:
     mode = normalize_control_mode(control_mode)
     if start_q_rad is not None:
@@ -154,6 +155,7 @@ def run_x_transport(
         motion_opt_in=motion_opt_in,
         record_latency=record_latency,
         dynamics_source=dynamics_source,
+        coriolis_feedforward=coriolis_feedforward,
     )
     return XTransportResult(
         ok=raw_dt.ok,

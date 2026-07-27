@@ -77,6 +77,47 @@ class LocalMujocoDynamics:
         mass_matrix = mass_full[: self.n_joints, : self.n_joints].copy()
         return jacobian, mass_matrix
 
+    def coriolis(self, q: np.ndarray, qd: np.ndarray) -> np.ndarray:
+        """C(q,qd)@qd via qfrc_bias(q,qd) - qfrc_bias(q,0) -- same MuJoCo-native
+        trick as simulation.ur5e_mujoco_torque's non-Pinocchio Coriolis branch
+        (kept consistent since this class computes J/M via MuJoCo too, not
+        Pinocchio, despite the LocalPinocchioDynamics back-compat alias name).
+        """
+        jacobian, mass_matrix, coriolis = self.jacobian_mass_and_coriolis(q, qd)
+        del jacobian, mass_matrix
+        return coriolis
+
+    def jacobian_mass_and_coriolis(
+        self, q: np.ndarray, qd: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """J(q), M(q), and C(q,qd)@qd in one call -- two mj_forward passes
+        (live qvel, then zeroed qvel) instead of three if J/M and Coriolis
+        were each computed via a separate method call."""
+        q_arr = np.asarray(q, dtype=np.float64).reshape(self.n_joints)
+        qd_arr = np.asarray(qd, dtype=np.float64).reshape(self.n_joints)
+
+        self.data.qpos[: self.n_joints] = q_arr
+        self.data.qvel[: self.n_joints] = qd_arr
+        self._mujoco.mj_forward(self.model, self.data)
+
+        jacp = np.zeros((3, self.model.nv), dtype=np.float64)
+        jacr = np.zeros((3, self.model.nv), dtype=np.float64)
+        self._mujoco.mj_jacSite(self.model, self.data, jacp, jacr, self.site_id)
+        jacobian = np.vstack([jacp[:, : self.n_joints], jacr[:, : self.n_joints]]).astype(np.float64)
+
+        from simulation.ur5e_mujoco_torque import expand_mass_matrix
+
+        mass_full = expand_mass_matrix(self.model, self.data)
+        mass_matrix = mass_full[: self.n_joints, : self.n_joints].copy()
+
+        bias_live = np.asarray(self.data.qfrc_bias, dtype=np.float64)[: self.n_joints].copy()
+        self.data.qvel[: self.n_joints] = 0.0
+        self._mujoco.mj_forward(self.model, self.data)
+        bias_static = np.asarray(self.data.qfrc_bias, dtype=np.float64)[: self.n_joints].copy()
+        coriolis = bias_live - bias_static
+
+        return jacobian, mass_matrix, coriolis
+
 
 # Back-compat alias used by transport import.
 LocalPinocchioDynamics = LocalMujocoDynamics
