@@ -10,6 +10,7 @@ small experiments.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import math
 import sys
@@ -143,6 +144,41 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-plot", action="store_true")
+    p.add_argument(
+        "--q-noise-std-rad",
+        type=float,
+        default=0.0,
+        help=(
+            "controller-rollout/x-transport-minjerk only: Gaussian noise std (rad) "
+            "added to q before it reaches the controller (joint-encoder noise proxy). "
+            "The true q used for physics stepping and trace logging is unaffected -- "
+            "this only perturbs what the control law sees. Default 0.0 = no noise, "
+            "byte-identical to before this flag existed."
+        ),
+    )
+    p.add_argument(
+        "--qd-noise-std-radps",
+        type=float,
+        default=0.0,
+        help="Same as --q-noise-std-rad but for qd (rad/s velocity-estimate noise proxy).",
+    )
+    p.add_argument(
+        "--torque-noise-std-nm",
+        type=float,
+        default=0.0,
+        help=(
+            "controller-rollout/x-transport-minjerk only: Gaussian noise std (Nm) added "
+            "to the final torque actually applied to the physics (actuator-imprecision "
+            "proxy). Reflected in the trace's own 'tau' field; 'tau_controller' in the "
+            "trace still reflects the controller's clean, pre-noise output."
+        ),
+    )
+    p.add_argument(
+        "--noise-seed",
+        type=int,
+        default=None,
+        help="Seed for the noise RNG (separate from --seed). Defaults to --seed if unset.",
+    )
     return p.parse_args()
 
 
@@ -552,6 +588,11 @@ def _run_zero_torque_gravity(
 def run() -> int:
     args = parse_args()
     np.random.seed(int(args.seed))
+    noise_seed = int(args.noise_seed) if args.noise_seed is not None else int(args.seed)
+    noise_rng = np.random.default_rng(noise_seed)
+    q_noise_std = max(float(args.q_noise_std_rad), 0.0)
+    qd_noise_std = max(float(args.qd_noise_std_radps), 0.0)
+    torque_noise_std = max(float(args.torque_noise_std_nm), 0.0)
 
     cfg = _load_yaml(args.config)
     mujoco_cfg = cfg["mujoco"]
@@ -733,17 +774,44 @@ def run() -> int:
                 gravity_compensation=bool(gravity_mode == "gravity_comp"),
             )
 
+            # Sensor-noise proxy (default off = identical to pre_state): the
+            # controller sees q/qd perturbed by Gaussian noise, but the TRUE
+            # pre_state (used for mj_step physics and trace ground truth) is
+            # untouched. Only the joint-space terms that read st["q"]/st["qd"]
+            # directly (tau_damping, tau_posture, and J@qd-derived
+            # ee_lin_vel/ee_ang_vel) are affected -- ee_pos/ee_quat here still
+            # come from the true state, so the task-space x/y/z/orientation
+            # error terms are not perturbed by this flag. See --q-noise-std-rad
+            # / --qd-noise-std-radps help text.
+            controller_state = pre_state
+            if q_noise_std > 0.0 or qd_noise_std > 0.0:
+                controller_state = dataclasses.replace(
+                    pre_state,
+                    q=pre_state.q + (noise_rng.normal(0.0, q_noise_std, size=6) if q_noise_std > 0.0 else 0.0),
+                    qd=pre_state.qd + (noise_rng.normal(0.0, qd_noise_std, size=6) if qd_noise_std > 0.0 else 0.0),
+                )
+
             if args.mode in ("single-joint-pulse", "constant-small-torque", "sinusoidal-torque", "safety-clipping"):
                 tau_raw = _direct_torque_profile(args.mode, args, float(data.time))
                 tau, diag = adapter.apply_torque_components(
-                    state=pre_state,
+                    state=controller_state,
                     tau_controller=tau_raw,
                     controller_diag={"controller_kind": "direct_torque_profile", "controller_output": {"mode": args.mode, "tau_raw": tau_raw.tolist()}},
                 )
             elif args.mode == "gravity-comp-hold":
-                tau, diag = adapter.step(state=pre_state)
+                tau, diag = adapter.step(state=controller_state)
             else:
-                tau, diag = adapter.step(state=pre_state)
+                tau, diag = adapter.step(state=controller_state)
+
+            # Actuator-noise proxy (default off = tau unchanged): perturbs the
+            # torque actually applied to the physics below. diag's own
+            # tau_controller/tau_applied breakdown still reflects the
+            # controller's clean, pre-noise output -- only this local `tau`
+            # (which becomes data.ctrl and the trace's own "tau" field) is
+            # affected, so the trace can show both the clean controller
+            # decision and the noisy applied result.
+            if torque_noise_std > 0.0:
+                tau = np.asarray(tau, dtype=np.float64).reshape(6) + noise_rng.normal(0.0, torque_noise_std, size=6)
 
             clip_observed = clip_observed or bool(np.any(np.asarray(diag.get("tau_saturated", []), dtype=bool)))
             if not bool(diag.get("safety_ok", True)):
