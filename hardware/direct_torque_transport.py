@@ -66,6 +66,7 @@ def run_x_transport_direct_torque(
     record_latency: bool = True,
     dynamics_source: str = "rtde",
     coriolis_feedforward: bool = False,
+    gain_overrides: dict[str, float] | None = None,
 ) -> DirectTorqueTransportResult:
     if not motion_opt_in:
         raise ValueError("motion_opt_in must be True for a live direct-torque transport")
@@ -98,6 +99,11 @@ def run_x_transport_direct_torque(
         raise ValueError("move_duration_s must not exceed duration_s")
 
     controller = XAxisCartesianImpedanceController(impedance_cfg)
+    if gain_overrides:
+        # Validated (unknown-field / non-finite rejection) and applied before
+        # link.connect() -- fail on a bad override dict before ever touching
+        # the robot, not mid-run.
+        controller.set_gains(gain_overrides)
     safety = ImpedanceSafetyMonitor(safety_cfg)
     estop = EStopLatch()
     tracker = TimingTracker(frequency_hz)
@@ -327,6 +333,7 @@ def run_x_transport_direct_torque(
     summary = {
         "backend": "ursim_rtde_direct_torque",
         "config_path": str(config_path),
+        "gain_overrides": dict(gain_overrides) if gain_overrides else {},
         "target_x_delta": float(target_x_delta_m),
         "target_x_delta_m": float(target_x_delta_m),
         "move_duration_s": move_duration_s,

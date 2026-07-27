@@ -72,6 +72,7 @@ def run_x_transport(
     record_latency: bool = True,
     start_q_rad: np.ndarray | None = None,
     coriolis_feedforward: bool = False,
+    gain_overrides: dict[str, float] | None = None,
 ) -> XTransportResult:
     mode = normalize_control_mode(control_mode)
     if start_q_rad is not None:
@@ -156,6 +157,7 @@ def run_x_transport(
         record_latency=record_latency,
         dynamics_source=dynamics_source,
         coriolis_feedforward=coriolis_feedforward,
+        gain_overrides=gain_overrides,
     )
     return XTransportResult(
         ok=raw_dt.ok,

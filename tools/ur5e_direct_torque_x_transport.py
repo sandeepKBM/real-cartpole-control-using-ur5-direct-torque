@@ -39,9 +39,27 @@ from hardware.dashboard import power_on_and_release, query_remote_control  # noq
 from hardware.direct_torque_link import UR5eDirectTorqueLink  # noqa: E402
 from hardware.link import RTDELinkError, UR5eLink  # noqa: E402
 from hardware.x_transport import run_x_transport  # noqa: E402
+from transport_metrics import GAIN_FIELDS  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = REPO_ROOT / "config" / "ur5e_mujoco_torque_osc_tuned.yaml"
+
+
+def _normalize_gain_overrides(raw: str) -> dict[str, float]:
+    """Same convention as tools/ur5e_move_hold_transport.py's sim-side helper:
+    ``raw`` is either a path to a JSON file or an inline JSON object string.
+    Unknown keys are silently dropped, matching that tool -- only the 11
+    schedulable gain fields are ever valid overrides."""
+    path = Path(raw)
+    text = path.read_text(encoding="utf-8") if path.exists() else raw
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("--gain-overrides-json must decode to a JSON object")
+    overrides: dict[str, float] = {}
+    for key, value in payload.items():
+        if key in GAIN_FIELDS:
+            overrides[key] = float(value)
+    return overrides
 
 
 def parse_args() -> argparse.Namespace:
@@ -80,6 +98,16 @@ def parse_args() -> argparse.Namespace:
         choices=("rtde", "local"),
         default="local",
         help="direct_torque only: rtde=PolyScope J+M; local=MuJoCo J+M from q.",
+    )
+    p.add_argument(
+        "--gain-overrides-json",
+        default=None,
+        help=(
+            "direct_torque only. Path to a JSON file or an inline JSON object of "
+            "gain overrides (same 11 fields as controller_core's schedulable "
+            "gains), applied via controller.set_gains() before the robot moves. "
+            "For live retuning between trials without editing --config."
+        ),
     )
     p.add_argument(
         "--coriolis-feedforward",
@@ -148,6 +176,13 @@ def main() -> int:
 
     output_dir = args.output_dir or _default_output_dir(str(args.control_mode))
     start_q_rad = None if args.start_q_rad is None else np.asarray(args.start_q_rad, dtype=np.float64)
+    gain_overrides = None
+    if args.gain_overrides_json is not None:
+        try:
+            gain_overrides = _normalize_gain_overrides(args.gain_overrides_json)
+        except (ValueError, json.JSONDecodeError) as exc:
+            print(f"--gain-overrides-json invalid: {exc}", file=sys.stderr)
+            return 2
     try:
         result = run_x_transport(
             control_mode=str(args.control_mode),
@@ -163,6 +198,7 @@ def main() -> int:
             skip_joint_move=bool(args.skip_joint_move),
             start_q_rad=start_q_rad,
             coriolis_feedforward=bool(args.coriolis_feedforward),
+            gain_overrides=gain_overrides,
         )
     except (RTDELinkError, ValueError) as exc:
         print(f"RTDE/start-pose failed: {exc}", file=sys.stderr)
