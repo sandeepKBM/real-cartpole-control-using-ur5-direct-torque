@@ -1,0 +1,127 @@
+# Smoke-test config for domain-randomization noise (env.noise.*) -- copy of
+# config/rl_gain_scheduling.yaml (preserved unmodified) with a noise block added.
+# Not for real training, only for exercising the noise-injection code path.
+controller:
+  gains:
+    kd_joint: 4.0
+    kd_posture: 6.0
+    kd_rot: 10.0
+    kd_x: 40.0
+    kd_y: 15.0
+    kd_z: 20.0
+    kp_posture: 25.0
+    kp_rot: 0.0
+    kp_x: 400.0
+    kp_y: 80.0
+    kp_z: 120.0
+  lambda_regularization: 0.1
+  nullspace_posture: true
+  posture_reanchor_on_settle: true
+  safety:
+    max_abs_orthogonal_drift_m: 0.03
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_joint_velocity_radps: 3.0
+    max_orientation_error_rad: 0.35
+  task_resample_factor: 0.5
+  task_resample_max_iters: 14
+  task_resample_min_scale: 0.0001
+  task_space_inertia_shaping: true
+  torque_headroom: 0.9
+  torque_limits_after_stable:
+    elbow_joint: 150.0
+    shoulder_lift_joint: 150.0
+    shoulder_pan_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_initial:
+    elbow_joint: 150.0
+    shoulder_lift_joint: 150.0
+    shoulder_pan_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_mode: initial
+env:
+  control_decimation_steps: 1
+  full_trace_logging: false
+  gain_bounds:
+    kd_joint:
+    - 0.0
+    - 16.0
+    kd_posture:
+    - 0.0
+    - 24.0
+    kd_rot:
+    - 0.0
+    - 40.0
+    kd_x:
+    - 0.0
+    - 80.0
+    kd_y:
+    - 0.0
+    - 30.0
+    kd_z:
+    - 0.0
+    - 40.0
+    kp_posture:
+    - 0.0
+    - 100.0
+    kp_rot:
+    - 0.0
+    - 30.0
+    kp_x:
+    - 0.0
+    - 800.0
+    kp_y:
+    - 0.0
+    - 160.0
+    kp_z:
+    - 0.0
+    - 240.0
+  height_alpha_range:
+  - 0.0
+  - 1.0
+  hold_duration_s: 2.0
+  max_episode_seconds: 3.0
+  move_duration_s: 1.0
+  noise:
+    noise_seed: 1
+    q_noise_std_rad: 0.02
+    qd_noise_std_radps: 0.02
+    torque_noise_std_nm: 1.0
+  record_lightweight_trace: true
+  target_x_delta_range_m:
+  - -0.2
+  - 0.2
+mujoco:
+  coriolis_feedforward: true
+  gravity_source: pinocchio
+  scene_xml: assets/ur5e_torque/scene.xml
+reward:
+  alive_bonus: 0.5
+  gain_smooth_weight: 0.01
+  orientation_weight: 5.0
+  terminal_quality_weight: 50.0
+  terminal_safety_penalty: -25.0
+  torque_smooth_weight: 0.001
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+training:
+  batch_size: 64
+  clip_range: 0.2
+  device: cpu
+  gae_lambda: 0.95
+  gamma: 0.99
+  learning_rate: 0.0003
+  n_envs: 1
+  n_epochs: 10
+  n_steps: 1024
+  net_arch:
+  - 128
+  - 128
+  policy: MlpPolicy
+  seed: 0
+  total_timesteps: 200000

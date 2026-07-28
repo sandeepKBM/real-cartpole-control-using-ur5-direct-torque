@@ -165,6 +165,82 @@ def test_move_phase_disturbance_scale_only_applies_during_move(tmp_path: Path):
     assert saw_hold_phase_unscaled, f"episode never reached the hold phase (move_duration_s={move_duration_s})"
 
 
+def _config_with_env_overrides(tmp_path: Path, **env_overrides) -> Path:
+    import yaml
+
+    repo_root = Path(__file__).resolve().parents[2]
+    cfg = yaml.safe_load((repo_root / "config" / "rl_gain_scheduling.yaml").read_text(encoding="utf-8"))
+    cfg["env"].update(env_overrides)
+    out = tmp_path / "env_override.yaml"
+    out.write_text(yaml.dump(cfg), encoding="utf-8")
+    return out
+
+
+def _run_fixed_action(env, n_steps, action=None):
+    env.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    if action is None:
+        action = gains_to_normalized_action(
+            {
+                "kp_x": 400.0, "kd_x": 40.0, "kp_y": 80.0, "kd_y": 15.0, "kp_z": 120.0, "kd_z": 20.0,
+                "kp_rot": 0.0, "kd_rot": 10.0, "kp_posture": 25.0, "kd_posture": 6.0, "kd_joint": 4.0,
+            },
+            env._gain_bounds,
+        )
+    rows = []
+    for _ in range(n_steps):
+        obs, reward, terminated, truncated, info = env.step(action)
+        rows.append({"q": env.data.qpos[:6].copy(), "tau": env._prev_tau.copy()})
+        if terminated or truncated:
+            break
+    return rows
+
+
+def test_noise_zero_matches_no_noise_config(tmp_path: Path):
+    cfg_zero = _config_with_env_overrides(
+        tmp_path, noise={"q_noise_std_rad": 0.0, "qd_noise_std_radps": 0.0, "torque_noise_std_nm": 0.0}
+    )
+    env_default = GainSchedulingEnv()
+    env_zero = GainSchedulingEnv(config_path=cfg_zero)
+    rows_default = _run_fixed_action(env_default, 300)
+    rows_zero = _run_fixed_action(env_zero, 300)
+    assert len(rows_default) == len(rows_zero)
+    for a, b in zip(rows_default, rows_zero):
+        np.testing.assert_allclose(a["q"], b["q"], atol=1e-12)
+        np.testing.assert_allclose(a["tau"], b["tau"], atol=1e-12)
+
+
+def test_q_noise_perturbs_trajectory(tmp_path: Path):
+    cfg_noisy = _config_with_env_overrides(tmp_path, noise={"q_noise_std_rad": 0.05, "noise_seed": 3})
+    env_default = GainSchedulingEnv()
+    env_noisy = GainSchedulingEnv(config_path=cfg_noisy)
+    rows_default = _run_fixed_action(env_default, 300)
+    rows_noisy = _run_fixed_action(env_noisy, 300)
+    assert not np.allclose(rows_default[-1]["q"], rows_noisy[-1]["q"]), "q noise should perturb the trajectory"
+
+
+def test_torque_noise_changes_tau_but_not_controller_state(tmp_path: Path):
+    cfg_noisy = _config_with_env_overrides(tmp_path, noise={"torque_noise_std_nm": 3.0, "noise_seed": 4})
+    env_default = GainSchedulingEnv()
+    env_noisy = GainSchedulingEnv(config_path=cfg_noisy)
+    rows_default = _run_fixed_action(env_default, 50)
+    rows_noisy = _run_fixed_action(env_noisy, 50)
+    taus_differ = any(
+        not np.allclose(a["tau"], b["tau"], atol=1e-9) for a, b in zip(rows_default, rows_noisy)
+    )
+    assert taus_differ, "torque noise should measurably change the applied tau"
+
+
+def test_noise_seed_reproducible(tmp_path: Path):
+    cfg_noisy = _config_with_env_overrides(
+        tmp_path, noise={"q_noise_std_rad": 0.02, "torque_noise_std_nm": 1.0, "noise_seed": 42}
+    )
+    env_a = GainSchedulingEnv(config_path=cfg_noisy)
+    env_b = GainSchedulingEnv(config_path=cfg_noisy)
+    rows_a = _run_fixed_action(env_a, 200)
+    rows_b = _run_fixed_action(env_b, 200)
+    np.testing.assert_allclose(rows_a[-1]["q"], rows_b[-1]["q"], atol=1e-12)
+
+
 def test_env_safety_termination_reports_reason():
     env = GainSchedulingEnv()
     env.reset(seed=0, options={"height_alpha": 0.0, "target_x_delta": 0.03})

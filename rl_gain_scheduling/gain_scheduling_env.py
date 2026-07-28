@@ -13,6 +13,7 @@ One env.step() == one mujoco.mj_step() at the model's native rate (500Hz).
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 from pathlib import Path
 from typing import Any
@@ -109,6 +110,19 @@ class GainSchedulingEnv(gym.Env):
         self._max_episode_seconds = float(self._env_cfg["max_episode_seconds"])
         self._record_lightweight_trace = bool(self._env_cfg.get("record_lightweight_trace", True))
         self._full_trace_logging = bool(self._env_cfg.get("full_trace_logging", False))
+
+        # Domain-randomization noise (default all-zero = byte-identical to
+        # before this existed). Mirrors tools/ur5e_mujoco_torque_experiments.py's
+        # --q-noise-std-rad/--qd-noise-std-radps/--torque-noise-std-nm exactly:
+        # q/qd noise perturbs only what the CONTROLLER sees (not the true
+        # physics state used for mj_step/trace ground truth); torque noise
+        # perturbs the final torque actually applied, downstream of the
+        # controller's own clean diagnostic output.
+        noise_cfg = self._env_cfg.get("noise", {}) or {}
+        self._q_noise_std = max(float(noise_cfg.get("q_noise_std_rad", 0.0)), 0.0)
+        self._qd_noise_std = max(float(noise_cfg.get("qd_noise_std_radps", 0.0)), 0.0)
+        self._torque_noise_std = max(float(noise_cfg.get("torque_noise_std_nm", 0.0)), 0.0)
+        self._noise_rng = np.random.default_rng(int(noise_cfg.get("noise_seed", 0)))
 
         scene_xml = REPO_ROOT / self._mujoco_cfg["scene_xml"]
         self.model, self.data, self.site_id, self.joint_ids, self.actuator_ids = load_model(scene_xml)
@@ -250,7 +264,16 @@ class GainSchedulingEnv(gym.Env):
             transport_axis_index=0,
             gravity_compensation=True,
         )
-        tau, diag = self.adapter.step(state=pre_state)
+        controller_state = pre_state
+        if self._q_noise_std > 0.0 or self._qd_noise_std > 0.0:
+            controller_state = dataclasses.replace(
+                pre_state,
+                q=pre_state.q + (self._noise_rng.normal(0.0, self._q_noise_std, size=6) if self._q_noise_std > 0.0 else 0.0),
+                qd=pre_state.qd + (self._noise_rng.normal(0.0, self._qd_noise_std, size=6) if self._qd_noise_std > 0.0 else 0.0),
+            )
+        tau, diag = self.adapter.step(state=controller_state)
+        if self._torque_noise_std > 0.0:
+            tau = np.asarray(tau, dtype=np.float64).reshape(6) + self._noise_rng.normal(0.0, self._torque_noise_std, size=6)
         self.data.ctrl[:6] = np.asarray(tau, dtype=np.float64).reshape(6)
         mujoco.mj_step(self.model, self.data)
         self._step_count += 1
