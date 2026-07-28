@@ -1,0 +1,22 @@
+{
+  "context": "10s stationary RTDE noise capture via tools/ur5e_capture_state_noise.py, robot held still (no motion command) at height_alpha=0.5, wrist_2=0.1 pose, robot 172.16.71.77.",
+  "raw_file_on_thinkrobot": "/home/ros2humble/real-cartpole-control-using-ur5-direct-torque/outputs/hardware_state_noise/capture_20260728_154018.jsonl",
+  "note": "Raw JSONL (4730 rows) not copied here -- outputs/ on thinkrobot, gitignored on this repo's convention too, and too large to paste into chat. Only the printed summary statistics are captured below. If exact-row-level analysis is ever needed, re-fetch the raw file from thinkrobot directly.",
+  "samples": 4730,
+  "duration_s": 10.0,
+  "frequency_hz": 500.0,
+  "stats": {
+    "q_std_rad_per_joint": [1.695e-05, 1.153e-05, 1.638e-05, 1.098e-05, 1.143e-05, 1.366e-05],
+    "q_std_rad_max": 1.695e-05,
+    "qd_std_radps_per_joint": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "qd_std_radps_max": 0.0,
+    "tcp_pos_std_m": [8.88e-06, 9.86e-06, 3.25e-06],
+    "tcp_rot_std_rad": [3.086e-05, 1.417e-05, 2.248e-05]
+  },
+  "comparison_to_sim_noise_config": {
+    "config/rl_gain_scheduling_noise_smoke.yaml": {"q_noise_std_rad": 0.02, "qd_noise_std_radps": 0.02},
+    "ratio_sim_to_real_q": "0.02 / 1.695e-05 ~= 1180x -- the smoke-test config's q noise is ~1180x larger than real measured stationary RTDE telemetry jitter.",
+    "qd_note": "Real qd_std reads exactly 0.0 while stationary -- RTDE's qd estimate appears to report exactly zero below some internal deadband/filter threshold at rest, not directly comparable to the sim's 0.02 rad/s qd_noise_std_radps value. This capture cannot characterize qd noise DURING motion, only at rest."
+  },
+  "caveat": "This measures pure sensor/telemetry noise with the robot stationary and NOT under active torque control. It does not capture: (a) noise/disturbance during active motion (cable vibration, motor cogging, control-loop-induced jitter -- likely larger than at-rest noise), or (b) the broader sim-to-real reality gap domain-randomization noise is often deliberately sized to cover (unmodeled friction, backlash, latency, dynamics mismatch), which is a different and usually larger quantity than pure sensor noise. This capture is a real lower-bound reference point for sensor noise specifically, not necessarily the value that should replace the domain-randomization noise config as-is -- that's a modeling decision, not a mechanical substitution."
+}
