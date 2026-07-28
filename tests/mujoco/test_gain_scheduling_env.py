@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from rl_gain_scheduling.gain_scheduling_env import (  # noqa: E402
     ACTION_DIM,
     OBS_DIM,
+    RESIDUAL_ACTION_DIM,
     GainSchedulingEnv,
     gains_to_normalized_action,
     rescale_action_to_gains,
@@ -239,6 +240,97 @@ def test_noise_seed_reproducible(tmp_path: Path):
     rows_a = _run_fixed_action(env_a, 200)
     rows_b = _run_fixed_action(env_b, 200)
     np.testing.assert_allclose(rows_a[-1]["q"], rows_b[-1]["q"], atol=1e-12)
+
+
+_FIXED_TUNED_GAINS = {
+    "kp_x": 400.0, "kd_x": 40.0, "kp_y": 80.0, "kd_y": 15.0, "kp_z": 120.0, "kd_z": 20.0,
+    "kp_rot": 0.0, "kd_rot": 10.0, "kp_posture": 25.0, "kd_posture": 6.0, "kd_joint": 4.0,
+}
+
+
+def _residual_torque_config(tmp_path: Path, *, max_nm=None, name="residual_override.yaml") -> Path:
+    import yaml
+
+    repo_root = Path(__file__).resolve().parents[2]
+    cfg = yaml.safe_load((repo_root / "config" / "rl_gain_scheduling.yaml").read_text(encoding="utf-8"))
+    cfg["env"]["action_mode"] = "residual_torque"
+    cfg["env"]["residual_torque"] = {
+        "fixed_gains": dict(_FIXED_TUNED_GAINS),
+        "max_nm": max_nm if max_nm is not None else [5.0, 5.0, 5.0, 2.0, 2.0, 2.0],
+    }
+    out = tmp_path / name
+    out.write_text(yaml.dump(cfg), encoding="utf-8")
+    return out
+
+
+def test_residual_torque_action_mode_default_matches_gains_mode():
+    # Config without env.action_mode behaves exactly as before this feature
+    # existed: "gains" mode, 11-dim action space.
+    env = GainSchedulingEnv()
+    assert env._action_mode == "gains"
+    assert env.action_space.shape == (ACTION_DIM,)
+    obs, info = env.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    assert obs.shape == (OBS_DIM,)
+    action = gains_to_normalized_action(_FIXED_TUNED_GAINS, env._gain_bounds)
+    obs, reward, terminated, truncated, info = env.step(action)
+    assert obs.shape == (OBS_DIM,)
+
+
+def test_residual_torque_action_space_is_6dim(tmp_path: Path):
+    cfg_path = _residual_torque_config(tmp_path)
+    env = GainSchedulingEnv(config_path=cfg_path)
+    assert env.action_space.shape == (RESIDUAL_ACTION_DIM,)
+    obs, info = env.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    # obs stays fixed at 47 regardless of action_mode (zero-padded prev-action
+    # block keeps the observation contract identical across modes).
+    assert obs.shape == (OBS_DIM,)
+
+
+def test_residual_torque_changes_applied_torque_but_not_tau_controller(tmp_path: Path):
+    cfg_path = _residual_torque_config(tmp_path)
+
+    env_zero = GainSchedulingEnv(config_path=cfg_path)
+    env_zero.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    env_zero.step(np.zeros(RESIDUAL_ACTION_DIM, dtype=np.float32))
+    row_zero = env_zero._lightweight_trace[-1]
+
+    env_nonzero = GainSchedulingEnv(config_path=cfg_path)
+    env_nonzero.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    env_nonzero.step(np.full(RESIDUAL_ACTION_DIM, 0.8, dtype=np.float32))
+    row_nonzero = env_nonzero._lightweight_trace[-1]
+
+    # The action doesn't feed the base controller at all in residual mode --
+    # only the residual added on top of its output -- so tau_controller
+    # (the controller's own clean value) should match between the two runs.
+    np.testing.assert_allclose(row_zero["tau_controller"], row_nonzero["tau_controller"], atol=1e-9)
+    assert not np.allclose(row_zero["tau_total"], row_nonzero["tau_total"], atol=1e-9)
+    assert not np.allclose(row_nonzero["residual_tau"], [0.0] * 6, atol=1e-9)
+    assert np.allclose(row_zero["residual_tau"], [0.0] * 6, atol=1e-9)
+
+
+def test_residual_torque_respects_max_nm_clip(tmp_path: Path):
+    # Deliberately larger than the wrist joints' 28 Nm torque_limits_initial,
+    # so an unclipped residual would exceed them.
+    cfg_path = _residual_torque_config(tmp_path, max_nm=[100.0] * 6)
+    env = GainSchedulingEnv(config_path=cfg_path)
+    env.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    action = np.ones(RESIDUAL_ACTION_DIM, dtype=np.float32)
+    env.step(action)
+    tau_total = np.asarray(env._prev_tau, dtype=np.float64)
+    assert np.all(np.abs(tau_total) <= env.adapter.torque_limit_nm + 1e-6)
+
+
+def test_residual_torque_requires_explicit_max_nm(tmp_path: Path):
+    import yaml
+
+    repo_root = Path(__file__).resolve().parents[2]
+    cfg = yaml.safe_load((repo_root / "config" / "rl_gain_scheduling.yaml").read_text(encoding="utf-8"))
+    cfg["env"]["action_mode"] = "residual_torque"
+    cfg["env"]["residual_torque"] = {"fixed_gains": dict(_FIXED_TUNED_GAINS)}  # max_nm omitted on purpose
+    out = tmp_path / "residual_missing_max_nm.yaml"
+    out.write_text(yaml.dump(cfg), encoding="utf-8")
+    with pytest.raises(ValueError):
+        GainSchedulingEnv(config_path=out)
 
 
 def test_env_safety_termination_reports_reason():

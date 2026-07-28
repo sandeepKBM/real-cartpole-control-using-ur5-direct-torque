@@ -51,6 +51,7 @@ LOWER_B_Q = np.array([0.0, -0.1, -2.4, -0.4, 0.0, 0.0], dtype=np.float64)
 
 OBS_DIM = 47
 ACTION_DIM = len(GAIN_FIELDS)
+RESIDUAL_ACTION_DIM = 6
 
 
 def rescale_action_to_gains(action: np.ndarray, gain_bounds: dict[str, tuple[float, float]]) -> dict[str, float]:
@@ -73,6 +74,13 @@ def gains_to_normalized_action(gains: dict[str, float], gain_bounds: dict[str, t
         frac = (float(gains[name]) - lo) / span
         out[i] = float(np.clip(frac * 2.0 - 1.0, -1.0, 1.0))
     return out
+
+
+def rescale_action_to_residual_tau(action: np.ndarray, max_nm: np.ndarray) -> np.ndarray:
+    """Map an action in [-1, 1]^6 to a signed residual torque in Nm (linear, no [0,1] remap)."""
+    action = np.clip(np.asarray(action, dtype=np.float64).reshape(RESIDUAL_ACTION_DIM), -1.0, 1.0)
+    max_nm = np.asarray(max_nm, dtype=np.float64).reshape(RESIDUAL_ACTION_DIM)
+    return action * max_nm
 
 
 class GainSchedulingEnv(gym.Env):
@@ -124,18 +132,47 @@ class GainSchedulingEnv(gym.Env):
         self._torque_noise_std = max(float(noise_cfg.get("torque_noise_std_nm", 0.0)), 0.0)
         self._noise_rng = np.random.default_rng(int(noise_cfg.get("noise_seed", 0)))
 
+        # Action mode (default "gains" = today's exact behavior, byte-identical):
+        # "gains" -- policy outputs the 11 Cartesian-impedance gains every step
+        # (original design). "residual_torque" -- gains are fixed for the whole
+        # episode (set once in reset()) and the policy instead outputs a small
+        # signed 6-dim torque correction added on top of the controller's own
+        # output, mirroring how tau_coriolis/tau_gravity already get added
+        # externally elsewhere in this codebase.
+        self._action_mode = str(self._env_cfg.get("action_mode", "gains"))
+        if self._action_mode not in ("gains", "residual_torque"):
+            raise ValueError(f"config.env.action_mode must be 'gains' or 'residual_torque', got {self._action_mode!r}")
+        self._residual_fixed_gains: dict[str, float] | None = None
+        self._residual_max_nm: np.ndarray | None = None
+        if self._action_mode == "residual_torque":
+            residual_cfg = self._env_cfg.get("residual_torque")
+            if residual_cfg is None:
+                raise ValueError("config.env.action_mode == 'residual_torque' requires config.env.residual_torque")
+            fixed_gains_cfg = residual_cfg.get("fixed_gains")
+            if fixed_gains_cfg is None:
+                raise ValueError("config.env.residual_torque.fixed_gains is required in residual_torque mode")
+            self._residual_fixed_gains = {name: float(fixed_gains_cfg[name]) for name in GAIN_FIELDS}
+            # No implicit default: an unbounded residual added on top of the
+            # controller's own (already shaped/clipped) output must be a
+            # deliberate, explicit choice, not a silently-guessed magnitude.
+            max_nm_cfg = residual_cfg.get("max_nm")
+            if max_nm_cfg is None:
+                raise ValueError("config.env.residual_torque.max_nm is required in residual_torque mode")
+            self._residual_max_nm = np.asarray(max_nm_cfg, dtype=np.float64).reshape(RESIDUAL_ACTION_DIM)
+        self._action_dim = RESIDUAL_ACTION_DIM if self._action_mode == "residual_torque" else ACTION_DIM
+
         scene_xml = REPO_ROOT / self._mujoco_cfg["scene_xml"]
         self.model, self.data, self.site_id, self.joint_ids, self.actuator_ids = load_model(scene_xml)
         self._max_episode_steps = max(1, round(self._max_episode_seconds / float(self.model.opt.timestep)))
 
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(OBS_DIM,), dtype=np.float32)
-        self.action_space = spaces.Box(-1.0, 1.0, shape=(ACTION_DIM,), dtype=np.float32)
+        self.action_space = spaces.Box(-1.0, 1.0, shape=(self._action_dim,), dtype=np.float32)
 
         self.adapter = None
         self._state0 = None
         self._hold_current_pose_flag = False
         self._step_count = 0
-        self._prev_action = np.zeros(ACTION_DIM, dtype=np.float32)
+        self._prev_action = np.zeros(self._action_dim, dtype=np.float32)
         self._prev_tau = np.zeros(6, dtype=np.float64)
         self._prev_abs_x_error = 0.0
         self._alpha = 0.0
@@ -203,8 +240,13 @@ class GainSchedulingEnv(gym.Env):
         self.adapter = adapter
         self._state0 = state0
         self._hold_current_pose_flag = bool(state0.hold_current_pose)
+        if self._action_mode == "residual_torque":
+            # Gains are static for the whole episode in this mode -- set once
+            # here, never overwritten in step() (unlike "gains" mode, where
+            # the policy schedules them every step).
+            self.adapter.controller.set_gains(self._residual_fixed_gains)
         self._step_count = 0
-        self._prev_action = np.zeros(ACTION_DIM, dtype=np.float32)
+        self._prev_action = np.zeros(self._action_dim, dtype=np.float32)
         self._prev_tau = np.zeros(6, dtype=np.float64)
         # True x_error at t=0 is ~0 for this min-jerk profile (target starts at
         # the current position), so 0.0 here is the correct "previous error"
@@ -236,9 +278,14 @@ class GainSchedulingEnv(gym.Env):
 
     def step(self, action: np.ndarray):
         assert self.adapter is not None and self._state0 is not None, "reset() must be called before step()"
-        action = np.clip(np.asarray(action, dtype=np.float64).reshape(ACTION_DIM), -1.0, 1.0)
-        gains = rescale_action_to_gains(action, self._gain_bounds)
-        self.adapter.controller.set_gains(gains)
+        action = np.clip(np.asarray(action, dtype=np.float64).reshape(self._action_dim), -1.0, 1.0)
+        if self._action_mode == "gains":
+            gains = rescale_action_to_gains(action, self._gain_bounds)
+            self.adapter.controller.set_gains(gains)
+        else:
+            # Fixed gains, set once in reset() -- action here is a torque
+            # correction, not a gain schedule.
+            gains = self._residual_fixed_gains
 
         t_s = float(self.data.time)
         target_x_now, target_x_vel_now = x_profile_target(
@@ -272,9 +319,18 @@ class GainSchedulingEnv(gym.Env):
                 qd=pre_state.qd + (self._noise_rng.normal(0.0, self._qd_noise_std, size=6) if self._qd_noise_std > 0.0 else 0.0),
             )
         tau, diag = self.adapter.step(state=controller_state)
+        tau = np.asarray(tau, dtype=np.float64).reshape(6)
+        residual_tau = None
+        if self._action_mode == "residual_torque":
+            residual_tau = rescale_action_to_residual_tau(action, self._residual_max_nm)
+            # Re-clip to the configured joint torque limits: adapter.step()
+            # already shaped/clipped its own output before returning, and an
+            # unbounded residual added on top can otherwise exceed those
+            # limits.
+            tau = np.clip(tau + residual_tau, -self.adapter.torque_limit_nm, self.adapter.torque_limit_nm)
         if self._torque_noise_std > 0.0:
-            tau = np.asarray(tau, dtype=np.float64).reshape(6) + self._noise_rng.normal(0.0, self._torque_noise_std, size=6)
-        self.data.ctrl[:6] = np.asarray(tau, dtype=np.float64).reshape(6)
+            tau = tau + self._noise_rng.normal(0.0, self._torque_noise_std, size=6)
+        self.data.ctrl[:6] = tau
         mujoco.mj_step(self.model, self.data)
         self._step_count += 1
 
@@ -350,6 +406,12 @@ class GainSchedulingEnv(gym.Env):
                 "tau_controller": tau_controller.tolist(),
                 "tau_applied": tau_applied.tolist(),
                 "tau": np.asarray(tau, dtype=np.float64).tolist(),
+                # "tau_total" duplicates "tau" (the actually-applied sum) in
+                # both modes -- kept as an explicit named field for
+                # trace-schema continuity with "tau_controller" and
+                # "residual_tau" in residual_torque mode.
+                "tau_total": np.asarray(tau, dtype=np.float64).tolist(),
+                "residual_tau": (residual_tau.tolist() if residual_tau is not None else [0.0] * 6),
                 "gains": {name: float(gains[name]) for name in GAIN_FIELDS},
             }
             if self._record_lightweight_trace:
@@ -389,6 +451,21 @@ class GainSchedulingEnv(gym.Env):
 
     # -- helpers -----------------------------------------------------------
 
+    def _padded_prev_action_for_obs(self) -> np.ndarray:
+        """self._prev_action, zero-padded to ACTION_DIM (11) for the obs vector.
+
+        OBS_DIM is a fixed 47 regardless of action_mode, so residual_torque
+        mode's 6-dim actions occupy the first 6 slots of the same 11-wide
+        "previous action" observation block gains mode fills completely --
+        keeps _build_obs_and_info's shape assertion and OBS_DIM constant
+        unchanged across both modes.
+        """
+        if self._action_dim == ACTION_DIM:
+            return self._prev_action
+        padded = np.zeros(ACTION_DIM, dtype=np.float32)
+        padded[: self._prev_action.shape[0]] = self._prev_action
+        return padded
+
     def _build_obs_and_info(
         self, *, ee_pos, ee_quat, q, qd, ee_lin_vel, ee_ang_vel, x_error, y_error, z_error, orientation_error_norm,
     ) -> tuple[np.ndarray, dict[str, Any]]:
@@ -411,7 +488,7 @@ class GainSchedulingEnv(gym.Env):
             [elapsed / max(self._max_episode_seconds, 1e-9)],
             [move_phase_indicator],
             [self._target_x_delta],
-            self._prev_action,
+            self._padded_prev_action_for_obs(),
         ]).astype(np.float32)
         assert obs.shape == (OBS_DIM,), f"obs shape {obs.shape} != ({OBS_DIM},)"
         return obs, {}
