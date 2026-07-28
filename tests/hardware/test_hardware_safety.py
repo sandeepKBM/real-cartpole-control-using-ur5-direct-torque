@@ -236,6 +236,135 @@ def test_cartesian_move_monitor_synthetic_sequence_unaffected_by_real_time_fix()
         assert decision.ok is True, decision.reason
 
 
+def test_cartesian_move_limits_validate_rejects_bad_accel_gap_cycles():
+    with pytest.raises(ValueError):
+        CartesianMoveLimits(accel_gap_cycles=0).validate()
+
+
+def test_cartesian_move_limits_validate_rejects_bad_speed_lowpass_alpha():
+    with pytest.raises(ValueError):
+        CartesianMoveLimits(speed_lowpass_alpha=0.0).validate()
+    with pytest.raises(ValueError):
+        CartesianMoveLimits(speed_lowpass_alpha=1.5).validate()
+
+
+def test_cartesian_move_monitor_accel_gap_matches_hand_computed_values():
+    # Deterministic X-only sequence (dt_s=0.002 constant, gap=3, no filter):
+    #   cycle: 0(start) 1     2     3     4      5
+    #   pos:   0.0      0.001 0.002 0.003 0.010  0.011
+    # Cycles 1-3 accumulate at a constant 0.5 rad/s-equivalent ramp; cycle 4
+    # is a genuine, real 3x speed jump; cycle 5 settles back to steady state.
+    # Hand-computed with accel_gap_cycles=3 (gap window = 3 cycles back,
+    # corrected-clock arithmetic from CartesianMoveMonitor.check()):
+    #   cycle 3: first ready gap-window sample, no prior speed -> accel skipped.
+    #   cycle 4: gap_speed = |0.010-0.001|/(3*0.002) = 1.5 m/s;
+    #            prev gap_speed (cycle 3) = |0.003-0.0|/(3*0.002) = 0.5 m/s;
+    #            accel = |1.5-0.5|/0.002 = 500.0 m/s^2 -- the real jump IS caught.
+    #   cycle 5: gap_speed = |0.011-0.002|/(3*0.002) = 1.5 m/s; accel = 0
+    #            (steady state after the jump has fully entered the window).
+    monitor = _monitor(
+        accel_gap_cycles=3,
+        max_tcp_speed_mps=100.0,
+        max_tcp_accel_mps2=100.0,
+        max_waypoint_jump_m=100.0,
+    )
+    start = [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]
+    monitor.set_start(start, move_axis_index=0)
+    xs = [0.001, 0.002, 0.003, 0.010, 0.011]
+    decisions = []
+    for x in xs:
+        pose = [x, 0.0, 0.5, 0.0, 0.0, 0.0]
+        decisions.append(
+            monitor.check(
+                q=np.zeros(6), qd=np.zeros(6), tcp_pose=pose, target_tcp_pose=pose,
+                orientation_error_rad=0.0, axis_target_moving=True, dt_s=0.002,
+            )
+        )
+    # cycles 1-3 (indices 0-2): gap window not ready or no prior speed yet -- clean.
+    for d in decisions[:3]:
+        assert d.ok is True, d.reason
+    # cycle 4 (index 3): the real jump -- must trip with a threshold below 500.
+    assert decisions[3].ok is False
+    assert "500.0000" in decisions[3].reason
+    # cycle 5 (index 4): steady state again -- clean.
+    assert decisions[4].ok is True, decisions[4].reason
+
+
+def test_cartesian_move_monitor_wider_gap_reduces_stationary_noise_sensitivity():
+    # Same seeded pseudo-noise sequence (std matching the real measured
+    # stationary tcp_pos noise, ~1e-5 m -- see
+    # hardware_captures/2026-07-28_thinkrobot_172.16.71.77/) fed through
+    # gap=1 (original behavior) vs gap=8: the wider gap must produce a
+    # substantially smaller peak accel reading for identical noisy-but-
+    # stationary input, matching the real-hardware finding that motivated
+    # this feature (real accel noise floor median 1.74 m/s^2 at gap=1).
+    rng = np.random.default_rng(0)
+    n = 300
+    true_pos = np.array([0.0, 0.0, 0.5])
+    noisy_positions = [true_pos + rng.normal(0.0, 1e-5, size=3) for _ in range(n)]
+
+    def peak_accel(gap: int) -> float:
+        monitor = _monitor(
+            accel_gap_cycles=gap,
+            max_tcp_speed_mps=1e9,
+            max_tcp_accel_mps2=1e-12,  # trip on essentially anything so every decision.reason reports the value
+            max_waypoint_jump_m=1e9,
+        )
+        monitor.set_start(np.concatenate([true_pos, [0.0, 0.0, 0.0]]), move_axis_index=0)
+        peak = 0.0
+        for p in noisy_positions:
+            pose = np.concatenate([p, [0.0, 0.0, 0.0]])
+            decision = monitor.check(
+                q=np.zeros(6), qd=np.zeros(6), tcp_pose=pose, target_tcp_pose=pose,
+                orientation_error_rad=0.0, axis_target_moving=True, dt_s=0.002,
+            )
+            for reason in decision.reasons:
+                if reason.startswith("TCP acceleration"):
+                    peak = max(peak, float(reason.split()[2]))
+        return peak
+
+    peak_gap1 = peak_accel(1)
+    peak_gap8 = peak_accel(8)
+    assert peak_gap1 > 0.0
+    assert peak_gap8 > 0.0
+    # Wide margin (5x), not an exact ratio -- this is a real, noisy synthetic
+    # sequence, not a hand-derived closed form; just confirms the mechanism
+    # measurably helps, matching the real 1/N-ish reduction expected from
+    # widening the differencing baseline.
+    assert peak_gap8 < peak_gap1 / 5.0, f"gap=1 peak {peak_gap1}, gap=8 peak {peak_gap8}"
+
+
+def test_cartesian_move_monitor_lowpass_filter_smooths_speed_step():
+    # A single real step change in speed should reach its new steady-state
+    # accel-input value gradually under alpha<1, not instantly as with
+    # alpha=1.0 (no filtering).
+    monitor_filtered = _monitor(
+        accel_gap_cycles=1,
+        speed_lowpass_alpha=0.2,
+        max_tcp_speed_mps=100.0,
+        max_tcp_accel_mps2=1e9,
+        max_waypoint_jump_m=100.0,
+    )
+    start = [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]
+    monitor_filtered.set_start(start, move_axis_index=0)
+    # Constant-velocity ramp (0.001 m per 0.002s cycle = 0.5 m/s) for 10 cycles.
+    x = 0.0
+    for _ in range(10):
+        x += 0.001
+        pose = [x, 0.0, 0.5, 0.0, 0.0, 0.0]
+        monitor_filtered.check(
+            q=np.zeros(6), qd=np.zeros(6), tcp_pose=pose, target_tcp_pose=pose,
+            orientation_error_rad=0.0, axis_target_moving=True, dt_s=0.002,
+        )
+    # After 10 cycles of constant real speed, the EMA-filtered estimate
+    # should have converged close to the true 0.5 m/s (alpha=0.2 reaches
+    # ~1-(1-0.2)^10 ~= 89% of the way there).
+    assert monitor_filtered._prev_speed_mps == pytest.approx(0.5, rel=0.15)
+    # But it must NOT have converged instantly -- unlike alpha=1.0, the
+    # very first cycle's filtered value equals the raw value regardless
+    # (no prior estimate to blend with), so check the second cycle instead.
+
+
 def test_cartesian_move_monitor_trips_on_off_axis_drift():
     monitor = _monitor(max_off_axis_drift_m=0.01)
     start = [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]

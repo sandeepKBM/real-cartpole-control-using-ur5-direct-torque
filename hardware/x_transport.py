@@ -74,6 +74,8 @@ def run_x_transport(
     coriolis_feedforward: bool = False,
     gain_overrides: dict[str, float] | None = None,
     max_tcp_accel_mps2_override: float | None = None,
+    accel_gap_cycles_override: int | None = None,
+    speed_lowpass_alpha_override: float | None = None,
 ) -> XTransportResult:
     mode = normalize_control_mode(control_mode)
     if start_q_rad is not None:
@@ -113,6 +115,8 @@ def run_x_transport(
             motion_opt_in=motion_opt_in,
             shadow_osc=shadow_osc,
             max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
+            accel_gap_cycles_override=accel_gap_cycles_override,
+            speed_lowpass_alpha_override=speed_lowpass_alpha_override,
         )
         return XTransportResult(
             ok=raw_pos.ok,
@@ -161,6 +165,8 @@ def run_x_transport(
         coriolis_feedforward=coriolis_feedforward,
         gain_overrides=gain_overrides,
         max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
+        accel_gap_cycles_override=accel_gap_cycles_override,
+        speed_lowpass_alpha_override=speed_lowpass_alpha_override,
     )
     return XTransportResult(
         ok=raw_dt.ok,

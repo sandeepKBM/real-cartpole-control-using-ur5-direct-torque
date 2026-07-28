@@ -27,6 +27,7 @@ that class) once too many failures accumulate.
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, field, replace
 
 import numpy as np
@@ -409,6 +410,24 @@ class CartesianMoveLimits:
     # (the manufacturer ceiling) -- matches the sim's
     # ImpedanceSafetyConfig.max_joint_velocity_radps default (1.5).
     qd_max_radps: float = 1.5
+    # Noise-robust acceleration estimation (added 2026-07-28, real-hardware
+    # finding: tools/analyze_state_noise_capture.py measured the accel
+    # estimate's own noise floor from a 10s stationary real-RTDE capture --
+    # MEDIAN 1.74 m/s^2 at rest, already ~3.5x the 0.5 default -- because
+    # accel = |delta speed|/dt is a double finite-difference of raw position,
+    # which amplifies real sensor noise by ~1/dt^2. Defaults below (1, 1.0)
+    # reproduce the exact old single-cycle, unfiltered behavior -- opt-in
+    # only. See CartesianMoveMonitor for the mechanism.
+    #   accel_gap_cycles: use position from N cycles back (not 1) to form
+    #     each speed sample fed into the acceleration estimate. Real position
+    #     noise doesn't grow with N (still ~sqrt(2)*sigma between any two
+    #     independent samples), but the time gap in the denominator grows by
+    #     N, so speed noise shrinks by ~1/N and the accel estimate (a
+    #     difference of two such speed samples) shrinks by ~1/N^2.
+    #   speed_lowpass_alpha: EMA smoothing applied to that gap-windowed speed
+    #     before differencing for accel (1.0 = no filtering).
+    accel_gap_cycles: int = 1
+    speed_lowpass_alpha: float = 1.0
 
     def validate(self) -> None:
         for name in (
@@ -424,6 +443,10 @@ class CartesianMoveLimits:
                 raise ValueError(f"{name} must be positive and finite")
         if self.max_axis_error_growth_steps < 1:
             raise ValueError("max_axis_error_growth_steps must be >= 1")
+        if int(self.accel_gap_cycles) < 1:
+            raise ValueError("accel_gap_cycles must be >= 1")
+        if not (0.0 < float(self.speed_lowpass_alpha) <= 1.0):
+            raise ValueError("speed_lowpass_alpha must be in (0.0, 1.0]")
 
     @classmethod
     def from_impedance_safety_config(cls, safety_cfg) -> "CartesianMoveLimits":
@@ -507,6 +530,19 @@ class CartesianMoveMonitor:
         # correctly the same day, before this fix, at real elapsed times
         # close to nominal).
         self._prev_check_ns: int | None = None
+        # Ring buffer of (pos, corrected_clock_s) pairs, up to
+        # accel_gap_cycles entries, used ONLY to form the gap-windowed speed
+        # sample fed into the accel estimate (see check()). corrected_clock_s
+        # is a running sum of each cycle's own real_dt_s (the same
+        # max(dt_s, measured) value used for the single-cycle speed check),
+        # NOT raw wall-clock timestamps -- summing already-corrected
+        # per-cycle values keeps this exact for synthetic/test call
+        # sequences with no real sleep between check() calls, the same way
+        # the single-cycle real_dt_s fix does. At accel_gap_cycles=1 this
+        # reduces to exactly the original single-cycle behavior.
+        self._gap = max(int(limits.accel_gap_cycles), 1)
+        self._corrected_clock_s = 0.0
+        self._pos_history: deque[tuple[np.ndarray, float]] = deque(maxlen=self._gap)
 
     def set_start(self, tcp_pose, move_axis_index: int) -> None:
         if move_axis_index not in (0, 1, 2):
@@ -519,6 +555,9 @@ class CartesianMoveMonitor:
         self._prev_abs_axis_err = None
         self._axis_err_grow_count = 0
         self._prev_check_ns = time.monotonic_ns()
+        self._corrected_clock_s = 0.0
+        self._pos_history.clear()
+        self._pos_history.append((pose[:3].copy(), 0.0))
 
     def check(
         self,
@@ -591,15 +630,44 @@ class CartesianMoveMonitor:
         measured_dt_s = (now_ns - self._prev_check_ns) / 1e9 if self._prev_check_ns is not None else float(dt_s)
         real_dt_s = max(float(dt_s), measured_dt_s)
 
+        # Immediate single-cycle speed -- used for the speed-limit check.
+        # Real telemetry noise measured this to be far less noisy than the
+        # double-differenced accel estimate (p100 0.036 m/s over a 10s
+        # stationary capture, comfortably under any real max_tcp_speed_mps
+        # value used so far), so this stays on the tightest, most responsive
+        # baseline; only the accel estimate below needs the noise-robust
+        # gap/filter treatment.
         speed_mps = step_m / real_dt_s
         if speed_mps > self.limits.max_tcp_speed_mps:
             decision.add(f"TCP speed {speed_mps:.4f} m/s > {self.limits.max_tcp_speed_mps} m/s")
-        if self._prev_speed_mps is not None:
-            accel_mps2 = abs(speed_mps - self._prev_speed_mps) / real_dt_s
-            if accel_mps2 > self.limits.max_tcp_accel_mps2:
-                decision.add(
-                    f"TCP acceleration {accel_mps2:.4f} m/s^2 > {self.limits.max_tcp_accel_mps2} m/s^2"
-                )
+
+        # Gap-windowed, optionally low-pass-filtered speed sample, used ONLY
+        # to feed the acceleration estimate (see CartesianMoveLimits'
+        # accel_gap_cycles/speed_lowpass_alpha docstring for the mechanism
+        # and the real-hardware finding motivating it). At the defaults
+        # (gap=1, alpha=1.0) this reproduces the original single-cycle,
+        # unfiltered accel_mps2 computation exactly.
+        new_clock_s = self._corrected_clock_s + real_dt_s
+        if len(self._pos_history) >= self._gap:
+            gap_pos, gap_clock_s = self._pos_history[0]
+            gap_step_m = float(np.linalg.norm(pos - gap_pos))
+            gap_dt_s = max(new_clock_s - gap_clock_s, 1e-9)
+            raw_gap_speed_mps = gap_step_m / gap_dt_s
+
+            alpha = float(self.limits.speed_lowpass_alpha)
+            if self._prev_speed_mps is None:
+                gap_speed_mps = raw_gap_speed_mps
+            else:
+                gap_speed_mps = alpha * raw_gap_speed_mps + (1.0 - alpha) * self._prev_speed_mps
+
+            if self._prev_speed_mps is not None:
+                accel_mps2 = abs(gap_speed_mps - self._prev_speed_mps) / real_dt_s
+                if accel_mps2 > self.limits.max_tcp_accel_mps2:
+                    decision.add(
+                        f"TCP acceleration {accel_mps2:.4f} m/s^2 > {self.limits.max_tcp_accel_mps2} m/s^2"
+                    )
+
+            self._prev_speed_mps = gap_speed_mps
 
         axis_err = abs(float(target[self._move_axis]) - float(pos[self._move_axis]))
         if axis_target_moving:
@@ -616,7 +684,8 @@ class CartesianMoveMonitor:
 
         self._prev_abs_axis_err = axis_err
         self._prev_pos = pos.copy()
-        self._prev_speed_mps = speed_mps
         self._prev_check_ns = now_ns
+        self._corrected_clock_s = new_clock_s
+        self._pos_history.append((pos.copy(), new_clock_s))
 
         return decision

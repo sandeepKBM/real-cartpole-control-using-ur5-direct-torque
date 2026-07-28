@@ -128,6 +128,37 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--accel-gap-cycles",
+        type=int,
+        default=None,
+        help=(
+            "position and direct_torque modes. Explicit override of "
+            "CartesianMoveLimits.accel_gap_cycles (class default 1 = original "
+            "single-cycle behavior). Added 2026-07-28 after "
+            "tools/analyze_state_noise_capture.py measured the accel estimate's own "
+            "noise floor from a real stationary RTDE capture: median 1.74 m/s^2 at "
+            "gap=1, already ~3.5x the 0.5 default. Using position from N cycles back "
+            "(instead of 1) to form each speed sample fed into the accel estimate "
+            "cuts noise sensitivity substantially without losing detection of a real, "
+            "sustained fast motion -- see CartesianMoveLimits' docstring for the "
+            "mechanism. Combine with --speed-lowpass-alpha and re-run "
+            "analyze_state_noise_capture.py (it accepts the same two flags) against a "
+            "real stationary capture before picking --max-tcp-accel-mps2."
+        ),
+    )
+    p.add_argument(
+        "--speed-lowpass-alpha",
+        type=float,
+        default=None,
+        help=(
+            "position and direct_torque modes. Explicit override of "
+            "CartesianMoveLimits.speed_lowpass_alpha (class default 1.0 = no "
+            "filtering). EMA smoothing factor in (0, 1] applied to the gap-windowed "
+            "speed sample before differencing for the accel estimate -- smaller = "
+            "more smoothing. See --accel-gap-cycles."
+        ),
+    )
+    p.add_argument(
         "--coriolis-feedforward",
         action="store_true",
         help=(
@@ -219,6 +250,12 @@ def main() -> int:
             gain_overrides=gain_overrides,
             max_tcp_accel_mps2_override=(
                 None if args.max_tcp_accel_mps2 is None else float(args.max_tcp_accel_mps2)
+            ),
+            accel_gap_cycles_override=(
+                None if args.accel_gap_cycles is None else int(args.accel_gap_cycles)
+            ),
+            speed_lowpass_alpha_override=(
+                None if args.speed_lowpass_alpha is None else float(args.speed_lowpass_alpha)
             ),
         )
     except (RTDELinkError, ValueError) as exc:

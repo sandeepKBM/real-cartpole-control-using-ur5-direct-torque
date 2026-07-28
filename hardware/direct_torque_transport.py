@@ -68,6 +68,8 @@ def run_x_transport_direct_torque(
     coriolis_feedforward: bool = False,
     gain_overrides: dict[str, float] | None = None,
     max_tcp_accel_mps2_override: float | None = None,
+    accel_gap_cycles_override: int | None = None,
+    speed_lowpass_alpha_override: float | None = None,
 ) -> DirectTorqueTransportResult:
     if not motion_opt_in:
         raise ValueError("motion_opt_in must be True for a live direct-torque transport")
@@ -141,6 +143,13 @@ def run_x_transport_direct_torque(
         # noise amplification (~1/dt^2) is ~16x worse here -- expect this
         # override to matter more, not less, in this mode.
         move_limits = replace(move_limits, max_tcp_accel_mps2=float(max_tcp_accel_mps2_override))
+    accel_overrides: dict[str, float] = {}
+    if accel_gap_cycles_override is not None:
+        accel_overrides["accel_gap_cycles"] = int(accel_gap_cycles_override)
+    if speed_lowpass_alpha_override is not None:
+        accel_overrides["speed_lowpass_alpha"] = float(speed_lowpass_alpha_override)
+    if accel_overrides:
+        move_limits = replace(move_limits, **accel_overrides)
     move_monitor = CartesianMoveMonitor(move_limits)
     move_monitor.set_start(state0.tcp_pose, move_axis_index=0)
 

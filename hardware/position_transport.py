@@ -43,7 +43,12 @@ class PositionTransportResult:
 
 
 def _load_cartesian_limits(
-    config_path: Path, robot_ip: str, *, max_tcp_accel_mps2_override: float | None = None
+    config_path: Path,
+    robot_ip: str,
+    *,
+    max_tcp_accel_mps2_override: float | None = None,
+    accel_gap_cycles_override: int | None = None,
+    speed_lowpass_alpha_override: float | None = None,
 ) -> CartesianMoveLimits:
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     safety_raw = (cfg.get("controller", {}) or {}).get("safety", {}) or {}
@@ -70,6 +75,14 @@ def _load_cartesian_limits(
     overrides: dict[str, float] = {}
     if max_tcp_accel_mps2_override is not None:
         overrides["max_tcp_accel_mps2"] = float(max_tcp_accel_mps2_override)
+    # Noise-robust accel estimation (2026-07-28) -- see CartesianMoveLimits'
+    # accel_gap_cycles/speed_lowpass_alpha docstring. Explicit opt-in only;
+    # default (None) leaves the class's own gap=1/alpha=1.0 (old behavior)
+    # untouched.
+    if accel_gap_cycles_override is not None:
+        overrides["accel_gap_cycles"] = int(accel_gap_cycles_override)
+    if speed_lowpass_alpha_override is not None:
+        overrides["speed_lowpass_alpha"] = float(speed_lowpass_alpha_override)
     return CartesianMoveLimits.for_robot(robot_ip, base=base, **overrides)
 
 
@@ -87,6 +100,8 @@ def run_x_transport_position(
     servo_gain: float = 300.0,
     servo_lookahead_s: float = 0.1,
     max_tcp_accel_mps2_override: float | None = None,
+    accel_gap_cycles_override: int | None = None,
+    speed_lowpass_alpha_override: float | None = None,
 ) -> PositionTransportResult:
     """Stream the same min-jerk move+hold X profile through ``servoL``.
 
@@ -119,7 +134,11 @@ def run_x_transport_position(
 
     monitor = CartesianMoveMonitor(
         _load_cartesian_limits(
-            config_path, link.robot_ip, max_tcp_accel_mps2_override=max_tcp_accel_mps2_override
+            config_path,
+            link.robot_ip,
+            max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
+            accel_gap_cycles_override=accel_gap_cycles_override,
+            speed_lowpass_alpha_override=speed_lowpass_alpha_override,
         )
     )
     dt_s = 1.0 / float(rate_hz)

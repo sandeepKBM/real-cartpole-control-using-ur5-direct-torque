@@ -44,11 +44,26 @@ def load_rows(path: Path) -> list[dict]:
     return rows
 
 
-def compute_guard_quantities(rows: list[dict]) -> dict:
+def compute_guard_quantities(rows: list[dict], *, gap: int = 1, alpha: float = 1.0) -> dict:
     """step_m/speed_mps/accel_mps2 for every consecutive pair, using each
     pair's own real measured dt (t_s[i] - t_s[i-1]) -- ground truth, no
     caller-supplied nominal dt_s involved at all.
+
+    ``gap``/``alpha`` mirror ``hardware/safety.py``'s
+    ``CartesianMoveLimits.accel_gap_cycles``/``speed_lowpass_alpha`` exactly
+    (corrected-clock gap-window + EMA smoothing feeding the accel estimate;
+    defaults gap=1/alpha=1.0 reproduce the original single-cycle,
+    unfiltered accel_mps2 computation). This is a parallel, vectorized
+    reimplementation of that same math (not a direct call into
+    CartesianMoveMonitor, which drives its timing off wall-clock time, not
+    a capture file's recorded timestamps) -- cross-checked against the live
+    class in tests/hardware/test_analyze_state_noise_capture.py.
     """
+    if gap < 1:
+        raise ValueError("gap must be >= 1")
+    if not (0.0 < alpha <= 1.0):
+        raise ValueError("alpha must be in (0.0, 1.0]")
+
     t = np.array([r["t_s"] for r in rows], dtype=np.float64)
     pos = np.array([r["tcp_pose"][:3] for r in rows], dtype=np.float64)
 
@@ -59,7 +74,30 @@ def compute_guard_quantities(rows: list[dict]) -> dict:
     step_m = np.linalg.norm(np.diff(pos, axis=0), axis=1)
     speed_mps = step_m / dt
 
-    accel_mps2 = np.abs(np.diff(speed_mps)) / dt[1:]
+    if gap == 1:
+        gap_step_m = step_m
+        gap_dt = dt
+    else:
+        gap_step_m = np.linalg.norm(pos[gap:] - pos[:-gap], axis=1)
+        # corrected-clock span across `gap` real cycles, from cumulative dt.
+        cum_t = np.concatenate([[0.0], np.cumsum(dt)])
+        gap_dt = cum_t[gap:] - cum_t[:-gap]
+    raw_gap_speed_mps = gap_step_m / gap_dt
+
+    if alpha >= 1.0:
+        gap_speed_mps = raw_gap_speed_mps
+    else:
+        gap_speed_mps = np.empty_like(raw_gap_speed_mps)
+        gap_speed_mps[0] = raw_gap_speed_mps[0]
+        for i in range(1, len(raw_gap_speed_mps)):
+            gap_speed_mps[i] = alpha * raw_gap_speed_mps[i] + (1.0 - alpha) * gap_speed_mps[i - 1]
+
+    # accel_i = |gap_speed_i - gap_speed_{i-1}| / (single-cycle real_dt at
+    # the point gap_speed_i was formed) -- dt aligned to gap_speed's own
+    # index: gap_speed[k] corresponds to sample index (gap + k) in the
+    # original series, so its single-cycle dt is dt[gap + k - 1].
+    accel_dt = dt[gap:]
+    accel_mps2 = np.abs(np.diff(gap_speed_mps)) / accel_dt[: len(gap_speed_mps) - 1]
 
     return {
         "n_samples": len(rows),
@@ -68,6 +106,7 @@ def compute_guard_quantities(rows: list[dict]) -> dict:
         "dt_ms": dt * 1e3,
         "step_m": step_m,
         "speed_mps": speed_mps,
+        "gap_speed_mps": gap_speed_mps,
         "accel_mps2": accel_mps2,
     }
 
@@ -91,6 +130,18 @@ def main() -> int:
         default=99.9,
         help="Recommend a threshold that the real noise floor exceeds only (100-this)%% of the time.",
     )
+    p.add_argument(
+        "--accel-gap-cycles",
+        type=int,
+        default=1,
+        help="Mirrors CartesianMoveLimits.accel_gap_cycles (default 1 = original behavior).",
+    )
+    p.add_argument(
+        "--speed-lowpass-alpha",
+        type=float,
+        default=1.0,
+        help="Mirrors CartesianMoveLimits.speed_lowpass_alpha (default 1.0 = no filtering).",
+    )
     args = p.parse_args()
 
     rows = load_rows(args.capture_path)
@@ -98,8 +149,11 @@ def main() -> int:
         print(f"[error] only {len(rows)} rows -- need at least 3 for a speed+accel estimate")
         return 1
 
-    q = compute_guard_quantities(rows)
-    print(f"[loaded] {q['n_samples']} samples, {q['n_dt']} dt intervals, {q['n_accel']} accel estimates")
+    q = compute_guard_quantities(rows, gap=int(args.accel_gap_cycles), alpha=float(args.speed_lowpass_alpha))
+    print(
+        f"[loaded] {q['n_samples']} samples, {q['n_dt']} dt intervals, {q['n_accel']} accel estimates "
+        f"(accel_gap_cycles={args.accel_gap_cycles}, speed_lowpass_alpha={args.speed_lowpass_alpha})"
+    )
 
     dt_ms = q["dt_ms"]
     print("\n[real inter-sample dt, ms] (should cluster near the nominal control period)")
