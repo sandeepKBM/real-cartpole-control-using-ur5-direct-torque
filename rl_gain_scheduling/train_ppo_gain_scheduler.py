@@ -106,6 +106,12 @@ def main() -> int:
             gamma=float(training_cfg["gamma"]),
             gae_lambda=float(training_cfg["gae_lambda"]),
             clip_range=float(training_cfg["clip_range"]),
+            # SB3 defaults ent_coef to 0.0 if unspecified -- the diagnosed
+            # cause of the prior "never move" collapse (no exploration
+            # incentive once the policy finds any stable local behavior).
+            # Config-driven, defaulting to the SAME 0.0 SB3 would use, so
+            # existing configs that don't set this are unaffected.
+            ent_coef=float(training_cfg.get("ent_coef", 0.0)),
             policy_kwargs=policy_kwargs,
             tensorboard_log=str(tb_dir),
             device=device,

@@ -93,6 +93,78 @@ def test_env_set_gains_actually_changes_torque():
     assert not np.allclose(tau_low, tau_high, atol=1e-6), "different gain actions should produce different torque"
 
 
+def _config_with_reward_overrides(tmp_path: Path, **reward_overrides) -> Path:
+    import yaml
+
+    repo_root = Path(__file__).resolve().parents[2]
+    cfg = yaml.safe_load((repo_root / "config" / "rl_gain_scheduling.yaml").read_text(encoding="utf-8"))
+    cfg["reward"].update(reward_overrides)
+    out = tmp_path / "reward_override.yaml"
+    out.write_text(yaml.dump(cfg), encoding="utf-8")
+    return out
+
+
+def test_default_config_has_no_progress_or_phase_gating_effect():
+    # progress_weight/move_phase_disturbance_scale are absent from the
+    # shipped default config -- .get() fallbacks (0.0, 1.0) must make this
+    # byte-for-byte the same reward formula as before these fields existed.
+    env = GainSchedulingEnv()
+    env.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    action = np.zeros(ACTION_DIM, dtype=np.float32)
+    _, _, _, _, info = env.step(action)
+    comps = info["reward_components"]
+    assert comps["progress_reward"] == 0.0
+    assert comps["disturbance_scale"] == 1.0
+
+
+def test_progress_weight_rewards_error_reduction(tmp_path: Path):
+    cfg_path = _config_with_reward_overrides(tmp_path, progress_weight=10.0)
+    env = GainSchedulingEnv(config_path=cfg_path)
+    env.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    # Reasonable gains (not all-zero/random) so tracking actually improves
+    # step over step rather than wandering randomly.
+    tuned = {
+        "kp_x": 400.0, "kd_x": 40.0, "kp_y": 80.0, "kd_y": 15.0, "kp_z": 120.0, "kd_z": 20.0,
+        "kp_rot": 0.0, "kd_rot": 10.0, "kp_posture": 25.0, "kd_posture": 6.0, "kd_joint": 4.0,
+    }
+    action = gains_to_normalized_action(tuned, env._gain_bounds)
+    seen_progress = False
+    # A min-jerk ramp's error typically grows for the first portion of the
+    # move (target accelerates away faster than tracking catches up) before
+    # recovering -- run the full episode, not just the first few steps, to
+    # actually reach the recovery phase where progress_reward > 0 is expected.
+    for _ in range(env._max_episode_steps):
+        _, _, terminated, truncated, info = env.step(action)
+        if info["reward_components"]["progress_reward"] > 0:
+            seen_progress = True
+        if terminated or truncated:
+            break
+    assert seen_progress, "expected at least one step where tracking improved and progress_reward > 0"
+
+
+def test_move_phase_disturbance_scale_only_applies_during_move(tmp_path: Path):
+    cfg_path = _config_with_reward_overrides(tmp_path, move_phase_disturbance_scale=0.25)
+    env = GainSchedulingEnv(config_path=cfg_path)
+    move_duration_s = env._move_duration_s
+    env.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    action = np.zeros(ACTION_DIM, dtype=np.float32)
+    saw_move_phase_scaled = False
+    saw_hold_phase_unscaled = False
+    for _ in range(env._max_episode_steps):
+        _, _, terminated, truncated, info = env.step(action)
+        comps = info["reward_components"]
+        if comps["in_move_phase"]:
+            assert comps["disturbance_scale"] == pytest.approx(0.25)
+            saw_move_phase_scaled = True
+        else:
+            assert comps["disturbance_scale"] == pytest.approx(1.0)
+            saw_hold_phase_unscaled = True
+        if terminated or truncated:
+            break
+    assert saw_move_phase_scaled
+    assert saw_hold_phase_unscaled, f"episode never reached the hold phase (move_duration_s={move_duration_s})"
+
+
 def test_env_safety_termination_reports_reason():
     env = GainSchedulingEnv()
     env.reset(seed=0, options={"height_alpha": 0.0, "target_x_delta": 0.03})

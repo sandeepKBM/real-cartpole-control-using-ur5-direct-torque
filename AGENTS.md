@@ -108,6 +108,45 @@ an MP4 or a bare exit code as success evidence — read the run record.
     bandwidth limit at kp_x=400, not saturation — irrelevant for 1 s+ transport moves).
   - Posture re-anchoring: `controller.posture_reanchor_on_settle` (+`reanchor_x_tol_m`,
     `reanchor_qd_tol_radps`) — one-shot q_rest re-capture at settle, flag-gated, default off.
+  - **Two more OSC leaks found and fixed (2026-07-26), both flag-gated, neither moved the
+    ~0.25–0.3 m ceiling**: `controller.lambda_diagonal_shaping` — away from the wrist_2=0
+    singularity, Λ=(J M⁻¹ Jᵀ+εI)⁻¹ develops large off-diagonal terms (e.g. Λ_xz 0.32→2.0 by
+    wrist_2=-0.006 rad), so the shaped wrench's Z-row picks up `Λ_xz·Fx` even with zero Z
+    error; diagonalizing Λ for the wrench-shaping step only (nullspace projector keeps the
+    full Λ) kills that leak. `controller.lambda_adaptive_regularization` — the SAME static
+    ε=0.1 that tames Λ at the exact singularity (needed: dropping it there makes Λ's
+    diagonal blow up, e.g. Λ[3,3] 9.8→670 as ε drops 0.1→0.001) also corrupts the
+    nullspace-posture projector away from it (measured: at cond(J)=719, ε=0.1 leaks a real
+    0.074 rad/s² task acceleration from a representative posture torque instead of nulling
+    it, as theory predicts and ε=0 measures). Fix: schedule ε in log(cond(J)) space between
+    a far-field value and the existing near-singularity ceiling — but ONLY for the
+    nullspace projector; scheduling the wrench-shaping Λ too caused a real regression
+    (previously-trivial cases failing on `|qd|>3.0`) since reducing ε also amplifies
+    wrench-shaping in ways the tuned gains were never validated against. Both leaks were
+    real and are now fixed (`config/ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml`,
+    zero regressions across the canonical grid), but the ceiling didn't move — good
+    evidence it's structural (see next finding), not a fixable regularization defect.
+  - **The ceiling is directional, not just a magnitude limit (2026-07-27/28)**: at
+    height_alpha=0.5 (`hardware/poses.py::HEIGHT_ALPHA_0_5_Q`), `+0.20 m` passes cleanly
+    (worst orientation 0.214 rad) but `-0.20 m` fails via orientation error at *half* the
+    peak wrist_2 excursion (-0.017 rad vs +0.029 rad for the passing direction) — ruled out
+    as a speed/duration or reanchor-timing artifact (identical failure at move durations
+    1–5 s and with `posture_reanchor_on_settle` disabled; see the git history around this
+    date for the full elimination trail). Root cause: since kp_rot=0, orientation is held
+    *only* by the nullspace-projected posture term, and that projector's Frobenius norm is
+    itself asymmetric with wrist_2 sign at this pose — it grows during the `+0.20 m` move
+    (1.74→1.87) but shrinks monotonically during `-0.20 m` (1.74→1.59). Same kp_posture/
+    kd_posture, genuinely less restoring authority available in the `-X` direction — this
+    is why a `kp_posture`/`kd_posture`/`kd_joint` gain sweep at this exact case (2026-07-27)
+    barely moved the outcome (quality 0.306→0.305, and `kd_joint` up made it *worse*).
+    `Λ_xz` (wrench-shaping X→Z coupling) shows a related signature — it grows positive for
+    `+0.20 m` but crosses zero and goes negative for `-0.20 m` — though `lambda_diagonal_shaping`
+    is active in this config and already removes that specific leak from the wrench, so it
+    isn't the primary driver; the nullspace-projector asymmetry is. Fixing this for real needs
+    a different orientation-holding mechanism (not just retuned gains — the sweep is
+    real evidence against that), which is a controller-design question, not a retune.
+    Practical floor until then: **the safe symmetric range at height_alpha=0.5 is ±0.15 m**,
+    not ±0.20 m.
 
 ## 4. Safety & guardrails (hardware — do not weaken)
 

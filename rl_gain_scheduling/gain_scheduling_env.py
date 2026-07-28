@@ -123,6 +123,7 @@ class GainSchedulingEnv(gym.Env):
         self._step_count = 0
         self._prev_action = np.zeros(ACTION_DIM, dtype=np.float32)
         self._prev_tau = np.zeros(6, dtype=np.float64)
+        self._prev_abs_x_error = 0.0
         self._alpha = 0.0
         self._target_x_delta = 0.0
         self._lightweight_trace: list[dict[str, Any]] = []
@@ -191,6 +192,11 @@ class GainSchedulingEnv(gym.Env):
         self._step_count = 0
         self._prev_action = np.zeros(ACTION_DIM, dtype=np.float32)
         self._prev_tau = np.zeros(6, dtype=np.float64)
+        # True x_error at t=0 is ~0 for this min-jerk profile (target starts at
+        # the current position), so 0.0 here is the correct "previous error"
+        # for the progress-reward term below -- not abs(target_x_delta), which
+        # would inject one artificial reward spike on every episode's first step.
+        self._prev_abs_x_error = 0.0
         self._lightweight_trace = []
 
         self._trace_writer = None
@@ -273,13 +279,40 @@ class GainSchedulingEnv(gym.Env):
         terminated = not safety_ok
         truncated = self._step_count >= self._max_episode_steps
 
+        # Phase-gating (default 1.0 = no change from before): the move phase
+        # necessarily produces some transient y/z/orientation disturbance
+        # while the policy is still learning good mid-move gains -- penalizing
+        # that as heavily as a HOLD-phase failure (where zero disturbance is
+        # the actual expectation) is exactly the deceptive-gradient problem
+        # diagnosed in the prior training run: "never move" avoids move-phase
+        # disturbance penalties entirely, and that avoidance can look better
+        # than a still-learning attempt to move. This does NOT relax what
+        # counts as success -- the terminal safety penalty (hard guard trip)
+        # and terminal quality score below are unchanged and are the real
+        # pass/fail signal; this only reshapes the dense per-step gradient.
+        in_move_phase = t_s < self._move_duration_s
+        disturbance_scale = (
+            float(self._reward_cfg.get("move_phase_disturbance_scale", 1.0)) if in_move_phase else 1.0
+        )
+
+        abs_x_error = abs(x_error)
+        # Potential-based progress shaping (default weight 0.0 = no change):
+        # reward REDUCTION in |x_error| this step, not just its magnitude.
+        # Policy-invariant (Ng et al. 1999) -- doesn't change the optimal
+        # policy, only makes the "actually move toward the target" gradient
+        # easier to follow than the deceptive "never move" local optimum.
+        progress_weight = float(self._reward_cfg.get("progress_weight", 0.0))
+        progress_reward = progress_weight * (self._prev_abs_x_error - abs_x_error)
+        self._prev_abs_x_error = abs_x_error
+
         reward = self._reward_cfg["alive_bonus"]
-        reward -= self._reward_cfg["x_hold_weight"] * abs(x_error)
-        reward -= self._reward_cfg["y_hold_weight"] * abs(y_error)
-        reward -= self._reward_cfg["z_hold_weight"] * abs(z_error)
-        reward -= self._reward_cfg["orientation_weight"] * abs(orientation_error_norm)
+        reward -= self._reward_cfg["x_hold_weight"] * abs_x_error
+        reward -= disturbance_scale * self._reward_cfg["y_hold_weight"] * abs(y_error)
+        reward -= disturbance_scale * self._reward_cfg["z_hold_weight"] * abs(z_error)
+        reward -= disturbance_scale * self._reward_cfg["orientation_weight"] * abs(orientation_error_norm)
         reward -= self._reward_cfg["gain_smooth_weight"] * float(np.sum((action - self._prev_action) ** 2))
         reward -= self._reward_cfg["torque_smooth_weight"] * float(np.sum((tau - self._prev_tau) ** 2))
+        reward += progress_reward
 
         if self._record_lightweight_trace or self._trace_writer is not None:
             row = {
@@ -301,7 +334,15 @@ class GainSchedulingEnv(gym.Env):
             if self._trace_writer is not None:
                 self._trace_writer.write_row(row)
 
-        info: dict[str, Any] = {"height_alpha": self._alpha, "target_x_delta": self._target_x_delta}
+        info: dict[str, Any] = {
+            "height_alpha": self._alpha,
+            "target_x_delta": self._target_x_delta,
+            "reward_components": {
+                "progress_reward": progress_reward,
+                "disturbance_scale": disturbance_scale,
+                "in_move_phase": in_move_phase,
+            },
+        }
         if terminated:
             info["termination_reason"] = diag.get("safety_reason", "")
             reward += self._reward_cfg["terminal_safety_penalty"]
