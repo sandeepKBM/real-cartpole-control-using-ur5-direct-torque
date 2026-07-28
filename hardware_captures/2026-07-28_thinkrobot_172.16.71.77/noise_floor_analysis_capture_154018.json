@@ -1,0 +1,23 @@
+{
+  "context": "Output of tools/analyze_state_noise_capture.py against the 10s/4730-sample stationary capture (capture_20260728_154018.jsonl). This is the empirical false-positive noise floor of CartesianMoveMonitor's own speed/accel formulas, computed from real consecutive stationary samples with real measured dt -- no assumed nominal dt_s involved.",
+  "n_samples": 4730,
+  "n_dt": 4729,
+  "n_accel": 4728,
+  "dt_ms": {
+    "p50": 2.1189, "p90": 2.1734, "p95": 2.1910, "p99": 2.2116,
+    "p99_9": 2.2515, "p99_99": 2.2646, "p100": 2.2648,
+    "mean": 2.1143, "std": 0.0448
+  },
+  "speed_mps": {
+    "p50": 0.006186, "p90": 0.014679, "p95": 0.017522, "p99": 0.023354,
+    "p99_9": 0.030451, "p99_99": 0.034261, "p100": 0.035641
+  },
+  "accel_mps2": {
+    "p50": 1.741858, "p90": 4.987414, "p95": 6.124432, "p99": 8.228200,
+    "p99_9": 11.022556, "p99_99": 12.234355, "p100": 12.620554,
+    "mean": 2.244665, "std": 1.916022
+  },
+  "recommended_max_tcp_accel_mps2_at_0.1pct_fpr": 11.0226,
+  "key_finding": "The CartesianMoveMonitor accel check's historical thresholds (0.2/0.5 m/s^2 defaults) were derived from MuJoCo simulation, which has zero sensor noise. Real RTDE telemetry at 500Hz, double-differenced (speed = step_m/dt, accel = |speed_i - speed_{i-1}|/dt), has a noise floor with MEDIAN reading 1.74 m/s^2 while stationary -- already ~3.5x the default 0.5 threshold. This retroactively explains all direct_torque-mode first-cycle trips observed 2026-07-28 (0.58, 0.62, 1.07, 2.29, 2.30 m/s^2 across several trials, all with negligible real qd/tau/drift) as normal noise, not real problems. Distinguishable from the one genuinely real issue found the same day (position-mode wrist-singularity divergence) by the presence/absence of real, growing qd alongside the accel reading.",
+  "caveat": "Single pose/dynamics_source/frequency (direct_torque local dynamics, height_alpha=0.5-ish region, wrist_2=0.1). Not yet confirmed whether this noise floor generalizes across poses, control rates, or dynamics_source=rtde -- re-capture at other configurations before trusting this distribution there."
+}
