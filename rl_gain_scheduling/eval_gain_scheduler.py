@@ -3,11 +3,21 @@
 
 Sweeps a height x target-x-delta grid. For each cell, runs (a) the learned
 policy through GainSchedulingEnv with full_trace_logging=True, and (b) the
-fixed config/ur5e_mujoco_torque_osc_tuned.yaml gains via the unmodified CLI
-script (tools/ur5e_mujoco_torque_experiments.py), starting from the same
-interpolated pose. Both log through observability.run_logger.RunLogger --
-never a bespoke summary schema (the anti-pattern the archived CoppeliaSim
-eval script committed).
+fixed --baseline-config gains (default config/ur5e_mujoco_torque_osc_tuned.yaml)
+via the unmodified CLI script (tools/ur5e_mujoco_torque_experiments.py),
+starting from the same interpolated pose. Both log through
+observability.run_logger.RunLogger -- never a bespoke summary schema (the
+anti-pattern the archived CoppeliaSim eval script committed).
+
+--baseline-config MUST match the controller flags of whatever config the
+policy was actually trained/evaluated against (--config) -- the default only
+reproduces the plain-tuned-config problem instance, not any variant that
+sets lambda_diagonal_shaping/lambda_adaptive_regularization etc. A mismatch
+here silently compares the learned policy against a different physical
+problem than the one in --config (found and fixed 2026-07-28: the original
+alpha=0.5 directional-asymmetry training run's own comparison used this
+default against an env config that had already moved to the adaptive-lambda
+controller, so the "baseline" side never reproduced the documented failure).
 
 Prints a per-height valid_move_and_hold-rate comparison table: this is the
 artifact that demonstrates the feature's goal -- the fixed config should
@@ -76,6 +86,7 @@ def _run_baseline(
     move_duration_s: float,
     max_episode_seconds: float,
     output_dir: Path,
+    baseline_config_path: Path,
 ) -> dict[str, Any]:
     q_start = _interpolated_start_q(alpha)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -84,7 +95,7 @@ def _run_baseline(
         str(REPO_ROOT / "tools" / "ur5e_mujoco_torque_experiments.py"),
         "--mode", "controller-rollout",
         "--controller-kind", "impedance",
-        "--config", str(DEFAULT_BASELINE_CONFIG_PATH),
+        "--config", str(baseline_config_path),
         "--trajectory-profile", "min_jerk_move_hold",
         "--move-duration", str(move_duration_s),
         "--duration", str(max_episode_seconds),
@@ -111,6 +122,19 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model-path", type=Path, required=True, help="Path to a trained PPO model .zip.")
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    p.add_argument(
+        "--baseline-config",
+        type=Path,
+        default=DEFAULT_BASELINE_CONFIG_PATH,
+        help=(
+            "Fixed-gain config the baseline CLI run uses (default: "
+            "ur5e_mujoco_torque_osc_tuned.yaml). Must match --config's own "
+            "controller flags (task_space_inertia_shaping, lambda_diagonal_shaping, "
+            "lambda_adaptive_regularization, etc.) for the comparison to mean "
+            "anything -- a mismatch silently compares the learned policy against "
+            "a different physical problem than the one it trained on."
+        ),
+    )
     p.add_argument("--alphas", type=float, nargs="+", default=list(DEFAULT_ALPHAS))
     p.add_argument("--deltas", type=float, nargs="+", default=list(DEFAULT_DELTAS))
     p.add_argument("--output-root", type=Path, default=None)
@@ -147,9 +171,10 @@ def main() -> int:
             baseline_summary = _run_baseline(
                 alpha=alpha, dx=dx, move_duration_s=move_duration_s,
                 max_episode_seconds=max_episode_seconds, output_dir=baseline_dir,
+                baseline_config_path=args.baseline_config,
             )
             baseline_summary.update(compute_valid_move_hold_metrics(baseline_summary, strict=False))
-            baseline_logger.log_run(baseline_summary, run_dir=baseline_dir, seed=0, config_path=DEFAULT_BASELINE_CONFIG_PATH, run_label=cell_label)
+            baseline_logger.log_run(baseline_summary, run_dir=baseline_dir, seed=0, config_path=args.baseline_config, run_label=cell_label)
             baseline_valid = bool(baseline_summary.get("valid_move_and_hold", False))
 
             print(f"    learned:  valid={learned_valid}  quality={learned_summary.get('move_hold_quality_score', 0.0):.3f}")

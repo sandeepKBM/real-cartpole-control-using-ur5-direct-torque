@@ -1,0 +1,122 @@
+# Corrected variant of config/rl_gain_scheduling_alpha05_bidirectional.yaml
+# (preserved unmodified). That config's controller block matched
+# config/ur5e_mujoco_torque_osc_tuned.yaml (plain), which does NOT actually
+# reproduce the documented height_alpha=0.5, dx=-0.20m failure (AGENTS.md sec
+# 3, 2026-07-27/28 finding) -- directly verified 2026-07-28: the plain config
+# passes dx=-0.20m cleanly (valid_move_and_hold=True, quality 0.234). The
+# real failure only reproduces with lambda_diagonal_shaping +
+# lambda_adaptive_regularization on (config/ur5e_mujoco_torque_osc_tuned_
+# adaptive_lambda.yaml -- verified: valid_move_and_hold=False, orientation
+# guard trips mid-move at 0.250 rad). This config's controller block is
+# copied from that adaptive-lambda config so the RL training environment's
+# own fixed-gain baseline actually reproduces the bug the policy is meant
+# to fix -- the entire premise of a "fix" requires training against a
+# problem instance that's real.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  posture_reanchor_on_settle: true
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  # The two flags that make the documented directional-asymmetry bug actually
+  # reproduce -- copied from config/ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml.
+  lambda_diagonal_shaping: true
+  lambda_adaptive_regularization: true
+  lambda_regularization_far: 1.0e-4
+  lambda_cond_low: 1.0e4
+  lambda_cond_high: 1.0e8
+  jacobian_singular_cond_max: 1.0e18
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.35
+
+env:
+  control_decimation_steps: 1
+  height_alpha_range: [0.5, 0.5]
+  target_x_delta_range_m: [-0.20, 0.20]
+  move_duration_s: 1.0
+  hold_duration_s: 2.0
+  max_episode_seconds: 3.0
+  record_lightweight_trace: true
+  full_trace_logging: false
+  gain_bounds:
+    kp_x: [0.0, 800.0]
+    kd_x: [0.0, 80.0]
+    kp_y: [0.0, 160.0]
+    kd_y: [0.0, 30.0]
+    kp_z: [0.0, 240.0]
+    kd_z: [0.0, 40.0]
+    kp_rot: [0.0, 30.0]
+    kd_rot: [0.0, 40.0]
+    kp_posture: [0.0, 100.0]
+    kd_posture: [0.0, 24.0]
+    kd_joint: [0.0, 16.0]
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  gain_smooth_weight: 0.01
+  torque_smooth_weight: 0.001
+  terminal_safety_penalty: -25.0
+  terminal_quality_weight: 50.0
+  progress_weight: 50.0
+  move_phase_disturbance_scale: 0.3
+
+training:
+  policy: "MlpPolicy"
+  net_arch: [128, 128]
+  learning_rate: 3.0e-4
+  n_steps: 1024
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  total_timesteps: 3000000
+  # westeros has 72 CPU cores; use ~80% per explicit instruction, leaving
+  # headroom for other processes on this shared machine.
+  n_envs: 57
+  device: "cpu"
+  seed: 0
