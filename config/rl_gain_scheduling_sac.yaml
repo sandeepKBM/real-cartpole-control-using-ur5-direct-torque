@@ -1,0 +1,130 @@
+# SAC variant of config/rl_gain_scheduling_alpha05_bidirectional.yaml
+# (preserved unmodified). Third of three planned RL architecture increments
+# for the height_alpha=0.5 directional-asymmetry fix (AGENTS.md sec 3; plan
+# at /common/home/ss5772/.claude/plans/sharded-hatching-globe.md).
+#
+# Same env (gains mode, unchanged action_mode default) as the working PPO
+# config -- only the algorithm differs: off-policy SAC with a replay buffer
+# and built-in automatic entropy tuning (ent_coef "auto"), instead of PPO's
+# on-policy rollout + explicit ent_coef=0.01 fix. Run with:
+#   python rl_gain_scheduling/train_ppo_gain_scheduler.py --algo sac \
+#     --config config/rl_gain_scheduling_sac.yaml
+#
+# total_timesteps below is a placeholder, NOT a tuned value -- SAC is more
+# sample-efficient per env-step than PPO but off-policy training dynamics
+# (replay buffer staleness, train_freq/gradient_steps ratio) differ enough
+# that PPO's 3M-step budget shouldn't be assumed to transfer. Run a short
+# pilot (e.g. 50k-100k steps) and inspect TensorBoard before committing to
+# a long run.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  posture_reanchor_on_settle: true
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.35
+
+env:
+  control_decimation_steps: 1
+  height_alpha_range: [0.5, 0.5]
+  target_x_delta_range_m: [-0.20, 0.20]
+  move_duration_s: 1.0
+  hold_duration_s: 2.0
+  max_episode_seconds: 3.0
+  record_lightweight_trace: true
+  full_trace_logging: false
+  gain_bounds:
+    kp_x: [0.0, 800.0]
+    kd_x: [0.0, 80.0]
+    kp_y: [0.0, 160.0]
+    kd_y: [0.0, 30.0]
+    kp_z: [0.0, 240.0]
+    kd_z: [0.0, 40.0]
+    kp_rot: [0.0, 30.0]
+    kd_rot: [0.0, 40.0]
+    kp_posture: [0.0, 100.0]
+    kd_posture: [0.0, 24.0]
+    kd_joint: [0.0, 16.0]
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  gain_smooth_weight: 0.01
+  torque_smooth_weight: 0.001
+  terminal_safety_penalty: -25.0
+  terminal_quality_weight: 50.0
+  progress_weight: 50.0
+  move_phase_disturbance_scale: 0.3
+
+training:
+  policy: "MlpPolicy"
+  net_arch: [128, 128]
+  # PPO-only keys (n_steps, n_epochs, gae_lambda, clip_range) and PPO's own
+  # top-level ent_coef are never read under --algo sac -- all SAC
+  # hyperparameters live under training.sac below.
+  device: "cpu"
+  seed: 0
+  # SAC still benefits from parallel envs for faster experience collection
+  # (each contributes to the shared replay buffer), but off-policy training
+  # doesn't need PPO's 57-env budget -- smaller footprint, leaves more
+  # headroom on this shared machine for pilot runs.
+  n_envs: 8
+  total_timesteps: 1000000
+  sac:
+    learning_rate: 3.0e-4
+    buffer_size: 200000
+    learning_starts: 5000
+    batch_size: 256
+    # SB3 names this 'tau' -- renamed here to never read as joint torque
+    # anywhere in this codebase; mapped explicitly at the SAC(...) call site.
+    polyak_tau: 0.005
+    gamma: 0.99
+    train_freq: 1
+    gradient_steps: 1
+    action_noise: null
+    ent_coef: "auto"
+    target_update_interval: 1
+    target_entropy: "auto"
