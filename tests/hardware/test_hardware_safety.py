@@ -181,6 +181,61 @@ def test_cartesian_move_monitor_ok_on_clean_move_along_axis():
         assert decision.ok is True, decision.reason
 
 
+def test_cartesian_move_monitor_uses_real_elapsed_time_when_longer_than_dt_s():
+    # Real-hardware bug (2026-07-28): the gap between set_start() and the
+    # first check() call can be meaningfully longer than the caller-supplied
+    # dt_s (real setup work happens in between on the direct-torque path --
+    # e.g. jacobian_and_mass_matrix()), which used to inflate the computed
+    # speed by dividing a real (tiny) position delta by a too-small assumed
+    # dt_s. Reproduced twice on real hardware (13.9 m/s^2 with qd<=0.0001
+    # rad/s -- nothing physically moved). Fixed: use real measured elapsed
+    # time whenever it's LONGER than the claimed dt_s.
+    import time as time_module
+
+    monitor = _monitor(max_tcp_speed_mps=0.1, max_tcp_accel_mps2=1000.0, max_waypoint_jump_m=1.0)
+    start = [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]
+    monitor.set_start(start, move_axis_index=1)
+    time_module.sleep(0.05)  # real elapsed time >> the dt_s claimed below
+    pose = [0.0, 0.001, 0.5, 0.0, 0.0, 0.0]  # 1mm real position delta
+    decision = monitor.check(
+        q=np.zeros(6),
+        qd=np.zeros(6),
+        tcp_pose=pose,
+        target_tcp_pose=pose,
+        orientation_error_rad=0.0,
+        axis_target_moving=True,
+        dt_s=0.002,  # claimed dt_s: 0.001m/0.002s = 0.5 m/s, WOULD trip the 0.1 m/s limit
+    )
+    # With the real ~0.05s elapsed time instead: 0.001m/0.05s = 0.02 m/s,
+    # comfortably under the 0.1 m/s limit -- only passes if real elapsed
+    # time (not the claimed dt_s) was actually used.
+    assert decision.ok is True, decision.reason
+
+
+def test_cartesian_move_monitor_synthetic_sequence_unaffected_by_real_time_fix():
+    # Back-to-back check() calls with no real sleep (the pattern every other
+    # CartesianMoveMonitor test in this file uses): real elapsed time is
+    # always far smaller than the intended dt_s here, so max(dt_s, measured)
+    # must resolve to dt_s every time -- this fix must be a no-op for
+    # synthetic test sequences, only real hardware timing gaps.
+    monitor = _monitor(max_tcp_speed_mps=1.0, max_tcp_accel_mps2=100.0, max_waypoint_jump_m=0.1)
+    start = [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]
+    monitor.set_start(start, move_axis_index=1)
+    pose = list(start)
+    for i in range(1, 6):
+        pose[1] = 0.001 * i
+        decision = monitor.check(
+            q=np.zeros(6),
+            qd=np.zeros(6),
+            tcp_pose=pose,
+            target_tcp_pose=pose,
+            orientation_error_rad=0.0,
+            axis_target_moving=True,
+            dt_s=0.01,
+        )
+        assert decision.ok is True, decision.reason
+
+
 def test_cartesian_move_monitor_trips_on_off_axis_drift():
     monitor = _monitor(max_off_axis_drift_m=0.01)
     start = [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]

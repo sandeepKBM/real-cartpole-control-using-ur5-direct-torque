@@ -488,6 +488,25 @@ class CartesianMoveMonitor:
         self._prev_speed_mps: float | None = None
         self._prev_abs_axis_err: float | None = None
         self._axis_err_grow_count = 0
+        # Real elapsed wall-clock time between set_start()/check() calls,
+        # used for the speed/accel estimate instead of the caller-supplied
+        # dt_s. Added 2026-07-28: on real hardware, real elapsed time between
+        # set_start() (called once, before any per-cycle setup work -- e.g.
+        # direct_torque_transport.py's local_dynamics.jacobian_and_mass_matrix()
+        # call, itself real wall-clock time) and the first check() call can be
+        # meaningfully longer than the nominal control period. Dividing a
+        # (tiny but real) position delta by the WRONG, too-small assumed dt_s
+        # inflates the computed speed, and squares that error again for
+        # accel -- reproduced twice on real hardware (13.9 m/s^2 on a cycle
+        # with qd<=0.0001 rad/s and tau<=0.002 Nm; nothing physically moved).
+        # Using real elapsed time fixes this for every cycle, not just the
+        # first -- in steady-state control-loop operation, real elapsed time
+        # is already close to dt_s, so this doesn't change behavior for a
+        # real fast-motion event (confirmed separately: a genuine joint-
+        # velocity divergence near the wrist singularity was still caught
+        # correctly the same day, before this fix, at real elapsed times
+        # close to nominal).
+        self._prev_check_ns: int | None = None
 
     def set_start(self, tcp_pose, move_axis_index: int) -> None:
         if move_axis_index not in (0, 1, 2):
@@ -499,6 +518,7 @@ class CartesianMoveMonitor:
         self._prev_speed_mps = None
         self._prev_abs_axis_err = None
         self._axis_err_grow_count = 0
+        self._prev_check_ns = time.monotonic_ns()
 
     def check(
         self,
@@ -555,11 +575,27 @@ class CartesianMoveMonitor:
         if step_m > self.limits.max_waypoint_jump_m:
             decision.add(f"waypoint jump {step_m:.5f} m > {self.limits.max_waypoint_jump_m} m")
 
-        speed_mps = step_m / dt_s
+        # Use whichever is LONGER: the caller-supplied nominal dt_s, or the
+        # real measured elapsed time since the previous check()/set_start()
+        # call -- never shorter than either. See __init__'s _prev_check_ns
+        # comment for the real-hardware bug this fixes (the gap between
+        # set_start() and the first check() can be meaningfully longer than
+        # one nominal control period, e.g. from real setup work in between,
+        # and dividing a real position delta by too-small an assumed dt_s
+        # inflates speed/accel). Taking the max (not just measured time)
+        # keeps this a no-op for synthetic/test call sequences that invoke
+        # check() back-to-back with no real sleep -- there, measured elapsed
+        # time is always far smaller than the test's own intended dt_s, so
+        # max() always resolves to dt_s, unchanged from before this fix.
+        now_ns = time.monotonic_ns()
+        measured_dt_s = (now_ns - self._prev_check_ns) / 1e9 if self._prev_check_ns is not None else float(dt_s)
+        real_dt_s = max(float(dt_s), measured_dt_s)
+
+        speed_mps = step_m / real_dt_s
         if speed_mps > self.limits.max_tcp_speed_mps:
             decision.add(f"TCP speed {speed_mps:.4f} m/s > {self.limits.max_tcp_speed_mps} m/s")
         if self._prev_speed_mps is not None:
-            accel_mps2 = abs(speed_mps - self._prev_speed_mps) / dt_s
+            accel_mps2 = abs(speed_mps - self._prev_speed_mps) / real_dt_s
             if accel_mps2 > self.limits.max_tcp_accel_mps2:
                 decision.add(
                     f"TCP acceleration {accel_mps2:.4f} m/s^2 > {self.limits.max_tcp_accel_mps2} m/s^2"
@@ -581,5 +617,6 @@ class CartesianMoveMonitor:
         self._prev_abs_axis_err = axis_err
         self._prev_pos = pos.copy()
         self._prev_speed_mps = speed_mps
+        self._prev_check_ns = now_ns
 
         return decision
