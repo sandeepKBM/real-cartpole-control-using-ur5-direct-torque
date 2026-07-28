@@ -1,0 +1,201 @@
+# Residual-torque variant of config/rl_gain_scheduling_alpha05_bidirectional_adaptive_lambda.yaml
+# (preserved unmodified). That config's from-scratch "policy outputs all 11
+# gains" training run (run-name alpha05_bidirectional_adaptive_lambda_fix,
+# 3M steps) FAILED completely against the correctly-reproduced bug: 0/8
+# valid across the dx=-0.20..+0.20 grid, including trivially easy cases the
+# fixed-gain baseline passes cleanly (e.g. dx=+0.05: baseline quality 0.631,
+# learned 0.076). Trace inspection showed the policy spending long stretches
+# of each episode at kp_x~0 (near-zero X stiffness) before ever converging
+# to reasonable gains -- it hadn't learned a stable gain-scheduling strategy
+# in this harder (much more failure-prone, hence less real experience per
+# wall-clock) environment within the same budget that worked for the
+# easier, bug-free environment the first (wrongly-configured) run used.
+#
+# This config takes the same fix as config/rl_gain_scheduling_residual_torque.yaml:
+# gains are FIXED for the whole episode (the validated tuned values --
+# already passing 7/8 of this exact grid) and the policy only learns a
+# small, bounded torque correction on top. Much narrower/easier learning
+# problem than re-deriving all 11 gains from scratch, and starts from an
+# already-mostly-working baseline instead of random gains.
+#
+# --- residual-magnitude-penalized variant -------------------------------
+# The unpenalized residual-torque run (run-name
+# alpha05_bidirectional_adaptive_lambda_residual_fix, config
+# rl_gain_scheduling_alpha05_bidirectional_adaptive_lambda_residual.yaml,
+# preserved unmodified) scored 2/8 valid, WORSE than the fixed-gain
+# baseline's own 7/8 (later re-measured at 88% i.e. 7/8) on this exact
+# grid. Diagnosis: the reward only penalized torque_smooth_weight
+# (step-to-step CHANGE in total applied tau), never the residual's own
+# MAGNITUDE, so the policy had no incentive to leave already-good cases
+# alone -- it applied residual torque indiscriminately and destabilized
+# X-axis tracking (new "axis_error grew for 100 consecutive steps" guard
+# trips) on cases the baseline already passed cleanly, while on the one
+# case it was meant to fix (dx=-0.20m) it suppressed the orientation-drift
+# mechanism (0.031 rad, well under the 0.35 rad limit) but still failed,
+# now via that X-tracking guard instead.
+#
+# Two complementary fixes, in priority order:
+#
+# 1. (PRIMARY) reward.residual_magnitude_weight: 0.05 -- a direct, always-on
+#    penalty of weight * sum(residual_tau_nm ** 2) added every step in
+#    residual_torque mode (see gain_scheduling_env.py). Sizing reasoning,
+#    anchored to this config's own reward scale and the new max_nm below
+#    ([3.0, 3.0, 3.0, 1.5, 1.5, 1.5]):
+#      - sum(max_nm ** 2) = 3*3.0^2 + 3*1.5^2 = 27 + 6.75 = 33.75, so a
+#        policy pinning the residual at its bound on all 6 joints every
+#        step pays 0.05 * 33.75 ~= 1.69 per step -- deliberately set close
+#        to orientation_weight * max_orientation_error_rad = 5.0 * 0.35 =
+#        1.75, i.e. as costly as sitting at the hard orientation-failure
+#        boundary every step. That's a strong, on-the-order-of-the-worst-
+#        case-disturbance disincentive against maxing out residual torque
+#        with no benefit, while staying far below terminal_safety_penalty
+#        (-25.0) -- if spending near-max residual is genuinely what it
+#        takes to avoid a guard trip on dx=-0.20m, that trade is still
+#        strongly reward-positive.
+#      - At light, plausibly-useful residual usage (~20% of max_nm on all
+#        6 joints, sum sq = 0.04 * 33.75 = 1.35), the penalty is
+#        0.05 * 1.35 ~= 0.0675 per step -- comparable in scale to
+#        x_hold_weight * a 0.0135 m tracking error (5.0 * 0.0135 =
+#        0.0675), i.e. small residual use costs about as much as a modest
+#        positional error, so it's only "worth it" if it buys back a
+#        comparable or larger reduction in x/y/z/orientation error. This
+#        preserves the ability to use residual torque where it actually
+#        helps (the dx=-0.20m fix) without the "free to always apply
+#        torque" gap the unpenalized run exploited.
+# 2. (SECONDARY, complementary -- not relied on alone per the task's own
+#    warning that a small-but-always-used residual can still destabilize
+#    working cases) env.residual_torque.max_nm tightened from
+#    [5.0, 5.0, 5.0, 2.0, 2.0, 2.0] to [3.0, 3.0, 3.0, 1.5, 1.5, 1.5]: a
+#    40% cut on the shoulder/elbow joints (150 Nm torque_limits_initial --
+#    5 Nm was already a small fraction, 3 Nm tightens the ceiling on how
+#    much uncontrolled-by-the-validated-law torque can stack on top of the
+#    controller's own output) and a 25% cut on the wrist joints (28 Nm
+#    torque_limits_initial -- these are the tightest-limited joints in the
+#    whole system and the ones nearest the wrist_2=0 singularity this bug
+#    lives at, so keeping their residual bound tighter in relative terms
+#    is deliberate, not just a flat percentage cut).
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  posture_reanchor_on_settle: true
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  # The flags that make the documented directional-asymmetry bug actually
+  # reproduce -- copied from config/ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml,
+  # same as rl_gain_scheduling_alpha05_bidirectional_adaptive_lambda.yaml.
+  lambda_diagonal_shaping: true
+  lambda_adaptive_regularization: true
+  lambda_regularization_far: 1.0e-4
+  lambda_cond_low: 1.0e4
+  lambda_cond_high: 1.0e8
+  jacobian_singular_cond_max: 1.0e18
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.35
+
+env:
+  control_decimation_steps: 1
+  height_alpha_range: [0.5, 0.5]
+  target_x_delta_range_m: [-0.20, 0.20]
+  move_duration_s: 1.0
+  hold_duration_s: 2.0
+  max_episode_seconds: 3.0
+  record_lightweight_trace: true
+  full_trace_logging: false
+  gain_bounds:
+    kp_x: [0.0, 800.0]
+    kd_x: [0.0, 80.0]
+    kp_y: [0.0, 160.0]
+    kd_y: [0.0, 30.0]
+    kp_z: [0.0, 240.0]
+    kd_z: [0.0, 40.0]
+    kp_rot: [0.0, 30.0]
+    kd_rot: [0.0, 40.0]
+    kp_posture: [0.0, 100.0]
+    kd_posture: [0.0, 24.0]
+    kd_joint: [0.0, 16.0]
+  action_mode: "residual_torque"
+  residual_torque:
+    fixed_gains:
+      kp_x: 400.0
+      kd_x: 40.0
+      kp_y: 80.0
+      kd_y: 15.0
+      kp_z: 120.0
+      kd_z: 20.0
+      kp_rot: 0.0
+      kd_rot: 10.0
+      kp_posture: 25.0
+      kd_posture: 6.0
+      kd_joint: 4.0
+    max_nm: [3.0, 3.0, 3.0, 1.5, 1.5, 1.5]
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  gain_smooth_weight: 0.01
+  torque_smooth_weight: 0.001
+  terminal_safety_penalty: -25.0
+  terminal_quality_weight: 50.0
+  progress_weight: 50.0
+  move_phase_disturbance_scale: 0.3
+  # Primary fix for this config -- see the header comment above for the
+  # full sizing derivation relative to max_nm and orientation_weight.
+  residual_magnitude_weight: 0.05
+
+training:
+  policy: "MlpPolicy"
+  net_arch: [128, 128]
+  learning_rate: 3.0e-4
+  n_steps: 1024
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  total_timesteps: 3000000
+  n_envs: 57
+  device: "cpu"
+  seed: 0

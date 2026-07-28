@@ -384,6 +384,20 @@ class GainSchedulingEnv(gym.Env):
         progress_reward = progress_weight * (self._prev_abs_x_error - abs_x_error)
         self._prev_abs_x_error = abs_x_error
 
+        # Direct residual-torque magnitude penalty (default weight 0.0 = no
+        # change, and always 0.0 in "gains" mode where residual_tau is None
+        # -- matches the existing residual_tau is None guard pattern used
+        # elsewhere in this method). torque_smooth_weight only penalizes
+        # step-to-step CHANGE in the total applied tau, not the residual's
+        # own magnitude, so a policy can apply a large-but-constant residual
+        # for free; this term gives a direct, always-on incentive to leave
+        # already-good cases alone (residual ~= 0) and only spend residual
+        # torque where it measurably helps.
+        residual_magnitude_weight = float(self._reward_cfg.get("residual_magnitude_weight", 0.0))
+        residual_magnitude_penalty = 0.0
+        if residual_tau is not None and residual_magnitude_weight > 0.0:
+            residual_magnitude_penalty = residual_magnitude_weight * float(np.sum(residual_tau ** 2))
+
         reward = self._reward_cfg["alive_bonus"]
         reward -= self._reward_cfg["x_hold_weight"] * abs_x_error
         reward -= disturbance_scale * self._reward_cfg["y_hold_weight"] * abs(y_error)
@@ -391,6 +405,7 @@ class GainSchedulingEnv(gym.Env):
         reward -= disturbance_scale * self._reward_cfg["orientation_weight"] * abs(orientation_error_norm)
         reward -= self._reward_cfg["gain_smooth_weight"] * float(np.sum((action - self._prev_action) ** 2))
         reward -= self._reward_cfg["torque_smooth_weight"] * float(np.sum((tau - self._prev_tau) ** 2))
+        reward -= residual_magnitude_penalty
         reward += progress_reward
 
         if self._record_lightweight_trace or self._trace_writer is not None:
@@ -424,6 +439,7 @@ class GainSchedulingEnv(gym.Env):
             "target_x_delta": self._target_x_delta,
             "reward_components": {
                 "progress_reward": progress_reward,
+                "residual_magnitude_penalty": residual_magnitude_penalty,
                 "disturbance_scale": disturbance_scale,
                 "in_move_phase": in_move_phase,
             },

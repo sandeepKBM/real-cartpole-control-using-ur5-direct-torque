@@ -248,7 +248,9 @@ _FIXED_TUNED_GAINS = {
 }
 
 
-def _residual_torque_config(tmp_path: Path, *, max_nm=None, name="residual_override.yaml") -> Path:
+def _residual_torque_config(
+    tmp_path: Path, *, max_nm=None, name="residual_override.yaml", reward_overrides=None
+) -> Path:
     import yaml
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -258,6 +260,8 @@ def _residual_torque_config(tmp_path: Path, *, max_nm=None, name="residual_overr
         "fixed_gains": dict(_FIXED_TUNED_GAINS),
         "max_nm": max_nm if max_nm is not None else [5.0, 5.0, 5.0, 2.0, 2.0, 2.0],
     }
+    if reward_overrides:
+        cfg["reward"].update(reward_overrides)
     out = tmp_path / name
     out.write_text(yaml.dump(cfg), encoding="utf-8")
     return out
@@ -331,6 +335,72 @@ def test_residual_torque_requires_explicit_max_nm(tmp_path: Path):
     out.write_text(yaml.dump(cfg), encoding="utf-8")
     with pytest.raises(ValueError):
         GainSchedulingEnv(config_path=out)
+
+
+def test_residual_magnitude_weight_absent_is_zero_penalty_in_gains_mode():
+    # "gains" mode never computes residual_tau (it's None), so the penalty
+    # must be a no-op there regardless of the config key -- guards the
+    # residual_tau is None branch documented in gain_scheduling_env.py.
+    env = GainSchedulingEnv()
+    assert "residual_magnitude_weight" not in env._reward_cfg
+    env.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    action = gains_to_normalized_action(_FIXED_TUNED_GAINS, env._gain_bounds)
+    _, _, _, _, info = env.step(action)
+    assert info["reward_components"]["residual_magnitude_penalty"] == 0.0
+
+
+def test_residual_magnitude_weight_zero_matches_current_behavior(tmp_path: Path):
+    # Default config has no residual_magnitude_weight key at all (weight
+    # falls back to 0.0 via .get()); an explicit residual_magnitude_weight:
+    # 0.0 must produce byte-identical reward/info to that default -- this is
+    # the "existing configs are byte-identical" contract for the new key.
+    cfg_default = _residual_torque_config(tmp_path, name="residual_default.yaml")
+    cfg_explicit_zero = _residual_torque_config(
+        tmp_path, name="residual_explicit_zero.yaml", reward_overrides={"residual_magnitude_weight": 0.0}
+    )
+    action = np.full(RESIDUAL_ACTION_DIM, 0.8, dtype=np.float32)
+
+    env_default = GainSchedulingEnv(config_path=cfg_default)
+    env_default.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    _, reward_default, _, _, info_default = env_default.step(action)
+
+    env_zero = GainSchedulingEnv(config_path=cfg_explicit_zero)
+    env_zero.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    _, reward_zero, _, _, info_zero = env_zero.step(action)
+
+    assert info_default["reward_components"]["residual_magnitude_penalty"] == 0.0
+    assert info_zero["reward_components"]["residual_magnitude_penalty"] == 0.0
+    assert reward_zero == pytest.approx(reward_default, abs=1e-12)
+
+
+def test_residual_magnitude_weight_penalizes_large_residual(tmp_path: Path):
+    # Same state, same episode-start conditions, only the residual action
+    # differs -- a nonzero residual_magnitude_weight must measurably reduce
+    # reward for a large residual relative to a near-zero one, and must
+    # leave the near-zero-residual reward almost untouched (small residual
+    # squared is small).
+    cfg_path = _residual_torque_config(
+        tmp_path, name="residual_penalized.yaml", reward_overrides={"residual_magnitude_weight": 1.0}
+    )
+    large_action = np.full(RESIDUAL_ACTION_DIM, 0.8, dtype=np.float32)
+    small_action = np.full(RESIDUAL_ACTION_DIM, 1e-4, dtype=np.float32)
+
+    env_large = GainSchedulingEnv(config_path=cfg_path)
+    env_large.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    _, reward_large, _, _, info_large = env_large.step(large_action)
+
+    env_small = GainSchedulingEnv(config_path=cfg_path)
+    env_small.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.05})
+    _, reward_small, _, _, info_small = env_small.step(small_action)
+
+    penalty_large = info_large["reward_components"]["residual_magnitude_penalty"]
+    penalty_small = info_small["reward_components"]["residual_magnitude_penalty"]
+    assert penalty_large > penalty_small >= 0.0
+    # Directly reproduce the formula: weight * sum(residual_tau ** 2).
+    max_nm = np.array([5.0, 5.0, 5.0, 2.0, 2.0, 2.0])
+    expected_large = 1.0 * float(np.sum((0.8 * max_nm) ** 2))
+    assert penalty_large == pytest.approx(expected_large, rel=1e-5)
+    assert reward_large < reward_small
 
 
 def test_env_safety_termination_reports_reason():
