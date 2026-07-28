@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +67,7 @@ def run_x_transport_direct_torque(
     dynamics_source: str = "rtde",
     coriolis_feedforward: bool = False,
     gain_overrides: dict[str, float] | None = None,
+    max_tcp_accel_mps2_override: float | None = None,
 ) -> DirectTorqueTransportResult:
     if not motion_opt_in:
         raise ValueError("motion_opt_in must be True for a live direct-torque transport")
@@ -132,6 +133,14 @@ def run_x_transport_direct_torque(
     # thresholds for qd/drift/orientation so this doesn't introduce a second,
     # different trip point for a check that already exists.
     move_limits = CartesianMoveLimits.from_impedance_safety_config(safety_cfg)
+    if max_tcp_accel_mps2_override is not None:
+        # See the identical override in hardware/position_transport.py for
+        # the full rationale (real-hardware noise-amplification finding,
+        # 2026-07-28). Direct-torque runs at 500 Hz vs position mode's
+        # 125 Hz, so the same one-step finite-difference accel estimate's
+        # noise amplification (~1/dt^2) is ~16x worse here -- expect this
+        # override to matter more, not less, in this mode.
+        move_limits = replace(move_limits, max_tcp_accel_mps2=float(max_tcp_accel_mps2_override))
     move_monitor = CartesianMoveMonitor(move_limits)
     move_monitor.set_start(state0.tcp_pose, move_axis_index=0)
 

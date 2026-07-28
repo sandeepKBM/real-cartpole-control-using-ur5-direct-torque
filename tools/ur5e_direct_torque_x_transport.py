@@ -110,6 +110,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--max-tcp-accel-mps2",
+        type=float,
+        default=None,
+        help=(
+            "position and direct_torque modes. Explicit, opt-in override of "
+            "CartesianMoveLimits.max_tcp_accel_mps2 (class default 0.5 m/s^2). Added "
+            "2026-07-28: on real hardware the naive one-step-finite-difference accel "
+            "estimate amplifies raw RTDE position noise (~1/dt^2 -- ~15,600x at "
+            "position mode's 125Hz, ~250,000x at direct_torque's 500Hz) during a "
+            "min-jerk move's near-zero-velocity onset, tripping spuriously (observed "
+            "0.72 and 0.90 m/s^2 in position mode across two trials, trip point "
+            "varying step 1 vs step 6, every other metric -- drift/orientation/qd -- "
+            "negligible). Does not fix the underlying numerical issue; a deliberate, "
+            "visible override for continuing real-hardware testing, not a silent "
+            "threshold change. Not wired into urscript mode yet."
+        ),
+    )
+    p.add_argument(
         "--coriolis-feedforward",
         action="store_true",
         help=(
@@ -199,6 +217,9 @@ def main() -> int:
             start_q_rad=start_q_rad,
             coriolis_feedforward=bool(args.coriolis_feedforward),
             gain_overrides=gain_overrides,
+            max_tcp_accel_mps2_override=(
+                None if args.max_tcp_accel_mps2 is None else float(args.max_tcp_accel_mps2)
+            ),
         )
     except (RTDELinkError, ValueError) as exc:
         print(f"RTDE/start-pose failed: {exc}", file=sys.stderr)

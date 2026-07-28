@@ -73,6 +73,7 @@ def run_x_transport(
     start_q_rad: np.ndarray | None = None,
     coriolis_feedforward: bool = False,
     gain_overrides: dict[str, float] | None = None,
+    max_tcp_accel_mps2_override: float | None = None,
 ) -> XTransportResult:
     mode = normalize_control_mode(control_mode)
     if start_q_rad is not None:
@@ -111,6 +112,7 @@ def run_x_transport(
             output_dir=output_dir,
             motion_opt_in=motion_opt_in,
             shadow_osc=shadow_osc,
+            max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
         )
         return XTransportResult(
             ok=raw_pos.ok,
@@ -158,6 +160,7 @@ def run_x_transport(
         dynamics_source=dynamics_source,
         coriolis_feedforward=coriolis_feedforward,
         gain_overrides=gain_overrides,
+        max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
     )
     return XTransportResult(
         ok=raw_dt.ok,

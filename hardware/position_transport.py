@@ -42,7 +42,9 @@ class PositionTransportResult:
     trace_path: Path | None
 
 
-def _load_cartesian_limits(config_path: Path, robot_ip: str) -> CartesianMoveLimits:
+def _load_cartesian_limits(
+    config_path: Path, robot_ip: str, *, max_tcp_accel_mps2_override: float | None = None
+) -> CartesianMoveLimits:
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     safety_raw = (cfg.get("controller", {}) or {}).get("safety", {}) or {}
     base = CartesianMoveLimits(
@@ -50,7 +52,25 @@ def _load_cartesian_limits(config_path: Path, robot_ip: str) -> CartesianMoveLim
         max_orientation_error_rad=float(safety_raw.get("max_orientation_error_rad", 0.25)),
         qd_max_radps=float(safety_raw.get("max_joint_velocity_radps", 3.0)),
     )
-    return CartesianMoveLimits.for_robot(robot_ip, base=base)
+    # Explicit, opt-in override only -- default (None) leaves the class's own
+    # 0.5 m/s^2 default untouched. Added 2026-07-28 after real-hardware
+    # testing (first-ever position-mode moves on this robot) showed the
+    # naive one-step finite-difference accel estimate (Δspeed/dt, itself
+    # already a finite difference of position) amplifies raw RTDE telemetry
+    # noise by ~1/dt^2 (~15,600x at 125Hz) specifically during a min-jerk
+    # move's near-zero-velocity onset, where there's no real signal to
+    # swamp that noise -- two independent real trials tripped at 0.72 and
+    # 0.90 m/s^2 with every other metric (drift, orientation, qd) utterly
+    # negligible (qd <= 0.018 rad/s), and the trip point varied between
+    # runs (step 1 vs step 6), consistent with noise, not a fixed physical
+    # event. The underlying numerical-robustness bug (differentiate only
+    # once real speed clears the noise floor) is not fixed here -- this is
+    # a deliberate, explicit, visible override for continuing real-hardware
+    # testing, not a silent threshold change.
+    overrides: dict[str, float] = {}
+    if max_tcp_accel_mps2_override is not None:
+        overrides["max_tcp_accel_mps2"] = float(max_tcp_accel_mps2_override)
+    return CartesianMoveLimits.for_robot(robot_ip, base=base, **overrides)
 
 
 def run_x_transport_position(
@@ -66,6 +86,7 @@ def run_x_transport_position(
     shadow_osc: bool = True,
     servo_gain: float = 300.0,
     servo_lookahead_s: float = 0.1,
+    max_tcp_accel_mps2_override: float | None = None,
 ) -> PositionTransportResult:
     """Stream the same min-jerk move+hold X profile through ``servoL``.
 
@@ -96,7 +117,11 @@ def run_x_transport_position(
         except ImportError:
             shadow_osc = False
 
-    monitor = CartesianMoveMonitor(_load_cartesian_limits(config_path, link.robot_ip))
+    monitor = CartesianMoveMonitor(
+        _load_cartesian_limits(
+            config_path, link.robot_ip, max_tcp_accel_mps2_override=max_tcp_accel_mps2_override
+        )
+    )
     dt_s = 1.0 / float(rate_hz)
     servo_time_s = dt_s * 1.5
 
