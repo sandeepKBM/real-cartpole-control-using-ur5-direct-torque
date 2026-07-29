@@ -117,6 +117,26 @@ def _link_with_sequence(tcp_pose_sequence) -> tuple[UR5eLink, _FakeControl]:
     return link, control
 
 
+def _link_with_pose_and_q_sequences(tcp_pose_sequence, q_sequence) -> tuple[UR5eLink, _FakeControl]:
+    receive = _FakeReceive(tcp_pose_sequence)
+    q_rows = [list(q) for q in q_sequence]
+
+    def get_actual_q():
+        idx = max(receive._i, 0)
+        idx = min(idx, len(q_rows) - 1)
+        return list(q_rows[idx])
+
+    receive.getActualQ = get_actual_q
+    control = _FakeControl()
+    link = UR5eLink(
+        "127.0.0.1",
+        500.0,
+        receive_factory=lambda ip, freq: receive,
+        control_factory=lambda ip, freq: control,
+    )
+    return link, control
+
+
 def test_move_cartesian_bounded_blocked_without_motion_opt_in():
     link, control = _link_with_sequence([[0, 0, 0.5, 0, 0, 0]] * 10)
     link.connect(with_control=True)
@@ -200,6 +220,49 @@ def test_move_cartesian_bounded_writes_trace_and_summary(tmp_path):
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["success"] is True
     assert summary["trace_path"] == str(trace_path)
+
+
+def test_move_cartesian_bounded_stops_on_shoulder_pan_delta(tmp_path):
+    n_steps = 5
+    start_pose = [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]
+    poses = [start_pose]
+    q_rows = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]
+    for i in range(1, n_steps + 1):
+        pose = list(start_pose)
+        pose[1] = 0.001 * i
+        poses.append(pose)
+        q_rows.append([0.03 * i, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+    trace_path = tmp_path / "trace.jsonl"
+    summary_path = tmp_path / "summary.json"
+    link, control = _link_with_pose_and_q_sequences(poses, q_rows)
+    link.connect(with_control=True)
+    monitor = CartesianMoveMonitor(
+        CartesianMoveLimits(max_tcp_speed_mps=100.0, max_tcp_accel_mps2=1000.0, max_waypoint_jump_m=1.0)
+    )
+    estop = EStopLatch()
+    result = move_cartesian_bounded(
+        link,
+        monitor,
+        estop,
+        axis_index=1,
+        distance_m=0.02,
+        motion_opt_in=True,
+        duration_s=0.04,
+        rate_hz=100.0,
+        trace_path=trace_path,
+        summary_path=summary_path,
+        max_shoulder_pan_delta_rad=0.05,
+    )
+
+    assert result.ok is False
+    assert "shoulder_pan_delta" in result.reason
+    assert estop.tripped is True
+    assert control.servo_stop_calls == 1
+    rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["shoulder_pan_delta_rad"] > 0.05
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["max_shoulder_pan_delta_rad"] == pytest.approx(0.05)
 
 
 def test_move_cartesian_bounded_stops_early_on_off_axis_drift_and_trips_estop():

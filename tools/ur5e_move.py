@@ -98,6 +98,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory for servoL motion trace.jsonl and summary.json. Default: timestamped under outputs/hardware_transport/.",
     )
+    p.add_argument(
+        "--max-shoulder-pan-delta-rad",
+        type=float,
+        default=None,
+        help="Abort if shoulder_pan changes by more than this amount during the servoL move.",
+    )
     p.add_argument("--dry-run", action="store_true", help="Plan the move and print it. No connection at all.")
     p.add_argument(
         "--i-understand-this-moves-the-robot",
@@ -203,6 +209,7 @@ def main() -> int:
             rate_hz=args.rate_hz,
             trace_path=trace_path,
             summary_path=summary_path,
+            max_shoulder_pan_delta_rad=args.max_shoulder_pan_delta_rad,
         )
     finally:
         link.disconnect()

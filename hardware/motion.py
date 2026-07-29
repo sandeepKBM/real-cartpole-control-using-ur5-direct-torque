@@ -119,6 +119,7 @@ def move_cartesian_bounded(
     gain: float = 300.0,
     trace_path: Path | None = None,
     summary_path: Path | None = None,
+    max_shoulder_pan_delta_rad: float | None = None,
 ) -> MoveResult:
     """Stream one bounded, safety-monitored Cartesian move.
 
@@ -167,6 +168,9 @@ def move_cartesian_bounded(
                 "axis_index": int(axis_index),
                 "lookahead_time_s": float(lookahead_time_s),
                 "gain": float(gain),
+                "max_shoulder_pan_delta_rad": (
+                    None if max_shoulder_pan_delta_rad is None else float(max_shoulder_pan_delta_rad)
+                ),
                 "safety_limits": {
                     "max_off_axis_drift_m": float(monitor.limits.max_off_axis_drift_m),
                     "max_orientation_error_rad": float(monitor.limits.max_orientation_error_rad),
@@ -194,6 +198,7 @@ def move_cartesian_bounded(
         )
 
     start_pose = start_state.tcp_pose
+    start_q = start_state.q.copy()
     monitor.set_start(start_pose, axis_index)
     waypoints = plan_waypoints(
         start_pose,
@@ -239,6 +244,7 @@ def move_cartesian_bounded(
         stale_reason = stale_monitor.record(state.robot_timestamp_s, state.host_stamp_ns)
         orientation_error_rad = float(np.linalg.norm(state.tcp_pose[3:] - start_pose[3:]))
         axis_error_m = float(waypoint[axis_index] - state.tcp_pose[axis_index])
+        shoulder_pan_delta_rad = float(state.q[0] - start_q[0])
         off_axis_drift_m = {}
         for axis_name, idx in zip(("x", "y", "z"), range(3)):
             if idx != axis_index:
@@ -258,6 +264,7 @@ def move_cartesian_bounded(
                 "target_tcp_pose": waypoint.tolist(),
                 "axis_index": int(axis_index),
                 "axis_error_m": axis_error_m,
+                "shoulder_pan_delta_rad": shoulder_pan_delta_rad,
                 "off_axis_drift_m": off_axis_drift_m,
                 "orientation_error_rad": orientation_error_rad,
                 "axis_target_moving": bool(i < len(waypoints) - 1),
@@ -270,6 +277,23 @@ def move_cartesian_bounded(
                 MoveResult(
                     ok=False,
                     reason=stale_reason,
+                    waypoints_sent=i + 1,
+                    stopped_early=True,
+                    final_tcp_pose=state.tcp_pose,
+                )
+            )
+
+        if max_shoulder_pan_delta_rad is not None and abs(shoulder_pan_delta_rad) > float(max_shoulder_pan_delta_rad):
+            reason = (
+                f"|shoulder_pan_delta| = {abs(shoulder_pan_delta_rad):.4f} rad "
+                f"> {float(max_shoulder_pan_delta_rad)} rad"
+            )
+            link.safe_stop(reason)
+            estop.trip(reason)
+            return _write_artifacts(
+                MoveResult(
+                    ok=False,
+                    reason=reason,
                     waypoints_sent=i + 1,
                     stopped_early=True,
                     final_tcp_pose=state.tcp_pose,
