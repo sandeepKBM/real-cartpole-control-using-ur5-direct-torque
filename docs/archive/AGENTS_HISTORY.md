@@ -525,6 +525,53 @@ Update it whenever a new workflow becomes reliable, a failure mode becomes clear
 - Do not rely on `sim.getJointForce()` in dynamic torque mode — it returns 0.0 on this build.
 - Do not add gravity compensation twice. The QP controller adds it internally; the runner should add it only in the IK PD / warmup paths.
 
+## Hardware Lane Audit + Fixes (2026-07-25)
+
+Moved here from `AGENTS.md` §4 2026-07-28 (that file's own rule is no chronological logs;
+the current-state summary and a pointer to this section stayed in place there).
+
+Four parallel review passes: hardware lane, RL pipeline, controller/simulation stack, and the
+code pulled from a separate session over the prior two days. Fixed, tested (167→180 passing,
+one pre-existing unrelated-and-flaky timing test not touched), and pushed:
+
+- Guardrail-gap fix: `CartesianMoveMonitor` layered onto `direct_torque` and `urscript`
+  modes, reusing each mode's already-active `ImpedanceSafetyConfig` thresholds for
+  qd/drift/orientation (so this doesn't introduce a second, different trip point for a check
+  that already existed) and `CartesianMoveLimits`' own defaults for the genuinely new
+  speed/accel/waypoint-jump checks. Previously `direct_torque`/`urscript` only had
+  `ImpedanceSafetyMonitor` (drift/orientation/joint-velocity/axis-growth, no Cartesian
+  kinematic ceiling) — the two modes capable of a torque runaway had the loosest guards.
+- Robot safety-status check: `hardware/safety.py::is_robot_safety_normal()` checks bit 0
+  (`IS_NORMAL_MODE`) of `getSafetyStatusBits()`'s documented bitmask convention — confirmed
+  against this project's own runtime (a live URSim `URControl` instance, checked 2026-07-07,
+  has `getSafetyStatusBits` and not `getSafetyStatus`), not just UR's documentation. `None`
+  (getter unavailable) is treated as "can't verify," not "abnormal." Wired into all four
+  loops (`motion.py`, `position_transport.py`, `direct_torque_transport.py`,
+  `urscript_transport.py`) — the telemetry was already being read
+  (`getSafetyStatusBits()`/`getSafetyStatus()` → `UR5eState.safety_status`) but never
+  inspected anywhere.
+- `hardware/urscript_transport.py`: every fault/stop path (monitor-read-failure,
+  safety-violation, supervisor-timeout, `finally`) now goes through one `_set_stop_register()`
+  helper that tries both `setInputIntRegister`/`setInputIntegerRegister` — previously only
+  setup tried both names, every actual stop signal tried only one, so a `ur_rtde` build
+  exposing only the other name would detect a fault and never actually stop the robot.
+- `hardware/urscript_transport.py::_read_state_from_receive` now raises `RTDEStateError` on
+  NaN/Inf, matching `hardware/link.py::UR5eLink.read_state()` — previously a corrupt reading
+  defeated every drift/orientation `abs(x) > threshold` check silently instead of failing
+  loudly (`abs(NaN) > thr` is `False`).
+- `tools/ur5e_move.py`: the TCP-speed guard was `max(0.05, peak_v * 1.2)` — derived from the
+  planned move's own peak velocity, so the check `peak_v > limit` could only ever compare
+  `peak_v` against `1.2 * peak_v` and could never fire on an aggressive-but-nominal move, only
+  on >20% overshoot from what was already planned. Now a fixed ceiling
+  (`CartesianMoveLimits.for_robot`'s own default, still URSim-relaxed via `is_likely_ursim`).
+
+Also from this audit: `max_deadline_ms` enforcement (`DeadlineMonitor`) and cycle-to-cycle
+staleness detection (`StaleStateMonitor`) were added to `hardware/safety.py` and wired into
+all four motion loops in commit `85498a0` — `AGENTS.md` was never updated to reflect this
+until 2026-07-28 (three days later, when a live-hardware session hit a real timing incident
+and the stale "not yet fixed" bullets were discovered and corrected; see
+`docs/status/timing_safety_gaps_audit_2026-07-28.md` for the follow-up analysis).
+
 ## Update Rule
 
 Whenever a new reliable command, launcher, env path, or failure signature is discovered, append it here before moving on.

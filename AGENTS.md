@@ -191,34 +191,12 @@ Guardrails enforced in code:
    2026-07-25; the telemetry was already being read (`getSafetyStatusBits()`/
    `getSafetyStatus()` → `UR5eState.safety_status`) but never inspected anywhere.
 
-**2026-07-25 audit + fixes** (four parallel review passes: hardware lane, RL pipeline,
-controller/simulation stack, and the code pulled from a separate session over the prior two
-days). Fixed, tested (167→180 passing, one pre-existing unrelated-and-flaky timing test not
-touched), and pushed:
-- Guardrail-gap fix above (item 5): `CartesianMoveMonitor` layered onto `direct_torque` and
-  `urscript` modes, reusing each mode's already-active `ImpedanceSafetyConfig` thresholds for
-  qd/drift/orientation (so this doesn't introduce a second, different trip point for a check
-  that already existed) and `CartesianMoveLimits`' own defaults for the genuinely new
-  speed/accel/waypoint-jump checks.
-- Robot safety-status check above (item 6): `hardware/safety.py::is_robot_safety_normal()`
-  checks bit 0 (`IS_NORMAL_MODE`) of `getSafetyStatusBits()`'s documented bitmask convention —
-  confirmed against this project's own runtime (a live URSim `URControl` instance, checked
-  2026-07-07, has `getSafetyStatusBits` and not `getSafetyStatus`), not just UR's
-  documentation. `None` (getter unavailable) is treated as "can't verify," not "abnormal."
-- `hardware/urscript_transport.py`: every fault/stop path (monitor-read-failure,
-  safety-violation, supervisor-timeout, `finally`) now goes through one `_set_stop_register()`
-  helper that tries both `setInputIntRegister`/`setInputIntegerRegister` — previously only
-  setup tried both names, every actual stop signal tried only one, so a `ur_rtde` build
-  exposing only the other name would detect a fault and never actually stop the robot.
-- `hardware/urscript_transport.py::_read_state_from_receive` now raises `RTDEStateError` on
-  NaN/Inf, matching `hardware/link.py::UR5eLink.read_state()` — previously a corrupt reading
-  defeated every drift/orientation `abs(x) > threshold` check silently instead of failing
-  loudly (`abs(NaN) > thr` is `False`).
-- `tools/ur5e_move.py`: the TCP-speed guard was `max(0.05, peak_v * 1.2)` — derived from the
-  planned move's own peak velocity, so the check `peak_v > limit` could only ever compare
-  `peak_v` against `1.2 * peak_v` and could never fire on an aggressive-but-nominal move, only
-  on >20% overshoot from what was already planned. Now a fixed ceiling
-  (`CartesianMoveLimits.for_robot`'s own default, still URSim-relaxed via `is_likely_ursim`).
+**2026-07-25 audit + fixes**: full detailed writeup moved to
+`docs/archive/AGENTS_HISTORY.md` (per this file's own no-chronological-logs rule). Summary of
+what landed: `CartesianMoveMonitor` layered onto `direct_torque`/`urscript` (item 5 above);
+robot safety-status bit checked every cycle in all four loops (item 6 above);
+`urscript_transport.py`'s stop-register and NaN/Inf handling fixed; `ur5e_move.py`'s
+self-referential speed guard replaced with a fixed ceiling.
 
 **Found, not yet fixed — flagged for a deliberate decision, not silently patched:**
 - **URScript (Mode 3) runs a hand-ported control law, not the validated one.** The on-robot
@@ -236,16 +214,30 @@ touched), and pushed:
   0.15m move from ~0.4s to ~0.25s with *lower* peak velocity/torque, no regression on
   long-hold/large-displacement spot checks — but needs a full validation sweep before
   trusting, and is a controller-math change, not a hardware-lane fix.
-- **`max_deadline_ms` (`UR5eSafetyLimits`) is defined but never enforced**, confirmed across
-  all three modes — a cycle overrun just runs late instead of aborting.
-- **No cycle-to-cycle staleness detection during motion.** `robot_timestamp_s` is captured
-  every read but never compared; `ConnectionHealth.is_alive()`/`record_failure()` is invoked
-  only in `ur5e_connect.py --watch`'s idle loop, never in any motion loop. `read_state()`'s
-  "never returns stale data" guarantee holds only for the raise-on-exception case — a
-  stalled-but-non-raising RTDE stream (returning the last buffered value, which `ur_rtde` can
-  do) would not be caught.
 - **RL gain-scheduling's never-move collapse has a credible root cause**, see
   `docs/CURRENT_STATUS.md` — not a hardware item, kept here only as a pointer.
+
+**Corrected 2026-07-28** (previously listed above as "found, not yet fixed" — both were
+already closed by commit `85498a0`, 2026-07-25, before that bullet list was written; this
+file was never updated after that commit landed):
+- `max_deadline_ms` (`UR5eSafetyLimits`) **is enforced** — `DeadlineMonitor`
+  (`hardware/safety.py`) is instantiated and checked every cycle in all four motion loops.
+  Real caveat found 2026-07-28 during live hardware testing: its flat 3.0ms threshold is
+  calibrated for the 125Hz loops (8ms period), not `direct_torque`'s 500Hz loop (2ms
+  period) — a real overrun there (up to ~2ms over) can sit under that floor by design. Not
+  fixed yet; full analysis and concrete fix proposals in
+  `docs/status/timing_safety_gaps_audit_2026-07-28.md`.
+- **Cycle-to-cycle staleness detection during motion exists** — `StaleStateMonitor`
+  (`hardware/safety.py`) is checked every cycle in all four motion loops, comparing
+  `robot_timestamp_s` against the host clock; trips after 5 consecutive frozen-vs-advancing
+  reads. Full trace of this mechanism in the same doc above.
+- Real 2026-07-28 hardware findings (wrist-singularity divergence in `position` mode; the
+  `CartesianMoveMonitor` accel estimate's own noise floor being far above its old default
+  threshold, now fixed via `accel_gap_cycles`/`speed_lowpass_alpha`; two real RTDE read
+  stalls, most likely the documented UR behavior of the robot controller deprioritizing
+  telemetry under its own load, not a bug in this codebase): see
+  `hardware_captures/2026-07-28_thinkrobot_172.16.71.77/README.md` and
+  `docs/status/clock_timing_late_cycles_2026-07-28.md`.
 
 Do-not-recreate (gravity/dynamics bugs, still relevant):
 - Do not tune gravity scale from single-joint probes; always test all 6 joints.
