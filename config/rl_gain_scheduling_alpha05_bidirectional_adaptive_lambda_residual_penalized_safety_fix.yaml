@@ -1,0 +1,193 @@
+# Safety-config-corrected variant of
+# config/rl_gain_scheduling_alpha05_bidirectional_adaptive_lambda_residual_penalized.yaml
+# (preserved unmodified, the best of the three prior real training attempts
+# at this problem: 5/8 valid vs the fixed-gain baseline's 7/8 on the
+# dx=-0.20..+0.20 grid at height_alpha=0.5).
+#
+# --- the mismatch found and fixed here (2026-07-29) ---------------------
+# Audited every field of this config's `controller:` block against
+# config/ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml -- the config
+# that AGENTS.md sec 3's 2026-07-27/28 directional-asymmetry finding was
+# actually measured against, and the one eval_gain_scheduler.py's
+# --baseline-config points at for this problem. Every field matched except
+# one: controller.safety.max_orientation_error_rad was 0.35 here vs 0.25 in
+# the source-of-truth config (confirmed identical in
+# ur5e_mujoco_torque_osc_tuned.yaml and ur5e_mujoco_torque_osc_tuned_
+# diagonal_lambda.yaml too -- 0.25 is the codebase-wide tuned value; 0.35
+# was never a considered/validated setting for this envelope, it's a stray
+# value inherited from the un-scoped default config/rl_gain_scheduling.yaml
+# and never revisited when the alpha05_bidirectional* family branched off).
+#
+# Why this matters, not just cosmetic: transport_metrics.py's own
+# valid_move_and_hold pass/fail uses a hardcoded 0.25 rad tolerance
+# (_NORMAL_ORIENTATION_TOL) independent of this config, so the *eval*
+# metric was never affected. But controller.safety.max_orientation_error_rad
+# drives ImpedanceSafetyMonitor's live guard (controller_core/safety.py),
+# which fires mid-episode and ends the episode with reward.
+# terminal_safety_penalty (-25.0) in GainSchedulingEnv.step(). At 0.35 rad,
+# episodes with orientation error between 0.25 and 0.35 rad -- exactly the
+# regime the documented bug lives in (baseline dx=-0.20m trips at 0.2498
+# rad under the real 0.25 rad guard) -- ran to duration_complete during
+# training instead of guard-terminating, so the policy never saw the harsh
+# terminal_safety_penalty for the failure mode it was meant to learn to
+# avoid; it only saw the weaker terminal_quality_weight signal (which is
+# still orientation-tolerance-aware via valid_move_and_hold, but a much
+# smaller magnitude, and only at episode end rather than at first breach).
+# This is the exact class of bug documented in eval_gain_scheduler.py's own
+# comment header (lines ~6-20): a config mismatch between what's trained on
+# and what's evaluated against/documented -- this time inside the training
+# env itself, not just the eval script's --baseline-config arg.
+#
+# Verified via the non-RL sanity check this fix requires before spending
+# any training compute (tools/ur5e_mujoco_torque_experiments.py --config
+# config/ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml, height_alpha=0.5,
+# dx=-0.20m): reproduces the documented failure exactly --
+# move_phase_max_abs_orientation_error_rad=0.2498, termination_reason
+# "||orientation error|| > 0.25 rad", valid_move_and_hold=false. This
+# config's own safety.max_orientation_error_rad now matches that (0.25),
+# so training-time guard behavior on this exact case matches what the
+# fixed-gain baseline and the documented finding both use.
+#
+# All other blocks (mujoco/controller gains/env/reward/training) are an
+# exact copy of the source config -- this is a single-field fix, not a
+# broader retune.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  posture_reanchor_on_settle: true
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  # The flags that make the documented directional-asymmetry bug actually
+  # reproduce -- copied from config/ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml,
+  # same as rl_gain_scheduling_alpha05_bidirectional_adaptive_lambda.yaml.
+  lambda_diagonal_shaping: true
+  lambda_adaptive_regularization: true
+  lambda_regularization_far: 1.0e-4
+  lambda_cond_low: 1.0e4
+  lambda_cond_high: 1.0e8
+  jacobian_singular_cond_max: 1.0e18
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    # Fixed 2026-07-29: was 0.35 in the source config (a stray, never-
+    # validated value inherited from the un-scoped default
+    # config/rl_gain_scheduling.yaml). 0.25 matches
+    # ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml -- the config the
+    # documented directional-asymmetry finding and the eval baseline both
+    # use. See the file header for the full mismatch writeup.
+    max_orientation_error_rad: 0.25
+
+env:
+  control_decimation_steps: 1
+  height_alpha_range: [0.5, 0.5]
+  target_x_delta_range_m: [-0.20, 0.20]
+  move_duration_s: 1.0
+  hold_duration_s: 2.0
+  max_episode_seconds: 3.0
+  record_lightweight_trace: true
+  full_trace_logging: false
+  gain_bounds:
+    kp_x: [0.0, 800.0]
+    kd_x: [0.0, 80.0]
+    kp_y: [0.0, 160.0]
+    kd_y: [0.0, 30.0]
+    kp_z: [0.0, 240.0]
+    kd_z: [0.0, 40.0]
+    kp_rot: [0.0, 30.0]
+    kd_rot: [0.0, 40.0]
+    kp_posture: [0.0, 100.0]
+    kd_posture: [0.0, 24.0]
+    kd_joint: [0.0, 16.0]
+  action_mode: "residual_torque"
+  residual_torque:
+    fixed_gains:
+      kp_x: 400.0
+      kd_x: 40.0
+      kp_y: 80.0
+      kd_y: 15.0
+      kp_z: 120.0
+      kd_z: 20.0
+      kp_rot: 0.0
+      kd_rot: 10.0
+      kp_posture: 25.0
+      kd_posture: 6.0
+      kd_joint: 4.0
+    max_nm: [3.0, 3.0, 3.0, 1.5, 1.5, 1.5]
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  gain_smooth_weight: 0.01
+  torque_smooth_weight: 0.001
+  terminal_safety_penalty: -25.0
+  terminal_quality_weight: 50.0
+  progress_weight: 50.0
+  move_phase_disturbance_scale: 0.3
+  residual_magnitude_weight: 0.05
+
+training:
+  policy: "MlpPolicy"
+  net_arch: [128, 128]
+  learning_rate: 3.0e-4
+  n_steps: 1024
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  total_timesteps: 3000000
+  # westeros has 72 CPU cores; use ~80% per the standing instruction when
+  # the machine is idle. At invocation time for this config's own training
+  # run (2026-07-29), the machine was NOT idle (load average ~76-79 on 72
+  # cores, ~93-95% CPU already in use by another user's real job --
+  # verified via `ps`/`top`/`mpstat` before launching) -- --n-envs was
+  # overridden at the CLI to a much smaller value for that specific run to
+  # avoid disturbing it. This field stays at 57 as the config's own
+  # documented default for a future idle-machine run; it was not the value
+  # actually used on 2026-07-29 (see docs/status/
+  # rl_gain_scheduling_alpha05_directional_fix_2026-07-29.md for the actual
+  # invocation and its rationale).
+  n_envs: 57
+  device: "cpu"
+  seed: 0
