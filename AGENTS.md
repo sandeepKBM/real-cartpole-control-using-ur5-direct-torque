@@ -199,20 +199,25 @@ robot safety-status bit checked every cycle in all four loops (item 6 above);
 self-referential speed guard replaced with a fixed ceiling.
 
 **Found, not yet fixed — flagged for a deliberate decision, not silently patched:**
-- **URScript (Mode 3) still omits singular-value wrench scaling; no real-hardware validation
-  exists for any URScript path yet (corrected 2026-07-29).** Nullspace posture projection and
-  geometric backtracking (previously listed here as missing) were fixed in commit `b24cdf4`
-  (2026-07-26) and are now numerically parity-tested against `x_axis_cartesian_impedance.py`
-  in `tests/hardware/test_urscript_parity.py` (415 lines) — see
-  `test_nullspace_projection_matches_python` (`atol=1e-8`) and
-  `test_backtracking_matches_python_under_saturation` (`atol=1e-6` under saturation); this file
-  is distinct from, and newer than, `tests/hardware/test_urscript_gen.py`, which this paragraph
-  previously (incorrectly) cited as having no such coverage. What's still genuinely open: the
-  on-robot script still omits `cond(J)`-based singular-value wrench scaling —
-  `test_gap_singular_scaling` in the same file currently asserts that gap exists (Python nulls
-  task torque near the singularity; URScript doesn't), not that it's closed. The ~250-run OSC
-  validation campaign, and this parity suite, are both Python-vs-Python only — no real-hardware
-  validation exists yet for any of the three URScript control-law behaviors above, fixed or not.
+- **URScript (Mode 3) now has full numerical parity with the Python controller on all three
+  known behaviors; no real-hardware validation exists for any of it yet (corrected 2026-07-29,
+  same night as the fix below).** Nullspace posture projection and geometric backtracking were
+  fixed in commit `b24cdf4` (2026-07-26); `cond(J)`-based singular-value wrench scaling was
+  fixed in commit `7406704` (2026-07-29) — URScript has no SVD, so `cond(J)` is estimated
+  on-robot via a from-scratch cyclic Jacobi eigenvalue algorithm
+  (`sigma_max` from `JᵀJ`'s top eigenvalue, `sigma_min` from the reciprocal of `inv(J)ᵀinv(J)`'s
+  top eigenvalue — deliberately not the naive smallest-eigenvalue-of-`JᵀJ` approach, which
+  squares the conditioning and loses precision past `cond(J)~1e8`). All three are now
+  numerically parity-tested against `x_axis_cartesian_impedance.py` in
+  `tests/hardware/test_urscript_parity.py`: `test_nullspace_projection_matches_python`
+  (`atol=1e-8`), `test_backtracking_matches_python_under_saturation` (`atol=1e-6` under
+  saturation), `test_gap_singular_scaling` (now asserts real parity — measured cond-estimate
+  relative error ~5.7e-11, torque diff ~9.8e-12 Nm at `cond(J)=1e7`). **Two real gaps remain**:
+  (1) no real-hardware/URSim execution of any of this has ever happened — only Python-vs-Python
+  parity is proven; (2) the Jacobi solver's per-cycle compute cost on real PolyScope hardware
+  has never been benchmarked — a from-scratch eigenvalue solve every control cycle is a real new
+  computational cost on the robot's own controller that nothing here proves fits the real-time
+  budget.
 - **`controller_core/x_axis_cartesian_impedance.py`'s global `cond(J)`-based `singular_scale`
   nulls task authority at the transport start pose.** Measured: freezes the controller for
   ~0.2s at the start of every move (`tau≈1e-11 Nm`), escaping only via numerical-noise
