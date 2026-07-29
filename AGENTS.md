@@ -304,3 +304,40 @@ Do-not-recreate (gravity/dynamics bugs, still relevant):
   experiment artifacts under `outputs/`, large binaries.
 - For every final response: list files changed, tests run, tests not run, and a rollback
   command.
+
+## 8. Remote compute / cluster usage (added 2026-07-29)
+
+`westeros` is a shared machine — `uptime` can show load ~100 on 72 cores from other users'
+jobs with no warning. Before launching a real training/sweep run, check `uptime`/`nproc` first;
+don't assume idle capacity.
+
+Rutgers CS `ilab1`-`ilab4.cs.rutgers.edu` are viable overflow capacity (same NFS home, same
+conda env, no file copying needed) but are teaching/interactive machines with real gotchas for
+unattended background jobs, found the hard way running RL training there:
+
+- **Per-process BLAS thread explosion**: with `OPENBLAS_NUM_THREADS` unset, each parallel worker
+  process (e.g. `SubprocVecEnv`) auto-detects the full core count and spawns that many BLAS
+  threads *itself* — `n_workers × n_cores` threads blows through the per-user `RLIMIT_NPROC`
+  cap fast. Always export `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+  NUMEXPR_NUM_THREADS=1` before launching multi-process CPU workloads; the parallelism should
+  come from having N processes, not from each process also being internally multi-threaded.
+- **Per-user memory cgroup cap, separate from system RAM**: `free -h` showing hundreds of GB
+  free is not the limit — check `cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/memory.max`.
+  Exceeding it triggers a silent cgroup OOM-kill: process vanishes with no Python traceback, no
+  dmesg access to confirm (unprivileged users usually can't read the kernel ring buffer). If a
+  background job dies cleanly mid-run with an empty log tail and no error, suspect this before
+  anything else.
+- **`nohup`+`disown` is not reliable on these hosts**: `systemd-logind`'s `Linger` setting for
+  the account can be `no` (and can get reset back to `no` even after `loginctl enable-linger
+  <user>` succeeds — cause not confirmed, possibly a periodic account-sync job). With no
+  lingering, all background processes get killed the moment the last SSH session to that host
+  closes, which happens naturally between one-shot SSH commands. Symptom: process dies silently,
+  no OOM signature, no traceback, checkpoints just stop. **Reliable fix**: don't background
+  remotely at all — run the job in the foreground of a single, continuously-open SSH connection
+  (e.g. wrapped in a local `run_in_background` shell job), so the host never sees zero sessions
+  for that account during the run.
+- **`pkill -f <pattern>` self-match trap**: the pattern you pass is itself part of your own
+  invoking shell's command line (since it arrived via an SSH command string), so a loose pattern
+  matches and kills the command issuing it before it can do anything else. Prefer killing by
+  explicit PID, or use the bracket trick (`grep "[m]emtest_probe"`) to exclude the invoking
+  process's own literal argument text from matching.

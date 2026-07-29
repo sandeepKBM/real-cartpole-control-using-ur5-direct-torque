@@ -2,7 +2,7 @@
 
 **Status:** design only. No code in this repo implements any of this yet.
 **Scope:** longer-term project, not tied to a specific lab date.
-**Last updated:** 2026-07-26
+**Last updated:** 2026-07-29
 
 This is the plan for automatically calibrating the OSC controller's gains against the
 real UR5e once it's available, instead of hand-tuning by eye the way the MuJoCo-side
@@ -46,6 +46,79 @@ robot. Real-hardware auto-tuning needs a paradigm that converges in **tens of tr
 not the thousands-to-millions of environment steps PPO needs. That means black-box
 per-episode optimization (Bayesian optimization / Optuna-style TPE) over a **small**
 number of scalar gains, not step-wise learning.
+
+## Revisited 2026-07-29: does SAC change the step-wise-RL rejection above?
+
+Asked directly: SAC is off-policy (replay buffer, many gradient updates per environment
+step) and far more sample-efficient than PPO in real-world transitions needed. Does that
+change the "why not step-wise RL on the real robot" conclusion above?
+
+**Partially, but not the way it sounds.** The original rejection cited two things: (1) PPO
+needs thousands-to-millions of environment steps, and (2) "a bad candidate is a bad
+candidate on a real robot." SAC's sample efficiency is a real, genuine answer to (1) — a
+replay buffer means each real transition gets reused across many gradient updates instead
+of being thrown away after one on-policy epoch, so the *number* of real episodes needed to
+learn something could plausibly drop from "thousands" to "tens." It is **not** an answer to
+(2): SAC's entropy-regularized exploration still commands live actions to the real robot
+during learning, every control cycle, stochastically. Sample efficiency reduces how much
+real data you need; it does nothing to make an individual exploratory action on a real arm
+safer. Those are separate problems, and the original doc's human-approval/sim-gate
+architecture exists specifically to solve the second one, not the first.
+
+**What actually changes the risk profile is a piece of infrastructure this repo already has
+built and tested**: `rl_gain_scheduling/gain_scheduling_env.py`'s `env.action_mode:
+"residual_torque"` path. Instead of a policy outputting full gain vectors (which is what
+the original "bad candidate is a bad candidate" framing was implicitly reacting to — a
+policy that could in principle command anything), this mode has the policy output a small,
+hard-bounded per-joint torque correction (`RESIDUAL_ACTION_DIM = 6`,
+`env.residual_torque.max_nm` — e.g. `[3.0, 3.0, 3.0, 1.5, 1.5, 1.5]` Nm in the config
+evaluated today) added on top of the *already-validated, fixed-gain* controller, then
+re-clipped to the configured joint torque limits (`gain_scheduling_env.py`'s `tau_total =
+np.clip(tau + residual_tau, ...)`). Worst case, a maximally-wrong residual action is still
+a small perturbation on top of a controller already known to behave safely — a
+fundamentally different risk shape than "the policy picks this cycle's gains outright." If
+step-wise fine-tuning on real hardware is ever pursued, this bounded-residual architecture
+is the only version of it worth considering; raw gain-output step-wise RL stays rejected
+for the reasons above regardless of algorithm.
+
+**Why this isn't being greenlit today.** This exact residual-torque, magnitude-penalized
+architecture was just trained and evaluated **in simulation** — zero real-hardware risk,
+the cheapest and safest possible test — at the real case it would need to fix
+(`height_alpha=0.5`, `dx=-0.20m`). Result: **0/8** valid runs vs the fixed-gain baseline's
+7/8, the worst of four real training attempts so far (see
+`docs/status/rl_gain_scheduling_alpha05_directional_fix_2026-07-29.md`). Sending an
+architecture that cannot beat the baseline in a risk-free simulator out onto real hardware
+— even under SAC, even under the bounded-residual action space — would be trading real
+physical risk for a policy not yet shown to help at all. That is a bad trade regardless of
+how sample-efficient the algorithm is.
+
+**Concrete prerequisite, added ahead of M0 below**: before any real-hardware step-wise
+fine-tuning is scoped further, the bounded-residual architecture must first **beat** the
+fixed-gain baseline in simulation, at the exact case it's meant to fix, not just fail less
+badly than a previous attempt. Until that's true there is no policy worth spending
+real-robot time or risk on. This is a sim-only, zero-hardware-risk piece of work and can
+proceed independently of (and in parallel with) the structural controller fix
+(`docs/status/wrist_orientation_task_2026-07-29.md` once that lands) — they are two
+different bets on the same underlying bug, not sequential.
+
+**If/when that prerequisite is met**, the extension to the plan below would be: swap M3's
+per-episode Bayesian optimization for a SAC fine-tuning loop that (a) starts from the
+sim-pretrained residual-torque checkpoint, (b) never widens the action space beyond the
+bounded residual (no raw-gain output, ever), (c) keeps every existing hardware safety
+monitor as an absolute, unmodified hard limit — same as the "explicitly out of scope"
+constraint below, this does not change, (d) extends M2's per-candidate sim-gate to a
+per-checkpoint sim-gate — a policy checkpoint must pass a fresh simulated evaluation before
+its next batch of real episodes is even proposed, and (e) keeps the existing "human
+confirms each batch" decision, now applied to batches of real episodes under a given
+checkpoint rather than batches of BO candidate gain vectors. The replay buffer may mix
+sim-collected and real-collected transitions (standard, reduces real-data needs further) as
+long as only sim-gated checkpoints ever get scheduled for real episodes. M4 (land the
+result as a new named config, never overwriting an existing validated one) is unchanged.
+
+This section does not change any decision made above — BO-over-fixed-gains remains the
+actual current plan. This is a documented answer to "what about SAC" so it doesn't need
+re-litigating from scratch later, with an honest, falsifiable gate on when it would become
+worth pursuing.
 
 ## Architecture: sim-gated Bayesian optimization
 
@@ -138,7 +211,9 @@ per the repo's "preserve old configs" convention (`AGENTS.md` §7).
 
 ## Explicitly out of scope for this plan
 
-- Step-wise/PPO-style RL directly on real hardware (see above).
+- Step-wise/PPO-style RL directly on real hardware (see above). Bounded-residual SAC
+  fine-tuning is a conditionally-revisitable exception, gated on the sim-only prerequisite
+  in "Revisited 2026-07-29" above — not in scope until that prerequisite is met.
 - Attempting to extend past the ~0.25-0.3m ceiling (per the "reliability" decision --
   revisit only if the `kp_rot=0` structural limit itself gets addressed first).
 - Any change to the safety monitors themselves. This plan adds a search loop *around*
