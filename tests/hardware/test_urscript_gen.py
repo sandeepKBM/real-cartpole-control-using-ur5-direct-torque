@@ -26,6 +26,12 @@ def test_render_urscript_from_tuned_yaml() -> None:
     assert "direct_torque(tau, viscous_scale=viscous, coulomb_scale=coulomb)" in script
     assert "kp_x = 400" in script
     assert "use_lambda = 1" in script
+    # jacobian_singular_cond_max is unset in ur5e_mujoco_torque_osc_tuned.yaml,
+    # so both the generator and CartesianImpedanceConfig fall back to the same
+    # class default (1e5) -- this is what makes test_urscript_parity.py's
+    # near-singular parity test exercise the real (non-disabled) threshold.
+    assert "cond_max = 100000" in script
+    assert "jacobi_sweeps = 8" in script
     assert "{{" not in script
 
 

@@ -17,16 +17,22 @@
 #     of distorting it. A final hard clamp_vec6 against tau_lim remains as the
 #     absolute safety backstop, matching the Python controller's own
 #     backtrack-then-hard-clip structure.
-#   - singular-value (cond(J)) wrench scaling omitted. This MATCHES the
-#     intended direction of config/ur5e_mujoco_torque_osc_tuned_no_singular_scale
-#     .yaml (2026-07-25), which disables that global scalar because it nulls task
-#     authority at the wrist-singular start pose. It does NOT match the BASE
-#     config/ur5e_mujoco_torque_osc_tuned.yaml, whose 1e5 cond threshold still
-#     collapses task torque near the singularity. Treat this script as targeting
-#     the no-singular-scale semantics. This is a deliberate, not-yet-closed gap:
-#     porting cond(J)-based scaling was not requested and the mechanism-analysis
-#     work of 2026-07-25/26 found the underlying singular_scale term counter-
-#     productive in the Python controller too (see AGENTS.md Sec 3/4).
+#   - singular-value (cond(J)) wrench scaling (2026-07-29): now implemented,
+#     baked from jacobian_singular_cond_max (matches
+#     CartesianImpedanceConfig.jacobian_singular_cond_max). URScript has no
+#     built-in SVD, so cond(J) -- the true 2-norm condition number
+#     sigma_max/sigma_min -- is ESTIMATED, not computed exactly, via two
+#     from-scratch Jacobi eigendecompositions (jacobi_eigenvalues_sym6
+#     below): sigma_max(J) from the top eigenvalue of J^T*J, and sigma_min(J)
+#     from the reciprocal of the top eigenvalue of inv(J)^T*inv(J). Forming
+#     J^T*J and reading its SMALLEST eigenvalue directly (the naive approach)
+#     squares the conditioning and loses all precision once cond(J) exceeds
+#     ~1e8; going through inv(J)'s own dominant eigenvalue avoids that trap.
+#     Measured against np.linalg.cond over randomized 6x6 Jacobians up to
+#     cond(J)=1e7 (the regime jacobian_singular_cond_max=1e5 actually gates):
+#     worst relative error ~2e-9 at 6 sweeps, using 8 for margin. This is an
+#     approximation with a documented accuracy envelope, not a bit-exact SVD
+#     port -- see docs/status/urscript_singular_scaling_parity_2026-07-29.md.
 #   - rotation is damping-only (Mx/My/Mz = -kd_rot*omega); there is no
 #     orientation-error / kp_rot term. The generator refuses nonzero kp_rot.
 # NONE of the above has been validated on real hardware. Numerical parity vs the
@@ -99,6 +105,91 @@ def backtrack_task_scale(tau_nominal, tau_limit, resample_factor, min_scale, max
   return tau_candidate
 end
 
+def mat6_copy(A):
+  out = [[0.0,0.0,0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0,0.0,0.0]]
+  i = 0
+  while i < 6:
+    j = 0
+    while j < 6:
+      out[i][j] = A[i][j]
+      j = j + 1
+    end
+    i = i + 1
+  end
+  return out
+end
+
+def jacobi_eigenvalues_sym6(A_in, sweeps):
+  # Classic cyclic Jacobi eigenvalue algorithm for a 6x6 SYMMETRIC matrix,
+  # trig-free formulation (Golub & Van Loan Sec 8.5 / Numerical Recipes Sec
+  # 11.1): for each off-diagonal pair (p,q),
+  #   theta = (a_qq - a_pp) / (2*a_pq)
+  #   t = sign(theta) / (abs(theta) + sqrt(theta^2 + 1))
+  #   c = 1 / sqrt(t^2 + 1); s = t*c
+  # then rotate rows/cols p,q to zero a_pq. Converges quadratically; a full
+  # sweep visits all 15 pairs. Returns the 6 diagonal entries (eigenvalues,
+  # unsorted) after `sweeps` full cyclic sweeps. Used only to estimate
+  # cond(J) below -- see the header comment and
+  # docs/status/urscript_singular_scaling_parity_2026-07-29.md.
+  A = mat6_copy(A_in)
+  sweep = 0
+  while sweep < sweeps:
+    p = 0
+    while p < 5:
+      q = p + 1
+      while q < 6:
+        apq = A[p][q]
+        if abs(apq) > 1.0e-13:
+          app = A[p][p]
+          aqq = A[q][q]
+          theta = (aqq - app) / (2.0 * apq)
+          if theta >= 0.0:
+            sgn = 1.0
+          else:
+            sgn = -1.0
+          end
+          t = sgn / (abs(theta) + sqrt(theta*theta + 1.0))
+          c = 1.0 / sqrt(t*t + 1.0)
+          s = t * c
+          k = 0
+          while k < 6:
+            if k != p and k != q:
+              akp = A[k][p]
+              akq = A[k][q]
+              A[k][p] = c*akp - s*akq
+              A[p][k] = A[k][p]
+              A[k][q] = s*akp + c*akq
+              A[q][k] = A[k][q]
+            end
+            k = k + 1
+          end
+          A[p][p] = app - t*apq
+          A[q][q] = aqq + t*apq
+          A[p][q] = 0.0
+          A[q][p] = 0.0
+        end
+        q = q + 1
+      end
+      p = p + 1
+    end
+    sweep = sweep + 1
+  end
+  eig = [A[0][0], A[1][1], A[2][2], A[3][3], A[4][4], A[5][5]]
+  return eig
+end
+
+def max_of6(v):
+  m = v[0]
+  i = 1
+  while i < 6:
+    if v[i] > m:
+      m = v[i]
+    end
+    i = i + 1
+  end
+  return m
+end
+
 def min_jerk_move_hold_x(t, x0, dx, move_dur, total_dur):
   if t <= move_dur:
     a = t / move_dur
@@ -138,6 +229,8 @@ def osc_x_axis_transport():
   resample_factor = {{TASK_RESAMPLE_FACTOR}}
   resample_min_scale = {{TASK_RESAMPLE_MIN_SCALE}}
   resample_max_iters = {{TASK_RESAMPLE_MAX_ITERS}}
+  cond_max = {{JACOBIAN_SINGULAR_COND_MAX}}
+  jacobi_sweeps = {{SINGULAR_SCALE_JACOBI_SWEEPS}}
   headroom = {{TORQUE_HEADROOM}}
   x_tol = {{REANCHOR_X_TOL}}
   qd_tol = {{REANCHOR_QD_TOL}}
@@ -220,13 +313,36 @@ def osc_x_axis_transport():
     My = -kd_rot * wy
     Mz = -kd_rot * wz
     wrench = [Fx, Fy, Fz, Mx, My, Mz]
+    JT = transpose(J)
+
+    # Singular-value (cond(J)) wrench scaling. Mirrors
+    # controller_core.x_axis_cartesian_impedance.compute() exactly:
+    #   cond = float(np.linalg.cond(J))
+    #   singular_scale = 1.0
+    #   if cond > jacobian_singular_cond_max > 0.0:
+    #     singular_scale = jacobian_singular_cond_max / cond
+    # computed here (right after the wrench, before wrench shaping) to match
+    # that source's line order. See jacobi_eigenvalues_sym6 above and the
+    # header comment for how cond(J) is estimated without a built-in SVD.
+    Jinv = inv(J)
+    JinvT = transpose(Jinv)
+    AtA = JT * J
+    BtB = JinvT * Jinv
+    eig_AtA = jacobi_eigenvalues_sym6(AtA, jacobi_sweeps)
+    eig_BtB = jacobi_eigenvalues_sym6(BtB, jacobi_sweeps)
+    lam_max_AtA = max_of6(eig_AtA)
+    lam_max_BtB = max_of6(eig_BtB)
+    cond_j = sqrt(lam_max_AtA * lam_max_BtB)
+    singular_scale = 1.0
+    if cond_j > cond_max and cond_max > 0.0:
+      singular_scale = cond_max / cond_j
+    end
 
     # Lambda is needed for wrench shaping (use_lambda) AND/OR the nullspace
     # projector (use_nullspace) -- computed once whenever either is active,
     # matching XAxisCartesianImpedanceController.compute().
     if use_lambda == 1 or use_nullspace == 1:
       Minv = inv(M)
-      JT = transpose(J)
       Lambda = inv(J * Minv * JT + lambda_reg * I6)
     end
 
@@ -235,8 +351,9 @@ def osc_x_axis_transport():
     else:
       wrench_eff = wrench
     end
+    wrench_scaled = scale_vec6(wrench_eff, singular_scale)
 
-    tau_task = transpose(J) * wrench_eff
+    tau_task = JT * wrench_scaled
     tau_damp = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     tau_post_raw = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     i = 0

@@ -57,6 +57,21 @@ class UrscriptOscParams:
     task_resample_factor: float = 0.5
     task_resample_min_scale: float = 1.0 / 16384.0
     task_resample_max_iters: int = 14
+    # Singular-value (cond(J)) wrench scaling (2026-07-29), mirrors
+    # CartesianImpedanceConfig.jacobian_singular_cond_max exactly: when
+    # cond(J) exceeds this threshold, the task wrench is scaled down by
+    # jacobian_singular_cond_max / cond(J) before being mapped through J.T.
+    # URScript has no built-in SVD, so cond(J) is estimated on-robot via two
+    # Jacobi eigendecompositions (see the template) rather than computed
+    # exactly -- see docs/status/urscript_singular_scaling_parity_2026-07-29.md
+    # for the numerical-accuracy tradeoff this implies.
+    jacobian_singular_cond_max: float = 1.0e5
+    # Generation-only implementation constant (not sourced from the Python
+    # config -- there is no equivalent there, since np.linalg.cond is exact).
+    # Number of full cyclic Jacobi sweeps used for the on-robot cond(J)
+    # estimate; 6 sweeps already converges a 6x6 to ~1e-10 relative error
+    # empirically (measured up to cond(J)=1e7), this keeps a small margin.
+    singular_scale_jacobi_sweeps: int = 8
     viscous_scale: tuple[float, float, float, float, float, float] = tuple(DEFAULT_VISCOUS)
     coulomb_scale: tuple[float, float, float, float, float, float] = tuple(DEFAULT_COULOMB)
     stop_input_int_reg: int = 18
@@ -110,6 +125,7 @@ def load_params_from_yaml(
         task_resample_factor=float(ctrl.get("task_resample_factor", 0.5)),
         task_resample_min_scale=float(ctrl.get("task_resample_min_scale", 1.0 / 16384.0)),
         task_resample_max_iters=int(ctrl.get("task_resample_max_iters", 14)),
+        jacobian_singular_cond_max=float(ctrl.get("jacobian_singular_cond_max", 1.0e5)),
     )
 
 
@@ -153,6 +169,8 @@ def render_urscript(
         "{{TASK_RESAMPLE_FACTOR}}": f"{params.task_resample_factor:.12g}",
         "{{TASK_RESAMPLE_MIN_SCALE}}": f"{params.task_resample_min_scale:.12g}",
         "{{TASK_RESAMPLE_MAX_ITERS}}": str(int(params.task_resample_max_iters)),
+        "{{JACOBIAN_SINGULAR_COND_MAX}}": f"{params.jacobian_singular_cond_max:.12g}",
+        "{{SINGULAR_SCALE_JACOBI_SWEEPS}}": str(int(params.singular_scale_jacobi_sweeps)),
         "{{TORQUE_HEADROOM}}": f"{params.torque_headroom:.12g}",
         "{{REANCHOR_X_TOL}}": f"{params.reanchor_x_tol_m:.12g}",
         "{{REANCHOR_QD_TOL}}": f"{params.reanchor_qd_tol_radps:.12g}",
