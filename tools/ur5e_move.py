@@ -69,6 +69,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--duration-s", type=float, default=6.0)
     p.add_argument("--rate-hz", type=float, default=125.0)
     p.add_argument(
+        "--max-tcp-speed-mps",
+        type=float,
+        default=None,
+        help="Override CartesianMoveMonitor max_tcp_speed_mps for this run.",
+    )
+    p.add_argument(
         "--max-tcp-accel-mps2",
         type=float,
         default=None,
@@ -144,6 +150,8 @@ def main() -> int:
     # exceed 1.2x itself, so neither could ever trip on an aggressive-but-nominal
     # move, only on >20% overshoot from what was already planned.
     move_limit_overrides = {}
+    if args.max_tcp_speed_mps is not None:
+        move_limit_overrides["max_tcp_speed_mps"] = float(args.max_tcp_speed_mps)
     if args.max_tcp_accel_mps2 is not None:
         move_limit_overrides["max_tcp_accel_mps2"] = float(args.max_tcp_accel_mps2)
     if args.accel_gap_cycles is not None:
