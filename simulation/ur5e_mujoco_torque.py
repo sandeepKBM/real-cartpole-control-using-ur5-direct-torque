@@ -269,6 +269,7 @@ def build_mujoco_state(
     hold_current_pose: bool = False,
     transport_axis_index: int = 0,
     gravity_compensation: bool = True,
+    gravity_scratch_data: mujoco.MjData | None = None,
 ) -> MujocoUR5eState:
     q = np.zeros(6, dtype=np.float64)
     qd = np.zeros(6, dtype=np.float64)
@@ -288,7 +289,20 @@ def build_mujoco_state(
     jacobian = np.vstack([jacp[:, :6], jacr[:, :6]]).astype(np.float64)
     ee_lin_vel = jacp[:, :6] @ qd
     ee_ang_vel = jacr[:, :6] @ qd
-    gravity_torque = compute_gravity_torque(model, data, joint_ids) if gravity_compensation else None
+    # gravity_scratch_data lets a hot-loop caller (e.g. GainSchedulingEnv,
+    # called twice per RL training step, or the single-run experiment
+    # engine's per-step loop) reuse one persistent scratch MjData instead of
+    # compute_gravity_torque allocating (and mj_forward/mj_inverse-ing) a
+    # brand new mujoco.MjData every call -- measured ~11-12x per-call speedup
+    # (~0.70ms -> ~0.06ms on this model), see
+    # docs/status/performance_audit_2026-07-29.md. Default None preserves the
+    # exact previous behavior (a fresh scratch allocated inside
+    # compute_gravity_torque every call) for any caller that doesn't opt in.
+    gravity_torque = (
+        compute_gravity_torque(model, data, joint_ids, scratch_data=gravity_scratch_data)
+        if gravity_compensation
+        else None
+    )
     mass_full = expand_mass_matrix(model, data)
     mass_matrix = mass_full[:6, :6].copy()
     return MujocoUR5eState(
@@ -711,6 +725,7 @@ def build_initial_state_and_adapter(
     gravity_source: str = "mujoco_qfrc",
     coriolis_feedforward: bool = False,
     torque_limit_scale: float,
+    gravity_scratch_data: mujoco.MjData | None = None,
 ) -> tuple["MujocoUR5eState", "MujocoUR5eTorqueAdapter"]:
     mujoco.mj_forward(model, data)
     ee_pos = np.asarray(data.site_xpos[site_id], dtype=np.float64).copy()
@@ -735,6 +750,7 @@ def build_initial_state_and_adapter(
         hold_current_pose=bool(force_hold_current_pose or (controller_kind == "impedance" and abs(target_x_delta) < 1e-12)),
         transport_axis_index=transport_axis_index,
         gravity_compensation=bool(gravity_mode == "gravity_comp"),
+        gravity_scratch_data=gravity_scratch_data,
     )
     controller = build_controller(controller_kind, controller_cfg)
     adapter = MujocoUR5eTorqueAdapter(

@@ -643,6 +643,14 @@ def run() -> int:
 
     try:
         model, data, site_id, joint_ids, actuator_ids = load_model(scene_xml)
+        # Reused by every build_mujoco_state()/build_initial_state_and_adapter()
+        # call below with gravity_compensation active, instead of letting
+        # compute_gravity_torque allocate a brand new mujoco.MjData (plus a
+        # mj_forward/mj_inverse pass on it) every single call -- this is the
+        # single-run engine every sweep driver subprocesses, so it runs once
+        # per simulated step across the whole sweep infrastructure. Measured
+        # ~11-12x per-call speedup; see docs/status/performance_audit_2026-07-29.md.
+        gravity_scratch = mujoco.MjData(model)
     except Exception as exc:
         summary["failure_reason"] = f"model_load_failed: {exc}"
         summary_path = run_dir / "summary.json"
@@ -714,6 +722,7 @@ def run() -> int:
         gravity_source=gravity_source,
         coriolis_feedforward=coriolis_feedforward,
         torque_limit_scale=float(args.torque_limit_scale),
+        gravity_scratch_data=gravity_scratch,
     )
     dt = float(model.opt.timestep)
     steps = max(1, int(np.ceil(float(args.duration) / max(dt, 1e-9))))
@@ -772,6 +781,7 @@ def run() -> int:
                 hold_current_pose=state0.hold_current_pose,
                 transport_axis_index=int(args.transport_axis_index),
                 gravity_compensation=bool(gravity_mode == "gravity_comp"),
+                gravity_scratch_data=gravity_scratch,
             )
 
             # Sensor-noise proxy (default off = identical to pre_state): the
@@ -836,6 +846,7 @@ def run() -> int:
                     hold_current_pose=state0.hold_current_pose,
                     transport_axis_index=int(args.transport_axis_index),
                     gravity_compensation=bool(gravity_mode == "gravity_comp"),
+                    gravity_scratch_data=gravity_scratch,
                 )
                 joint_prox = compute_joint_limit_proximity(model, post_state.q, joint_ids)
                 joint_limit_min_fraction = float(min(joint_prox.values())) if joint_prox else 0.0
@@ -925,6 +936,7 @@ def run() -> int:
                 hold_current_pose=state0.hold_current_pose,
                 transport_axis_index=int(args.transport_axis_index),
                 gravity_compensation=bool(gravity_mode == "gravity_comp"),
+                gravity_scratch_data=gravity_scratch,
             )
             post_orient_ref = (
                 np.asarray(post_state.reference_quat, dtype=np.float64).reshape(4)

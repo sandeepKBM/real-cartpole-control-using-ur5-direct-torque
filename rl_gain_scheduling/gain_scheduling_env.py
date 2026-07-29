@@ -164,6 +164,18 @@ class GainSchedulingEnv(gym.Env):
         scene_xml = REPO_ROOT / self._mujoco_cfg["scene_xml"]
         self.model, self.data, self.site_id, self.joint_ids, self.actuator_ids = load_model(scene_xml)
         self._max_episode_steps = max(1, round(self._max_episode_seconds / float(self.model.opt.timestep)))
+        # Reused across every build_mujoco_state()/build_initial_state_and_adapter()
+        # call in this env's lifetime instead of letting compute_gravity_torque
+        # allocate (and mj_forward/mj_inverse-ize) a brand new mujoco.MjData
+        # every call -- step() calls build_mujoco_state twice per env step with
+        # gravity_compensation=True, so this is the actual per-step hot path
+        # for PPO training throughput. Measured ~11-12x per-call speedup
+        # (~0.70ms -> ~0.06ms on this model); see
+        # docs/status/performance_audit_2026-07-29.md. Safe to share a single
+        # scratch across calls: compute_gravity_torque fully overwrites its
+        # qpos/qvel/qacc/ctrl/applied-force fields before every mj_forward, and
+        # this env is single-threaded/synchronous (no concurrent callers).
+        self._gravity_scratch = mujoco.MjData(self.model)
 
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(OBS_DIM,), dtype=np.float32)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(self._action_dim,), dtype=np.float32)
@@ -236,6 +248,7 @@ class GainSchedulingEnv(gym.Env):
             gravity_source=str(self._mujoco_cfg.get("gravity_source", "mujoco_qfrc")),
             coriolis_feedforward=bool(self._mujoco_cfg.get("coriolis_feedforward", False)),
             torque_limit_scale=1.0,
+            gravity_scratch_data=self._gravity_scratch,
         )
         self.adapter = adapter
         self._state0 = state0
@@ -310,6 +323,7 @@ class GainSchedulingEnv(gym.Env):
             hold_current_pose=self._hold_current_pose_flag,
             transport_axis_index=0,
             gravity_compensation=True,
+            gravity_scratch_data=self._gravity_scratch,
         )
         controller_state = pre_state
         if self._q_noise_std > 0.0 or self._qd_noise_std > 0.0:
@@ -345,6 +359,7 @@ class GainSchedulingEnv(gym.Env):
             hold_current_pose=self._hold_current_pose_flag,
             transport_axis_index=0,
             gravity_compensation=True,
+            gravity_scratch_data=self._gravity_scratch,
         )
 
         x_error = float(diag.get("axis_error", target_x_now - float(post_state.ee_pos[0])))
