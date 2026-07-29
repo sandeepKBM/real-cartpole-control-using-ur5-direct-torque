@@ -76,6 +76,7 @@ def run_x_transport(
     max_tcp_accel_mps2_override: float | None = None,
     accel_gap_cycles_override: int | None = None,
     speed_lowpass_alpha_override: float | None = None,
+    enable_residual_observer: bool = True,
 ) -> XTransportResult:
     mode = normalize_control_mode(control_mode)
     if start_q_rad is not None:
@@ -176,6 +177,7 @@ def run_x_transport(
         max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
         accel_gap_cycles_override=accel_gap_cycles_override,
         speed_lowpass_alpha_override=speed_lowpass_alpha_override,
+        enable_residual_observer=enable_residual_observer,
     )
     return XTransportResult(
         ok=raw_dt.ok,

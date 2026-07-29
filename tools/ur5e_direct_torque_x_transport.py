@@ -174,6 +174,19 @@ def parse_args() -> argparse.Namespace:
             "joint velocity, matters more for faster moves."
         ),
     )
+    p.add_argument(
+        "--disable-residual-observer",
+        action="store_true",
+        help=(
+            "direct_torque only. Disable the diagnostic-only dynamics residual "
+            "observer (default on) -- see "
+            "docs/status/direct_torque_residual_observer_2026-07-29.md. It never "
+            "affects control/torque, only trace logging, and already degrades "
+            "gracefully (with a printed warning) if its PinocchioUR5eDynamics "
+            "dependency fails to initialize -- but pass this to skip that "
+            "dependency entirely, e.g. on a host where it's known to be broken."
+        ),
+    )
     return p.parse_args()
 
 
@@ -268,6 +281,7 @@ def main() -> int:
             accel_gap_cycles_override=(
                 None if args.accel_gap_cycles is None else int(args.accel_gap_cycles)
             ),
+            enable_residual_observer=not bool(args.disable_residual_observer),
             speed_lowpass_alpha_override=(
                 None if args.speed_lowpass_alpha is None else float(args.speed_lowpass_alpha)
             ),

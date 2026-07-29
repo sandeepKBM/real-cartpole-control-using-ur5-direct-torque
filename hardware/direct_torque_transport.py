@@ -142,12 +142,26 @@ def run_x_transport_direct_torque(
     # dynamics_source this run uses. Constructed before link.connect(), same
     # as gain_overrides above, so a bad gap_cycles/lowpass_alpha value fails
     # before ever touching the robot.
-    residual_dynamics = PinocchioUR5eDynamics() if enable_residual_observer else None
-    residual_accel_estimator = (
-        JointAccelEstimator(gap_cycles=residual_qdd_gap_cycles, lowpass_alpha=residual_qdd_lowpass_alpha)
-        if enable_residual_observer
-        else None
-    )
+    residual_dynamics = None
+    residual_accel_estimator = None
+    if enable_residual_observer:
+        try:
+            residual_dynamics = PinocchioUR5eDynamics()
+            residual_accel_estimator = JointAccelEstimator(
+                gap_cycles=residual_qdd_gap_cycles, lowpass_alpha=residual_qdd_lowpass_alpha
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostic-only feature must never block real motion
+            print(
+                f"[direct_torque_transport] WARNING: residual observer disabled, failed to "
+                f"initialize PinocchioUR5eDynamics ({type(exc).__name__}: {exc}). This is a "
+                f"diagnostic-only feature (see "
+                f"docs/status/direct_torque_residual_observer_2026-07-29.md) -- transport will "
+                f"proceed without it rather than block real hardware operation over a missing/"
+                f"broken diagnostic dependency.",
+                flush=True,
+            )
+            residual_dynamics = None
+            residual_accel_estimator = None
 
     link.connect()
     state0 = link.read_state()
