@@ -575,7 +575,12 @@ URSim for `direct_torque()`. We confirmed zero `qd` and zero `dq` after 15 Nm fo
 ### Before you leave your desk
 
 - [ ] `pytest tests/hardware/ -q` passes
-- [ ] `ur_rtde >= 1.6` in venv: `pip show ur-rtde`
+- [ ] `python3 tools/check_hardware_deps.py` passes -- checks the actual attributes
+      this code calls (`RTDEControlInterface.directTorque`,
+      `pin.buildModelFromMJCF`), not just version numbers. A version floor being
+      satisfied does NOT guarantee the attribute exists in that build -- found
+      the hard way 2026-07-30 (`ur_rtde==1.6.1` had no `directTorque` despite
+      satisfying the old `>=1.6` guidance here; see `requirements-hardware.txt`).
 - [ ] Config copied: `config/ur5e_mujoco_torque_osc_tuned.yaml`
 - [ ] Read this guide + `URSIM_REMOTE_CONTROL.md` if using Docker practice
 
