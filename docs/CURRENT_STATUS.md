@@ -1,6 +1,6 @@
 # Current Status
 
-Last updated: 2026-07-07 (hardware lane rewrite + RL gain-scheduling training/eval).
+Last updated: 2026-07-29 (Pinocchio Jacobian/speedup, residual observer, RL 4th-attempt evidence).
 
 ## Active Objective
 
@@ -50,6 +50,36 @@ outcome tuned well past parity:
 Untested/known-out-of-scope boundaries (physical or bandwidth limits, not defects): dx=0.25m
 fails via Z-drift (workspace/reach limit); moves faster than ~0.5s undershoot (closed-loop
 bandwidth limit at the tuned `kp_x`, not saturation).
+
+## 2026-07-29: Pinocchio speedup, residual observer, and RL 4th-attempt evidence
+
+**Pinocchio-backed fast path (commit `dee0190`, opt-in via `dynamics_source="local_pinocchio"`)**:
+Earlier investigations intended a fast Pinocchio path for `hardware/local_dynamics.py`'s 500 Hz
+loop but hit a Pinocchio MJCF-parser gap — the root body's `quat` is not applied to the frame
+tree, causing world-frame Jacobians to be silently wrong. This gap has been identified and
+fixed (world-frame correction via block-diagonal rotation matrix applied to the 6-row
+Jacobian output). Benchmark: ~10x speedup (0.05-0.08 ms Pinocchio vs. 0.50-0.53 ms MuJoCo
+per `jacobian_and_mass_matrix()` call on the same q samples, 5000 warmed-up calls). At 500 Hz
+(2 ms period budget), Pinocchio consumes ~2.5-8% vs. MuJoCo's ~25-39%. Full analysis and
+root-cause investigation: `docs/status/local_dynamics_speedup_investigation_2026-07-29.md`.
+
+**Diagnostic residual observer (commit `75312d3`, opt-in via `enable_residual_observer=True`)**:
+Direct-torque mode now logs a per-cycle joint-space dynamics residual observer — predicted vs.
+measured acceleration given the known commanded torque and dynamics model, as four new trace
+fields: `qdd_pred`, `qdd_measured`, `qdd_residual`, `qdd_residual_norm`. This is
+**diagnostic-only** — it does not read into, weaken, or otherwise touch any trip condition
+(guards remain unchanged). Motivation: the 2026-07-28 real-hardware session found
+`CartesianMoveMonitor`'s TCP acceleration estimate has an inherent noise floor that was
+already addressed via gap-windowing + EMA filtering; this adds a physics-model-backed
+alternative for post-hoc analysis and future tuning. Validated in simulation (clean move/hold
+residual stays <1e-7 rad/s²; injected 30 N external disturbance produces residual peaks of
+~24 rad/s², decaying cleanly within ~40 steps post-disturbance). Full design and validation:
+`docs/status/direct_torque_residual_observer_2026-07-29.md`.
+
+**Controller-diagnostics trace fields (commit `aaf00f7`)**: Direct-torque trace rows now log
+internal controller state (`jacobian_cond`, `task_backtrack_iters`, `task_scale`,
+`singular_scale`) for per-cycle correlation with timing/pose questions, addressing an
+instrumentation gap that hindered earlier timing audits.
 
 ## Done
 
@@ -248,6 +278,23 @@ is a fixed target profile and `x_error` tracking is symmetric (ahead of target p
 behind) -- speed would need its own reward redesign (a velocity/time-to-target term), a real but
 separate follow-on question from just fixing convergence.
 
+**2026-07-29 -- fourth training attempt with config mismatch fix (commit `1855aaf`); result: 0/8**:
+A real training/eval config mismatch was found and fixed: all RL configs for this family set
+`max_orientation_error_rad: 0.35`, but the documented baseline failure uses `0.25`. This
+tolerance field drives the live guard during training, so episodes with orientation error in
+the 0.25-0.35 band ran without penalty during training but would trip during eval, weakening
+the training signal for the exact failure mode being targeted. A new config was created with
+the correct `0.25` threshold, and a fourth real training attempt was run (3M steps on
+`ilab4.cs.rutgers.edu`, matching prior attempts' scale). **Result: 0/8 valid on the
+height_alpha=0.5 grid, worse than the prior best attempt's 5/8 and the fixed-gain baseline's
+7/8 (88%).** The policy fails not on the documented orientation mechanism (max orientation
+only 0.13 rad) but on an `axis_error` growth guard that now trips on all 8 cells including
+previously-trivial cases. Honest summary: fixing the config mismatch was the right call, but
+it revealed the underlying problem was not the mismatch — the residual-torque architecture
+and reward shape used across all four real attempts have not found a policy that outperforms
+the fixed-gain controller. Full evidence, mismatch audit, and per-cell analysis:
+`docs/status/rl_gain_scheduling_alpha05_directional_fix_2026-07-29.md`.
+
 ## Next
 
 Nothing is currently blocking or in-progress on the MuJoCo controller/tuning side (OSC config
@@ -269,6 +316,22 @@ above). Open items, none urgent:
   blind config nudge. Not currently blocking real-world testing — use the fixed-gain baseline.
 - Hardware lane is code-complete and unit-tested but has never touched a real robot — first
   physical contact is the next real-world milestone, not further code changes.
+- **2026-07-28 timing audits and investigations**: three 2026-07-28 session findings deserve
+  follow-up. (1) AGENTS.md's "Found, not yet fixed" claims about `max_deadline_ms` enforcement
+  and staleness detection were already implemented in commit `85498a0` (2026-07-25); see
+  `docs/status/clock_timing_late_cycles_2026-07-28.md` for the full audit (AGENTS.md itself
+  remains to be updated to reflect this). (2) `DeadlineMonitor`'s flat 3.0 ms threshold was
+  calibrated for the 125 Hz loops but misses the `direct_torque` 500 Hz loop's 2 ms period —
+  a real 4/5-late-cycles pattern topping out at ~2 ms overrun sits under the threshold by
+  design. Fix 2a (priority: high) is a one-line period-aware cap in
+  `hardware/direct_torque_transport.py`; see `docs/status/timing_safety_gaps_audit_2026-07-28.md`
+  for the full audit, root-cause trace, and concrete fix proposals (Fix 2a / 2b / 2c with
+  risk/benefit analysis). (3) A singular-pose velocity-overshoot claim (alpha=0.1 with 2.7x
+  peak velocity ratio) does not reproduce in simulation at any of the three tested alphas
+  (0.1/0.2/0.3), and no saved hardware artifact from that session documents the specific run
+  — investigation can rule out "the controller physics reproduces this in sim" but cannot
+  identify the real cause; see `docs/status/alpha_0.1_singularity_investigation_2026-07-28.md`
+  for kinematic conditioning evidence and move-hold validation at three alphas.
 
 ## Historical status
 
