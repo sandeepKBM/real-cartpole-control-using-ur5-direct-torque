@@ -95,9 +95,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--yes", action="store_true", help="Skip typed MOVE confirmation.")
     p.add_argument(
         "--dynamics-source",
-        choices=("rtde", "local"),
+        choices=("rtde", "local", "local_pinocchio"),
         default="local",
-        help="direct_torque only: rtde=PolyScope J+M; local=MuJoCo J+M from q.",
+        help=(
+            "direct_torque only: rtde=PolyScope J+M; local=MuJoCo J+M from q "
+            "(default, legacy behavior); local_pinocchio=opt-in Pinocchio-backed "
+            "J+M fast path, ~10x lower per-call latency, see "
+            "docs/status/local_dynamics_speedup_investigation_2026-07-29.md."
+        ),
     )
     p.add_argument(
         "--gain-overrides-json",

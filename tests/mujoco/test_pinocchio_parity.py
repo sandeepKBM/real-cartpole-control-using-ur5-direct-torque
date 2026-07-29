@@ -26,6 +26,7 @@ N_SAMPLES = 200
 GRAVITY_TOL_NM = 1e-8
 BIAS_TOL_NM = 1e-6
 MASS_TOL = 1e-8
+JACOBIAN_TOL = 1e-6
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENE_XML = REPO_ROOT / "assets" / "ur5e_torque" / "scene.xml"
@@ -62,6 +63,16 @@ def _mujoco_mass(model, data, q):
     data.qvel[:] = 0.0
     mujoco.mj_forward(model, data)
     return expand_mass_matrix(model, data)
+
+
+def _mujoco_site_jacobian(model, data, q, site_id):
+    data.qpos[:] = q
+    data.qvel[:] = 0.0
+    mujoco.mj_forward(model, data)
+    jacp = np.zeros((3, model.nv))
+    jacr = np.zeros((3, model.nv))
+    mujoco.mj_jacSite(model, data, jacp, jacr, site_id)
+    return np.vstack([jacp, jacr])
 
 
 def test_joint_order_matches(engines):
@@ -102,6 +113,24 @@ def test_mass_matrix_parity(engines):
         m_pin = dyn.mass_matrix(q)
         worst = max(worst, float(np.max(np.abs(m_mj - m_pin))))
     assert worst < MASS_TOL, f"mass-matrix parity worst |delta| = {worst}"
+
+
+def test_jacobian_parity(engines):
+    # Pinocchio's buildModelFromMJCF does not apply this MJCF's root body
+    # rotation (base's quat="0 0 0 -1") to the frame tree -- invisible to the
+    # joint-space parity tests above (that rotation is about Z, same axis as
+    # gravity), but not to a world-frame Cartesian Jacobian. See
+    # `controller_core.model_dynamics._root_body_quat_wxyz` and
+    # docs/status/local_dynamics_speedup_investigation_2026-07-29.md.
+    model, data, dyn = engines
+    site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
+    rng = np.random.default_rng(4)
+    worst = 0.0
+    for q, _ in _random_states(model, rng, N_SAMPLES):
+        J_mj = _mujoco_site_jacobian(model, data, q, site_id)
+        J_pin = dyn.jacobian(q)
+        worst = max(worst, float(np.max(np.abs(J_mj - J_pin))))
+    assert worst < JACOBIAN_TOL, f"jacobian parity worst |delta| = {worst}"
 
 
 def test_coriolis_is_bias_minus_gravity(engines):

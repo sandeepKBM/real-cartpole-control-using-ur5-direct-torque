@@ -12,8 +12,9 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCENE_XML = REPO_ROOT / "assets" / "ur5e_torque" / "scene.xml"
+DEFAULT_UR5E_MJCF = REPO_ROOT / "assets" / "ur5e_torque" / "ur5e_torque.xml"
 DEFAULT_SITE_NAME = "attachment_site"
-DYNAMICS_SOURCES = frozenset({"rtde", "local"})
+DYNAMICS_SOURCES = frozenset({"rtde", "local", "local_pinocchio"})
 
 
 def normalize_dynamics_source(value: str) -> str:
@@ -119,5 +120,67 @@ class LocalMujocoDynamics:
         return jacobian, mass_matrix, coriolis
 
 
-# Back-compat alias used by transport import.
+# Back-compat alias used by transport import. Despite the name, this is
+# MuJoCo-backed (see `coriolis()`'s docstring above) -- kept meaning
+# MuJoCo-identical numerics on purpose. Do not repurpose it; if you need a
+# real Pinocchio-backed fast path, use `LocalPinocchioFastDynamics` below.
 LocalPinocchioDynamics = LocalMujocoDynamics
+
+
+class LocalPinocchioFastDynamics:
+    """J(q)/M(q)/Coriolis via Pinocchio (RNEA/CRBA + frame Jacobian) instead
+    of a full MuJoCo ``mj_forward`` pass per cycle.
+
+    This is a genuinely new, explicitly-named, opt-in implementation --
+    unlike ``LocalPinocchioDynamics`` above (a legacy alias to
+    ``LocalMujocoDynamics`` that intentionally still means MuJoCo-identical
+    numerics), this class actually uses Pinocchio for every call. Select it
+    via ``dynamics_source="local_pinocchio"`` (see `normalize_dynamics_source`
+    / `DYNAMICS_SOURCES`); the default (`dynamics_source="local"`) remains
+    unchanged and still resolves to ``LocalPinocchioDynamics`` /
+    ``LocalMujocoDynamics``.
+
+    Measured ~10x lower per-call latency than `LocalMujocoDynamics` on this
+    hot path (mean ~0.05ms vs ~0.5ms, p99 ~0.08ms vs ~0.78ms, same machine,
+    same q samples, 5000 warmed-up calls) with Jacobian/mass-matrix/Coriolis
+    parity to <1e-6 against MuJoCo -- see
+    ``docs/status/local_dynamics_speedup_investigation_2026-07-29.md`` for
+    the full benchmark and the world-frame correction this required
+    (Pinocchio's MJCF loader does not apply this model's root body rotation
+    to Cartesian outputs; see
+    ``controller_core.model_dynamics._root_body_quat_wxyz``).
+
+    Requires the ``pinocchio`` package (see environment.yml).
+    """
+
+    def __init__(
+        self,
+        mjcf_path: str | Path = DEFAULT_UR5E_MJCF,
+        *,
+        site_name: str = DEFAULT_SITE_NAME,
+        n_joints: int = 6,
+    ) -> None:
+        from controller_core.model_dynamics import PinocchioUR5eDynamics
+
+        self._dyn = PinocchioUR5eDynamics(mjcf_path)
+        self._site_name = site_name
+        self.n_joints = int(n_joints)
+        if self._dyn.nv != self.n_joints:
+            raise ValueError(f"Pinocchio model nv={self._dyn.nv} != n_joints={self.n_joints}")
+
+    def mass_matrix(self, q: np.ndarray) -> np.ndarray:
+        return self._dyn.mass_matrix(q)
+
+    def jacobian(self, q: np.ndarray) -> np.ndarray:
+        return self._dyn.jacobian(q, site_name=self._site_name)
+
+    def jacobian_and_mass_matrix(self, q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return self.jacobian(q), self.mass_matrix(q)
+
+    def coriolis(self, q: np.ndarray, qd: np.ndarray) -> np.ndarray:
+        return self._dyn.coriolis(q, qd)
+
+    def jacobian_mass_and_coriolis(
+        self, q: np.ndarray, qd: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return self.jacobian(q), self.mass_matrix(q), self.coriolis(q, qd)

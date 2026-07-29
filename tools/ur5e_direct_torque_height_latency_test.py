@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--probe-only", action="store_true", help="Connect + read state only (no transport).")
     p.add_argument("--latency-only-mock", action="store_true", help="Mock direct_torque loop (no robot).")
     p.add_argument("--skip-dashboard-power-on", action="store_true")
-    p.add_argument("--dynamics-source", choices=("rtde", "local"), default="local")
+    p.add_argument("--dynamics-source", choices=("rtde", "local", "local_pinocchio"), default="local")
     p.add_argument("--i-understand-this-moves-the-robot", dest="motion_opt_in", action="store_true")
     p.add_argument("--yes", action="store_true")
     return p.parse_args()

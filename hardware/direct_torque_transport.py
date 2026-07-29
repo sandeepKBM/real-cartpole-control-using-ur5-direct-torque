@@ -22,7 +22,7 @@ from transport_metrics import compute_valid_move_hold_metrics, summarize_move_ho
 from .direct_torque_link import UR5eDirectTorqueLink
 from .latency import PhaseLatencyRecorder
 from .link import RTDEStateError
-from .local_dynamics import LocalPinocchioDynamics, normalize_dynamics_source
+from .local_dynamics import LocalPinocchioDynamics, LocalPinocchioFastDynamics, normalize_dynamics_source
 from .safety import (
     CartesianMoveLimits,
     CartesianMoveMonitor,
@@ -75,18 +75,31 @@ def run_x_transport_direct_torque(
         raise ValueError("motion_opt_in must be True for a live direct-torque transport")
 
     dynamics_source = normalize_dynamics_source(dynamics_source)
-    if coriolis_feedforward and dynamics_source != "local":
+    if coriolis_feedforward and dynamics_source not in ("local", "local_pinocchio"):
         # The robot's own firmware compensates gravity inside directTorque()
         # (never add that in Python -- see AGENTS.md), but it does NOT
         # automatically apply Coriolis/centrifugal compensation the way it
         # does gravity; it only exposes the values for retrieval (confirmed
         # against Universal Robots' own Direct Torque Control documentation,
-        # 2026-07-26). This flag adds that missing term via
-        # LocalMujocoDynamics.coriolis(), which needs dynamics_source=local's
-        # q/qd -> MuJoCo pipeline; the rtde dynamics_source path has no
-        # equivalent Coriolis getter wired up yet.
-        raise ValueError("coriolis_feedforward requires dynamics_source='local' (rtde path not implemented)")
-    local_dynamics = LocalPinocchioDynamics() if dynamics_source == "local" else None
+        # 2026-07-26). This flag adds that missing term via the selected
+        # local dynamics provider's coriolis(), which needs dynamics_source
+        # in {local, local_pinocchio}'s q/qd -> J/M/C pipeline; the rtde
+        # dynamics_source path has no equivalent Coriolis getter wired up yet.
+        raise ValueError(
+            "coriolis_feedforward requires dynamics_source in {'local', 'local_pinocchio'} "
+            "(rtde path not implemented)"
+        )
+    if dynamics_source == "local":
+        local_dynamics = LocalPinocchioDynamics()
+    elif dynamics_source == "local_pinocchio":
+        # Opt-in fast path (2026-07-29): a genuinely Pinocchio-backed J(q)/M(q)/
+        # Coriolis provider, ~10x lower per-call latency than the MuJoCo-backed
+        # LocalPinocchioDynamics/LocalMujocoDynamics default -- see
+        # docs/status/local_dynamics_speedup_investigation_2026-07-29.md.
+        # Default behavior (dynamics_source="local" or "rtde") is unchanged.
+        local_dynamics = LocalPinocchioFastDynamics()
+    else:
+        local_dynamics = None
 
     impedance_cfg, safety_cfg, frequency_hz = _load_impedance_bundle(config_path)
     if abs(frequency_hz - 500.0) > 1.0:
