@@ -545,6 +545,32 @@ class GainSchedulingEnv(gym.Env):
             "duration_s": self._max_episode_seconds,
             "max_abs_qd_radps": float(np.max(np.abs([row["qd"] for row in self._lightweight_trace]))),
         })
+        # Opt-in (default False = byte-identical to before this existed):
+        # transport_metrics.compute_valid_move_hold_metrics's
+        # hold_phase_x_drift_from_hold_start_m measures EE motion relative to
+        # the position AT THE START of the nominal hold window (t =
+        # move_duration_s), which is the right, hardware-honest signal for
+        # its original purpose (catching wander/instability once a move is
+        # supposed to be done and settled) but mischaracterizes a still
+        # legitimately-converging tail of a slower-than-move_duration_s move
+        # as "hold-phase drift" -- see docs/status/
+        # rl_undershoot_instability_diagnosis_2026-07-29.md, which traced
+        # exactly this mechanism as the real cause of the SAC gains-mode
+        # negative-dx "undershoot" failures at height_alpha=0.5 (final
+        # x_error ~0-1mm in every failing cell; the only failing metric was
+        # this drift-from-hold-start term). Substituting the drift-from-
+        # TARGET signal (hold_phase_final_x_error_m, already computed above)
+        # only in this reward-facing quality score removes that spurious
+        # penalty for genuine, safe, continued convergence -- it does NOT
+        # touch _finalize_trace_logging's persisted run_summary.json (a
+        # separate call, below), so eval_gain_scheduler.py's pass/fail
+        # reporting and any other consumer of transport_metrics keeps the
+        # original, unmodified, hardware-relevant metric.
+        if bool(self._reward_cfg.get("hold_drift_relative_to_target", False)):
+            run_summary = dict(run_summary)
+            run_summary["hold_phase_x_drift_from_hold_start_m"] = abs(
+                float(run_summary.get("hold_phase_final_x_error_m", 0.0))
+            )
         metrics = compute_valid_move_hold_metrics(run_summary, strict=False)
         return float(metrics.get("move_hold_quality_score", 0.0))
 

@@ -448,6 +448,74 @@ def test_env_full_trace_logging_produces_valid_move_hold_metrics(tmp_path):
     assert summary["move_hold_quality_score"] > 0.5
 
 
+def _synthetic_slow_converging_trace(env: GainSchedulingEnv, *, target_x_delta: float):
+    """A synthetic trace that mirrors the real SAC gains-mode dx=-0.20,
+    height_alpha=0.5 failure diagnosed in docs/status/
+    rl_undershoot_instability_diagnosis_2026-07-29.md: EE position converges
+    smoothly (no oscillation) toward the target but is only ~85% of the way
+    there by move_duration_s, finishing with near-zero final x_error well
+    into the nominal hold window. Built directly (not via env.step()) so the
+    test isolates _episode_end_quality_score's scoring logic from
+    controller/physics behavior.
+    """
+    dt = 0.002
+    total_duration = env._max_episode_seconds
+    n_steps = int(round(total_duration / dt))
+    start_x = float(env._state0.ee_pos[0])
+    target_x = start_x + target_x_delta
+    rows = []
+    for i in range(1, n_steps + 1):
+        t = i * dt
+        frac = 1.0 - np.exp(-t / 0.5)  # ~85% converged by t=1.0, ~99.8% by t=3.0
+        ee_x = start_x + target_x_delta * frac
+        rows.append({
+            "time_s": t,
+            "ee_pos": [ee_x, float(env._state0.ee_pos[1]), float(env._state0.ee_pos[2])],
+            "ee_quat": [1.0, 0.0, 0.0, 0.0],
+            "qd": [0.0] * 6,
+            "orientation_error_norm": 0.0,
+            "x_error": target_x - ee_x,
+            "target_x": target_x,
+            "tau_controller": [0.0] * 6,
+            "tau_applied": [0.0] * 6,
+        })
+    return rows
+
+
+def test_hold_drift_relative_to_target_absent_by_default():
+    env = GainSchedulingEnv()
+    assert "hold_drift_relative_to_target" not in env._reward_cfg
+
+
+def test_hold_drift_relative_to_target_flag_removes_convergence_penalty(tmp_path: Path):
+    import yaml
+
+    repo_root = Path(__file__).resolve().parents[2]
+    cfg = yaml.safe_load((repo_root / "config" / "rl_gain_scheduling.yaml").read_text(encoding="utf-8"))
+    cfg["reward"] = dict(cfg["reward"])
+    cfg["reward"]["hold_drift_relative_to_target"] = True
+    cfg_path = tmp_path / "hold_drift_relative_to_target.yaml"
+    cfg_path.write_text(yaml.dump(cfg), encoding="utf-8")
+
+    env_false = GainSchedulingEnv()
+    env_false.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.20})
+    env_false._lightweight_trace = _synthetic_slow_converging_trace(env_false, target_x_delta=-0.20)
+    env_false._target_x_delta = -0.20
+    score_false = env_false._episode_end_quality_score(termination_reason="duration_complete")
+
+    env_true = GainSchedulingEnv(config_path=cfg_path)
+    env_true.reset(seed=0, options={"height_alpha": 0.5, "target_x_delta": -0.20})
+    env_true._lightweight_trace = _synthetic_slow_converging_trace(env_true, target_x_delta=-0.20)
+    env_true._target_x_delta = -0.20
+    score_true = env_true._episode_end_quality_score(termination_reason="duration_complete")
+
+    assert score_true > score_false, (
+        "hold_drift_relative_to_target=True should score a safely-still-converging "
+        "trajectory (near-zero final x_error, no oscillation) higher than the "
+        "drift-from-hold-start metric does for the exact same trajectory"
+    )
+
+
 if __name__ == "__main__":
     test_env_reset_and_step_shapes()
     test_env_height_sampling_respects_joint_limits()

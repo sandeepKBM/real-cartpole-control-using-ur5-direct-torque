@@ -1,0 +1,183 @@
+# SAC, action_mode "gains", reward v2 -- see docs/status/
+# rl_undershoot_instability_diagnosis_2026-07-29.md for the full diagnosis
+# this config tests a fix for.
+#
+# Base: config/rl_gain_scheduling_sac_gains_alpha05.yaml (preserved
+# unmodified -- see docs/status/sac_gains_mode_experiment_2026-07-29.md for
+# its own result: 2/8 valid vs both fixed-gain baselines on the canonical
+# height_alpha=0.5, dx in {-0.20..-0.05, 0.05..0.20} grid). Differs in
+# exactly one respect: reward.hold_drift_relative_to_target: true (new,
+# below).
+#
+# Diagnosis summary (full evidence in the doc above): all four negative-dx
+# failures in the prior run were NOT orientation-guard trips or genuine
+# "gave up short of the target" undershoot -- every one ran to
+# duration_complete with hold_phase_final_x_error_m within ~1mm of the
+# target. The actual failure was
+# transport_metrics.compute_valid_move_hold_metrics's
+# hold_phase_x_drift_from_hold_start_m term: it measures EE motion relative
+# to the position AT THE START of the nominal hold window (t=move_duration_s
+# =1.0s), which is the right, hardware-honest signal for its real purpose
+# (catching wander/instability once a move is supposed to already be
+# settled) -- but this SAC policy's move-phase convergence on the harder
+# (-X) direction is genuinely slower than the fixed-gain baseline's (~85% of
+# the way there by t=1.0s vs the baseline's ~99%), so it keeps closing the
+# last few cm during the first ~1.5-1.8s of the nominal "hold" window. That
+# continued, safe, monotonic convergence toward the target gets scored as
+# "hold-phase drift" by a metric designed to catch the opposite (wander away
+# from an already-reached target) -- and that same metric feeds directly
+# into the terminal_quality_weight=50.0 reward term every training episode,
+# via move_hold_quality_score, so the training signal itself was penalizing
+# this genuinely safe behavior.
+#
+# Fix under test: rl_gain_scheduling/gain_scheduling_env.py's
+# _episode_end_quality_score now supports reward.hold_drift_relative_to_target
+# (default false = byte-identical to before). When true, ONLY the
+# reward-facing quality score substitutes hold_phase_final_x_error_m
+# (distance from TARGET) for hold_phase_x_drift_from_hold_start_m (distance
+# from hold-start snapshot) before scoring -- the persisted run_summary.json
+# written by _finalize_trace_logging is untouched, so
+# eval_gain_scheduler.py's pass/fail reporting still uses the original,
+# unmodified, hardware-honest metric. transport_metrics.py itself (shared
+# with hardware-adjacent tooling) is NOT modified.
+#
+# Per this file's own no-shortcuts convention: run a short pilot
+# (--total-timesteps override, not by editing the field below) and inspect
+# TensorBoard/console output for basic sanity AND for the intended
+# behavioral signal (e.g. hold_phase_x_drift_from_hold_start_m trending down
+# on negative-dx episodes, or move_hold_quality_score improving on those
+# same episodes) before committing to the full 3,000,000-step budget.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  posture_reanchor_on_settle: true
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  # Flags that make the documented directional-asymmetry bug actually
+  # reproduce -- copied unchanged from the source config / from
+  # config/ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml.
+  lambda_diagonal_shaping: true
+  lambda_adaptive_regularization: true
+  lambda_regularization_far: 1.0e-4
+  lambda_cond_low: 1.0e4
+  lambda_cond_high: 1.0e8
+  jacobian_singular_cond_max: 1.0e18
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    # Matches ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml (the config
+    # the documented finding and eval_gain_scheduler.py's default baseline
+    # both use) -- NOT the stray 0.35 that predates the 2026-07-29 fix.
+    max_orientation_error_rad: 0.25
+
+env:
+  control_decimation_steps: 1
+  height_alpha_range: [0.5, 0.5]
+  target_x_delta_range_m: [-0.20, 0.20]
+  move_duration_s: 1.0
+  hold_duration_s: 2.0
+  max_episode_seconds: 3.0
+  record_lightweight_trace: true
+  full_trace_logging: false
+  gain_bounds:
+    kp_x: [0.0, 800.0]
+    kd_x: [0.0, 80.0]
+    kp_y: [0.0, 160.0]
+    kd_y: [0.0, 30.0]
+    kp_z: [0.0, 240.0]
+    kd_z: [0.0, 40.0]
+    kp_rot: [0.0, 30.0]
+    kd_rot: [0.0, 40.0]
+    kp_posture: [0.0, 100.0]
+    kd_posture: [0.0, 24.0]
+    kd_joint: [0.0, 16.0]
+  action_mode: "gains"
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  gain_smooth_weight: 0.01
+  torque_smooth_weight: 0.001
+  terminal_safety_penalty: -25.0
+  terminal_quality_weight: 50.0
+  progress_weight: 50.0
+  move_phase_disturbance_scale: 0.3
+  # New in this config (default false elsewhere) -- see header comment above
+  # and docs/status/rl_undershoot_instability_diagnosis_2026-07-29.md.
+  hold_drift_relative_to_target: true
+
+training:
+  policy: "MlpPolicy"
+  net_arch: [128, 128]
+  # PPO-only keys (n_steps, n_epochs, gae_lambda, clip_range) and PPO's own
+  # top-level ent_coef are never read under --algo sac -- all SAC
+  # hyperparameters live under training.sac below.
+  device: "cpu"
+  seed: 0
+  # Sized per AGENTS.md sec 8's remote-compute guidance: n_envs=24 was
+  # validated memory-safe (~19GB steady RSS) on ilab4.cs.rutgers.edu on
+  # 2026-07-29. Kept at 24 here even when actually launched on an idle
+  # westeros (more headroom available there) to avoid over-subscribing CPU
+  # shared with the parallel residual_torque SAC experiment running
+  # alongside this one.
+  n_envs: 24
+  # Full-run budget, matching all four prior PPO attempts' total_timesteps
+  # for direct comparability. Actually launched via a short pilot first
+  # (--total-timesteps override), see docs/status/
+  # sac_gains_mode_experiment_2026-07-29.md.
+  total_timesteps: 3000000
+  sac:
+    learning_rate: 3.0e-4
+    buffer_size: 300000
+    learning_starts: 10000
+    batch_size: 256
+    # SB3 names this 'tau' -- renamed here to never read as joint torque
+    # anywhere in this codebase; mapped explicitly at the SAC(...) call site.
+    polyak_tau: 0.005
+    gamma: 0.99
+    train_freq: 1
+    gradient_steps: 1
+    action_noise: null
+    ent_coef: "auto"
+    target_update_interval: 1
+    target_entropy: "auto"
