@@ -261,6 +261,10 @@ class TorqueTaskQPController:
             tau_task=tau_task_nominal,
             tau_damping=tau_damping,
             tau_posture=tau_posture,
+            # This controller does not implement the wrist-orientation task
+            # (controller_core/x_axis_cartesian_impedance.py's
+            # ``wrist_orientation_task`` flag) -- always zero here.
+            tau_orient_wrist=np.zeros(6, dtype=np.float64),
             tau_gravity=gravity,
             tau_saturated=saturated.astype(np.float64),
             jacobian_cond=cond,

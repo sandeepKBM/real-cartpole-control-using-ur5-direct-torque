@@ -25,6 +25,25 @@ JOINT_NAME_ORDER: tuple[str, ...] = (
     "wrist_3_joint",
 )
 
+# Fixed per-joint weighting for the optional wrist-orientation task term
+# (``wrist_orientation_task``, see CartesianImpedanceConfig below). Shape
+# matches ``JOINT_NAME_ORDER``. Values are the ``face_mask``/``orientation
+# mask`` ratios from the two pre-torque-lane kinematic controllers that
+# originated this task-partition idea (``archive/legacy_mujoco/controller.py``
+# -- ``split_forearm_origin_face_controller`` (C1) and
+# ``differential_ik_split_controller`` (C2), documented in
+# ``docs/archive/SLSQP_CONTROLLER_REFERENCE.md``): both use
+# ``face_mask = [0, 0, 0, 1.25, 1.55, 1.25]`` over
+# ``[shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3]`` --
+# exactly zero on the three proximal joints, heavily weighted on the wrist
+# chain with wrist_2 (the joint that sits at 0 at the transport singularity)
+# weighted highest. Normalized here to a 1.0 peak; only the *shape* is taken
+# from the legacy controllers (an overall scale is absorbed by
+# ``kp_rot_wrist``/``kd_rot_wrist``), not the literal legacy PD gains.
+WRIST_ORIENTATION_MASK: np.ndarray = np.array(
+    [0.0, 0.0, 0.0, 1.25 / 1.55, 1.0, 1.25 / 1.55], dtype=np.float64
+)
+
 
 @dataclass
 class CartesianImpedanceConfig:
@@ -110,6 +129,38 @@ class CartesianImpedanceConfig:
     posture_reanchor_on_settle: bool = False
     reanchor_x_tol_m: float = 2.0e-3
     reanchor_qd_tol_radps: float = 0.05
+    # Wrist-orientation task (default off = historical behavior). Root cause
+    # found 2026-07-27/28 (AGENTS.md sec 3, "The ceiling is directional, not
+    # just a magnitude limit"): with kp_rot=0 (required -- turning kp_rot back
+    # on is unstable near the wrist_2=0 transport singularity through the
+    # shared, eps-regularized Lambda-weighted wrench pipeline), orientation is
+    # held only as a side effect of the nullspace-posture projector, and that
+    # projector's restoring authority is itself asymmetric with wrist_2 sign
+    # at the height_alpha=0.5 pose -- not a tunable-gain problem with the
+    # existing architecture (a direct kp_posture/kd_posture/kd_joint sweep at
+    # the exact failing case barely moved the outcome).
+    #
+    # This flag adds a SEPARATE joint-space PD torque term that gives
+    # orientation its own dedicated authority via the wrist joints only,
+    # structurally isolated from the shared Lambda-weighted wrench pipeline
+    # that made kp_rot unstable (translated from two pre-torque-lane
+    # kinematic controllers that split position and orientation by which
+    # joints are responsible for which task -- see WRIST_ORIENTATION_MASK's
+    # docstring and archive/legacy_mujoco/controller.py):
+    #
+    #   tau_orient_wrist = (J_rot.T @ (kp_rot_wrist * e_rot - kd_rot_wrist * omega)) * WRIST_ORIENTATION_MASK
+    #
+    # Reuses the same orientation_error_vec / omega already computed for the
+    # existing (currently zero-gain) kp_rot/kd_rot term -- does not recompute
+    # them, and does not touch kp_rot/kd_rot, which remain the historical
+    # zero-gain path when this flag is off. This term is summed into the same
+    # joint-space bias (tau_damping + tau_posture + ... + gravity) as
+    # tau_posture, so it flows through the existing geometric-backtracking
+    # and hard-clip logic identically -- no bypass, no special-cased safety
+    # path.
+    wrist_orientation_task: bool = False
+    kp_rot_wrist: float = 0.0
+    kd_rot_wrist: float = 0.0
 
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianImpedanceConfig":
@@ -154,6 +205,9 @@ class CartesianImpedanceConfig:
             posture_reanchor_on_settle=bool(ctrl.get("posture_reanchor_on_settle", False)),
             reanchor_x_tol_m=float(ctrl.get("reanchor_x_tol_m", 2.0e-3)),
             reanchor_qd_tol_radps=float(ctrl.get("reanchor_qd_tol_radps", 0.05)),
+            wrist_orientation_task=bool(ctrl.get("wrist_orientation_task", False)),
+            kp_rot_wrist=float(gains.get("kp_rot_wrist", 0.0)),
+            kd_rot_wrist=float(gains.get("kd_rot_wrist", 0.0)),
         )
 
 
@@ -166,6 +220,7 @@ class CartesianImpedanceOutput:
     tau_task: np.ndarray
     tau_damping: np.ndarray
     tau_posture: np.ndarray
+    tau_orient_wrist: np.ndarray
     tau_gravity: np.ndarray
     tau_saturated: np.ndarray
     jacobian_cond: float
@@ -186,6 +241,7 @@ class CartesianImpedanceOutput:
     nullspace_posture_active: bool = False
     mass_matrix_provided: bool = False
     posture_reanchored: bool = False
+    wrist_orientation_task_active: bool = False
 
 
 class XAxisCartesianImpedanceController:
@@ -433,11 +489,25 @@ class XAxisCartesianImpedanceController:
             nullspace_proj = np.eye(6) - J.T @ j_bar.T
             tau_posture = nullspace_proj @ tau_posture
 
+        use_wrist_orientation_task = bool(self.cfg.wrist_orientation_task)
+        tau_orient_wrist = np.zeros(6, dtype=np.float64)
+        if use_wrist_orientation_task:
+            # Deliberately NOT part of the shared Lambda-weighted wrench
+            # pipeline above -- that pipeline is where kp_rot was found to be
+            # unstable near the wrist_2=0 singularity. This is a plain
+            # joint-space PD term (computed exactly like tau_posture),
+            # reusing e_rot/omega already computed for the wrench's own
+            # (currently zero-gain) rotational block, masked to act mostly
+            # through the wrist chain -- see WRIST_ORIENTATION_MASK.
+            J_rot = J[3:6, :]
+            m_wrist = self.cfg.kp_rot_wrist * e_rot - self.cfg.kd_rot_wrist * omega
+            tau_orient_wrist = (J_rot.T @ m_wrist) * WRIST_ORIENTATION_MASK
+
         g = np.zeros(6, dtype=np.float64)
         if "gravity_torque" in st and st["gravity_torque"] is not None:
             g = np.asarray(st["gravity_torque"], dtype=np.float64).reshape(6)
 
-        tau_bias = tau_damping + tau_posture + g
+        tau_bias = tau_damping + tau_posture + tau_orient_wrist + g
         tau_limit = np.asarray(self.cfg.tau_max_nm, dtype=np.float64).reshape(6)
         tau_headroom = np.clip(float(self.cfg.torque_headroom), 0.0, 1.0)
         tau_limit_headroom = tau_limit * max(tau_headroom, 0.0)
@@ -453,6 +523,7 @@ class XAxisCartesianImpedanceController:
         tau_task = task_backtrack_scale * tau_task_nominal
         tau_damping = task_backtrack_scale * tau_damping
         tau_posture = task_backtrack_scale * tau_posture
+        tau_orient_wrist = task_backtrack_scale * tau_orient_wrist
         g = task_backtrack_scale * g
         tau = tau_preclip
 
@@ -468,6 +539,7 @@ class XAxisCartesianImpedanceController:
             tau_task=tau_task,
             tau_damping=tau_damping,
             tau_posture=tau_posture,
+            tau_orient_wrist=tau_orient_wrist,
             tau_gravity=g,
             tau_saturated=saturated.astype(np.float64),
             jacobian_cond=cond,
@@ -488,4 +560,5 @@ class XAxisCartesianImpedanceController:
             nullspace_posture_active=use_nullspace,
             mass_matrix_provided=bool(mass_matrix_provided),
             posture_reanchored=bool(self._posture_reanchored),
+            wrist_orientation_task_active=use_wrist_orientation_task,
         )
