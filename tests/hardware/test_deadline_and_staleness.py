@@ -42,6 +42,7 @@ from hardware.safety import (  # noqa: E402
     DeadlineMonitor,
     EStopLatch,
     StaleStateMonitor,
+    UR5eSafetyLimits,
 )
 
 CONFIG = REPO_ROOT / "config" / "ur5e_mujoco_torque_osc_tuned.yaml"
@@ -95,6 +96,60 @@ def test_deadline_monitor_rejects_bad_config():
         DeadlineMonitor(max_deadline_ms=3.0, max_consecutive_overruns=0)
     with pytest.raises(ValueError):
         DeadlineMonitor(max_deadline_ms=3.0, hard_overrun_multiple=0.5)
+
+
+# --------------------------------------------------------------------------- #
+# Fix 2a: period-relative deadline cap for the 500 Hz direct_torque loop
+# (docs/status/deadline_monitor_period_relative_fix_2026-07-29.md). The flat
+# 3.0 ms max_deadline_ms default tolerates up to ~250% of a 2 ms period
+# before an overrun is even counted (see test_deadline_monitor_ignores_
+# clean_cycles above) -- too loose for that loop's own budget, and a real
+# reported incident (4/5 cycles late, overruns up to ~2 ms, total cycle time
+# up to ~2x the nominal 2 ms period) slipped under it undetected. These tests
+# cover the fix: a tightened DeadlineMonitor(1.0) now catches that exact
+# shape, and the UR5eSafetyLimits.max_deadline_fraction_of_period field feeds
+# the min() formula used at the direct_torque_transport.py call site.
+# --------------------------------------------------------------------------- #
+def test_deadline_monitor_trips_on_reported_incident_shape():
+    # Post-fix 500 Hz/2 ms-loop effective cap (min(3.0, 0.5 * 2.0) = 1.0 ms).
+    mon = DeadlineMonitor(max_deadline_ms=1.0, max_consecutive_overruns=3)
+    # The reported incident: 4-of-5 cycles late, overruns up to ~2 ms (total
+    # cycle time up to ~2x the nominal 2 ms period), one clean cycle out of
+    # every five.
+    pattern_ms = [2.0, 2.0, 2.0, 2.0, 0.0]
+    reason = None
+    cycles_run = 0
+    for _ in range(20):  # far more than needed if the fix works
+        for overrun_ms in pattern_ms:
+            cycles_run += 1
+            reason = mon.record(_ns(overrun_ms))
+            if reason is not None:
+                break
+        if reason is not None:
+            break
+    assert reason is not None, "reported incident shape must now trip the tightened monitor"
+    assert "deadline_overrun" in reason
+    # 4 late cycles in a row appear before the single clean one in each
+    # 5-cycle block, so with max_consecutive_overruns=3 this must trip within
+    # the very first block ("a few cycles"), not require many repeats.
+    assert cycles_run <= 5
+
+
+def test_max_deadline_fraction_of_period_config_wiring():
+    # Mirrors the exact min() formula used at the direct_torque_transport.py
+    # call site: min(max_deadline_ms, max_deadline_fraction_of_period * dt_s * 1000.0).
+    limits = UR5eSafetyLimits(max_deadline_ms=3.0, max_deadline_fraction_of_period=0.5)
+    limits.validate()
+
+    # 500 Hz / 2 ms period -> 0.5 * 2.0 = 1.0 ms < 3.0 ms default -> tightened.
+    dt_s_500hz = 0.002
+    effective_500hz = min(limits.max_deadline_ms, limits.max_deadline_fraction_of_period * dt_s_500hz * 1000.0)
+    assert effective_500hz == pytest.approx(1.0)
+
+    # 125 Hz / 8 ms period -> 0.5 * 8.0 = 4.0 ms >= 3.0 ms default -> unchanged.
+    dt_s_125hz = 0.008
+    effective_125hz = min(limits.max_deadline_ms, limits.max_deadline_fraction_of_period * dt_s_125hz * 1000.0)
+    assert effective_125hz == pytest.approx(3.0)
 
 
 # --------------------------------------------------------------------------- #

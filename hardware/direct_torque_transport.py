@@ -206,7 +206,19 @@ def run_x_transport_direct_torque(
     # loop already tracks per-cycle start-lateness (lateness_ns below), so the
     # deadline monitor is fed that directly rather than a separate measure.
     safety_limits = getattr(link, "limits", None) or UR5eSafetyLimits()
-    deadline_monitor = DeadlineMonitor(safety_limits.max_deadline_ms)
+    # Period-relative deadline cap (2026-07-29, see
+    # docs/status/deadline_monitor_period_relative_fix_2026-07-29.md): the flat
+    # max_deadline_ms default (3.0 ms) was calibrated for the three 125 Hz
+    # loops (8 ms period) and is too loose for this loop's own 500 Hz/2 ms
+    # period -- a real ~2 ms overrun on real hardware sat under it undetected.
+    # min() makes this a strict no-op for any loop whose period is >= 6 ms
+    # (0.5 * period_ms >= max_deadline_ms there), so this only ever tightens
+    # the threshold for dt_s well below that -- exactly this loop's 2 ms case.
+    effective_deadline_ms = min(
+        safety_limits.max_deadline_ms,
+        safety_limits.max_deadline_fraction_of_period * dt_s * 1000.0,
+    )
+    deadline_monitor = DeadlineMonitor(effective_deadline_ms)
     stale_monitor = StaleStateMonitor()
 
     try:

@@ -92,6 +92,18 @@ class UR5eSafetyLimits:
     tcp_jump_max_m: float = 0.05
     state_stale_max_s: float = 0.1
     max_deadline_ms: float = 3.0
+    # Period-relative cap layered on top of max_deadline_ms (2026-07-29, see
+    # docs/status/deadline_monitor_period_relative_fix_2026-07-29.md). The flat
+    # 3.0 ms max_deadline_ms default is fine for the three 125 Hz loops (8 ms
+    # period -- 3.0 ms is a real fraction of it) but tolerates up to ~250% of
+    # a 500 Hz/2 ms loop's own period before DeadlineMonitor even starts
+    # counting an overrun (test_deadline_monitor_ignores_clean_cycles asserts
+    # this is intentional at 3.0 ms in isolation) -- too loose for that loop's
+    # own budget, and a real ~2 ms overrun on real hardware slipped under it
+    # undetected. Only hardware/direct_torque_transport.py's 500 Hz loop
+    # currently applies this via min(max_deadline_ms, max_deadline_fraction_of_period
+    # * dt_s * 1000.0); the other three loops are unaffected.
+    max_deadline_fraction_of_period: float = 0.5
 
     def validate(self) -> None:
         for name in ("q_lower", "q_upper", "qd_max_radps", "qdd_max_radps2"):
@@ -100,7 +112,13 @@ class UR5eSafetyLimits:
                 raise ValueError(f"{name} must have exactly 6 elements")
             if not np.all(np.isfinite(value)):
                 raise ValueError(f"{name} contains NaN/Inf")
-        for name in ("tcp_speed_max_mps", "tcp_jump_max_m", "state_stale_max_s", "max_deadline_ms"):
+        for name in (
+            "tcp_speed_max_mps",
+            "tcp_jump_max_m",
+            "state_stale_max_s",
+            "max_deadline_ms",
+            "max_deadline_fraction_of_period",
+        ):
             value = float(getattr(self, name))
             if not np.isfinite(value) or value <= 0.0:
                 raise ValueError(f"{name} must be positive and finite")
