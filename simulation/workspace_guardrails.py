@@ -236,6 +236,12 @@ class BoundaryAssessment:
     distance_m: float | None
     margin_m: float
     message: str
+    # True unless this assessment came from a ``BoundarySpec(active=False)``
+    # placeholder boundary. ``_combine_assessments`` uses this to avoid
+    # letting an intentionally-disabled boundary's ``state="unknown"`` mask
+    # a genuine "inside all active guardrails" verdict -- see that
+    # function's docstring-equivalent comment for the bug this fixes.
+    active: bool = True
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -246,6 +252,7 @@ class BoundaryAssessment:
             "distance_m": self.distance_m,
             "margin_m": self.margin_m,
             "message": self.message,
+            "active": self.active,
         }
 
 
@@ -411,6 +418,7 @@ def _assess_boundary(point: np.ndarray, boundary: BoundarySpec, margin_m: float 
             distance_m=None,
             margin_m=eff_margin,
             message=boundary.unresolved_reason or "inactive boundary",
+            active=False,
         )
     if boundary.primitive == "plane":
         signed = _plane_signed_distance(point, boundary)
@@ -472,7 +480,15 @@ def _combine_assessments(
 ) -> GuardrailDecision:
     violation = next((a for a in assessments if a.state == "outside"), None)
     near = [a.name for a in assessments if a.state == "near_boundary"]
-    unknown = any(a.state == "unknown" for a in assessments)
+    # Only an *active* boundary's genuine ambiguity (e.g. an unimplemented
+    # primitive) should block an "inside" verdict. An inactive/placeholder
+    # boundary (BoundarySpec(active=False)) is also reported as
+    # state="unknown" per-boundary (see _assess_boundary), but it must not
+    # poison every future "inside" verdict just because a deliberately
+    # disabled placeholder boundary exists in the config -- see the bug this
+    # fixes (2026-07-29 audit): a single `active: false` entry used to make
+    # check_point/check_trajectory unable to ever report "inside" again.
+    unknown = any(a.state == "unknown" and a.active for a in assessments)
     if violation is not None:
         return GuardrailDecision(
             state="outside",
@@ -503,7 +519,7 @@ def _combine_assessments(
             timestamp_ns=timestamp_ns,
         )
     if unknown:
-        first = next(a for a in assessments if a.state == "unknown")
+        first = next(a for a in assessments if a.state == "unknown" and a.active)
         return GuardrailDecision(
             state="unknown",
             message=first.message,

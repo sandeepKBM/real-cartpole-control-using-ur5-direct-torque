@@ -257,6 +257,25 @@ def test_hold_variant_without_success_fields_infers_from_hold_validity(tmp_path:
     assert rec.phase_at_failure == "hold"
 
 
+def test_zero_evidence_summary_defaults_to_failure_not_success(tmp_path: Path) -> None:
+    """Regression test (2026-07-29 bug audit): a summary.json with none of
+    `success`, `termination_reason`, or `hold_valid_normal` (e.g. a
+    partially-written/crashed summary) used to be silently classified as
+    `outcome="success"` on pure absence of evidence, contradicting this
+    module's own stated purpose of being the trustworthy record. It must
+    default to a failure classification instead.
+    """
+    run_dir = tmp_path / "no_evidence"
+    run_dir.mkdir()
+    summary = _base_summary(run_dir)
+    del summary["success"]
+    del summary["termination_reason"]
+    assert summary.get("hold_valid_normal") is None
+    logger = RunLogger(output_root=tmp_path, source_script="x.py")
+    record = logger.build_record_from_summary(summary, run_dir=run_dir, seed=0, config_path="c.yaml")
+    assert record.outcome == "failure"
+
+
 def test_gravity_hold_status(tmp_path: Path) -> None:
     run_dir = tmp_path / "hold"
     run_dir.mkdir()

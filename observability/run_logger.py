@@ -385,8 +385,19 @@ class RunLogger:
         elif summary.get("hold_valid_normal") is not None:
             success = bool(summary["hold_valid_normal"])
         else:
-            # No failure evidence anywhere in the summary: the run ran to completion.
-            success = True
+            # No success/termination_reason/hold_valid_normal key anywhere in
+            # the summary -- e.g. a partially-written/crashed summary.json, or
+            # a future driver that doesn't populate these. Absence of failure
+            # evidence is not success evidence: this module's whole purpose is
+            # to be the trustworthy record ("Do not trust an MP4 or a bare
+            # exit code as success evidence" -- AGENTS.md sec 2), so an
+            # unclassifiable run must not silently default to "success".
+            # Confirmed unreachable via either current real caller
+            # (tools/ur5e_move_hold_transport.py, tools/audit_ur5e_mujoco_gravity_torque.py
+            # always set at least one of the three keys above) -- this is a
+            # defensive default for a future/partial summary, not a change to
+            # any currently-observed run's classification.
+            success = False
 
         gains = summary.get("controller_gains")
         if not isinstance(gains, Mapping):
