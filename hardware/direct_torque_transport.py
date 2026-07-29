@@ -323,6 +323,15 @@ def run_x_transport_direct_torque(
                     "target_x": target_x,
                     "x_error": float(output.x_error),
                     "orientation_error_norm": float(output.orientation_error_norm),
+                    # Controller-internal diagnostics already computed inside
+                    # controller.compute() (see CartesianImpedanceOutput) but
+                    # previously discarded every cycle -- found blocking the
+                    # 2026-07-28 velocity-overshoot investigation (see
+                    # docs/status/clock_timing_late_cycles_2026-07-28.md).
+                    "jacobian_cond": float(output.jacobian_cond),
+                    "singular_scale": float(output.singular_scale),
+                    "task_scale": float(output.task_scale),
+                    "task_backtrack_iters": int(output.task_backtrack_iters),
                     "tau_controller": tau_controller.tolist(),
                     "tau_coriolis": tau_coriolis.tolist(),
                     "coriolis_feedforward_active": bool(coriolis_feedforward),
