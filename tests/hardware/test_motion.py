@@ -3,6 +3,7 @@ streaming loop against fake RTDE objects (never opens a real socket)."""
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -13,13 +14,18 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from hardware.link import UR5eLink  # noqa: E402
-from hardware.motion import move_cartesian_bounded, peak_velocity_mps, plan_waypoints  # noqa: E402
+from hardware.motion import move_cartesian_bounded, peak_acceleration_mps2, peak_velocity_mps, plan_waypoints  # noqa: E402
 from hardware.safety import CartesianMoveLimits, CartesianMoveMonitor, EStopLatch  # noqa: E402
 
 
 def test_peak_velocity_matches_quintic_formula():
     # v_peak = 1.875 * distance / duration
     assert peak_velocity_mps(0.15, 6.0) == pytest.approx(1.875 * 0.15 / 6.0)
+
+
+def test_peak_acceleration_matches_quintic_formula():
+    # max |s''(tau)| = 10*sqrt(3)/3 for the quintic min-jerk profile.
+    assert peak_acceleration_mps2(0.15, 6.0) == pytest.approx((10.0 * np.sqrt(3.0) / 3.0) * 0.15 / 36.0)
 
 
 def test_plan_waypoints_rejects_bad_axis():
@@ -151,6 +157,49 @@ def test_move_cartesian_bounded_completes_a_clean_small_move():
     assert result.waypoints_sent == n_steps
     assert control.servo_stop_calls == 1
     assert estop.tripped is False
+
+
+def test_move_cartesian_bounded_writes_trace_and_summary(tmp_path):
+    n_steps = int(round(0.02 * 100.0))
+    start = [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]
+    sequence = [start]
+    for i in range(1, n_steps + 1):
+        s = min(1.0, i / n_steps)
+        pose = list(start)
+        pose[1] = 0.02 * (10 * s**3 - 15 * s**4 + 6 * s**5)
+        sequence.append(pose)
+    sequence.append(sequence[-1])
+
+    trace_path = tmp_path / "trace.jsonl"
+    summary_path = tmp_path / "summary.json"
+    link, _ = _link_with_sequence(sequence)
+    link.connect(with_control=True)
+    monitor = CartesianMoveMonitor(
+        CartesianMoveLimits(max_tcp_speed_mps=1.0, max_tcp_accel_mps2=1000.0, max_waypoint_jump_m=1.0)
+    )
+    estop = EStopLatch()
+    result = move_cartesian_bounded(
+        link,
+        monitor,
+        estop,
+        axis_index=1,
+        distance_m=0.02,
+        motion_opt_in=True,
+        duration_s=0.02,
+        rate_hz=100.0,
+        trace_path=trace_path,
+        summary_path=summary_path,
+    )
+
+    assert result.ok is True
+    assert result.trace_path == trace_path
+    assert result.summary_path == summary_path
+    rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == n_steps
+    assert {"t_s", "q", "qd", "tcp_pose", "target_tcp_pose", "axis_error_m"} <= set(rows[0])
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["success"] is True
+    assert summary["trace_path"] == str(trace_path)
 
 
 def test_move_cartesian_bounded_stops_early_on_off_axis_drift_and_trips_estop():

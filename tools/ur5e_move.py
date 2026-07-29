@@ -31,16 +31,24 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
+from pathlib import Path
 
 from _bootstrap import ensure_repo_root
 
 ensure_repo_root()
 
 from hardware.link import UR5eLink  # noqa: E402
-from hardware.motion import move_cartesian_bounded, peak_velocity_mps, plan_waypoints  # noqa: E402
+from hardware.motion import (  # noqa: E402
+    move_cartesian_bounded,
+    peak_acceleration_mps2,
+    peak_velocity_mps,
+    plan_waypoints,
+)
 from hardware.safety import CartesianMoveLimits, CartesianMoveMonitor, EStopLatch, UR5eSafetyLimits  # noqa: E402
 
 _AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def signed_distance(distance_m: float, direction: str) -> float:
@@ -60,6 +68,30 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--distance-m", required=True, type=float, help="Positive distance in meters, e.g. 0.15.")
     p.add_argument("--duration-s", type=float, default=6.0)
     p.add_argument("--rate-hz", type=float, default=125.0)
+    p.add_argument(
+        "--max-tcp-accel-mps2",
+        type=float,
+        default=None,
+        help="Override CartesianMoveMonitor max_tcp_accel_mps2 for this run.",
+    )
+    p.add_argument(
+        "--accel-gap-cycles",
+        type=int,
+        default=None,
+        help="Override acceleration estimator gap window. Larger values reduce TCP accel noise.",
+    )
+    p.add_argument(
+        "--speed-lowpass-alpha",
+        type=float,
+        default=None,
+        help="Override acceleration estimator speed EMA alpha in (0,1]. Smaller is smoother.",
+    )
+    p.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory for servoL motion trace.jsonl and summary.json. Default: timestamped under outputs/hardware_transport/.",
+    )
     p.add_argument("--dry-run", action="store_true", help="Plan the move and print it. No connection at all.")
     p.add_argument(
         "--i-understand-this-moves-the-robot",
@@ -80,9 +112,13 @@ def main() -> int:
     axis_index = _AXIS_INDEX[args.axis]
     distance_m = signed_distance(args.distance_m, args.direction)
     peak_v = peak_velocity_mps(distance_m, args.duration_s)
+    peak_a = peak_acceleration_mps2(distance_m, args.duration_s)
 
     print(f"Planned move: axis={args.axis} direction={args.direction} distance_m={distance_m:+.3f}")
-    print(f"  duration_s={args.duration_s}  rate_hz={args.rate_hz}  peak_velocity_mps={peak_v:.4f}")
+    print(
+        f"  duration_s={args.duration_s}  rate_hz={args.rate_hz}  "
+        f"peak_velocity_mps={peak_v:.4f}  peak_accel_mps2={peak_a:.4f}"
+    )
 
     if args.dry_run:
         # Waypoints are relative to whatever the start pose happens to be --
@@ -107,11 +143,24 @@ def main() -> int:
     # CartesianMoveMonitor guard during the move tautological: peak_v can never
     # exceed 1.2x itself, so neither could ever trip on an aggressive-but-nominal
     # move, only on >20% overshoot from what was already planned.
-    move_limits = CartesianMoveLimits.for_robot(args.robot_ip)
+    move_limit_overrides = {}
+    if args.max_tcp_accel_mps2 is not None:
+        move_limit_overrides["max_tcp_accel_mps2"] = float(args.max_tcp_accel_mps2)
+    if args.accel_gap_cycles is not None:
+        move_limit_overrides["accel_gap_cycles"] = int(args.accel_gap_cycles)
+    if args.speed_lowpass_alpha is not None:
+        move_limit_overrides["speed_lowpass_alpha"] = float(args.speed_lowpass_alpha)
+    move_limits = CartesianMoveLimits.for_robot(args.robot_ip, **move_limit_overrides)
     if peak_v > move_limits.max_tcp_speed_mps:
         print(
             f"[BLOCKED] planned peak velocity {peak_v:.4f} m/s exceeds the monitor's "
             f"max_tcp_speed_mps={move_limits.max_tcp_speed_mps}; increase --duration-s."
+        )
+        return 1
+    if peak_a > move_limits.max_tcp_accel_mps2:
+        print(
+            f"[BLOCKED] planned peak acceleration {peak_a:.4f} m/s^2 exceeds the monitor's "
+            f"max_tcp_accel_mps2={move_limits.max_tcp_accel_mps2}; increase --duration-s."
         )
         return 1
 
@@ -120,6 +169,13 @@ def main() -> int:
         if confirm.strip() != "MOVE":
             print("[cancelled] confirmation not received.")
             return 1
+
+    output_dir = args.output_dir
+    if output_dir is None:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = REPO_ROOT / "outputs" / "hardware_transport" / f"servo_move_{stamp}"
+    trace_path = output_dir / "trace.jsonl"
+    summary_path = output_dir / "summary.json"
 
     limits = UR5eSafetyLimits()
     link = UR5eLink(args.robot_ip, args.rate_hz, limits=limits)
@@ -137,17 +193,21 @@ def main() -> int:
             motion_opt_in=args.motion_opt_in,
             duration_s=args.duration_s,
             rate_hz=args.rate_hz,
+            trace_path=trace_path,
+            summary_path=summary_path,
         )
     finally:
         link.disconnect()
 
     if result.ok:
         print(f"[PASS] move complete. waypoints_sent={result.waypoints_sent} final_tcp_pose={result.final_tcp_pose}")
+        print(f"[logged] trace={result.trace_path} summary={result.summary_path}")
         return 0
     print(
         f"[FAIL] {result.reason} (waypoints_sent={result.waypoints_sent}, "
         f"stopped_early={result.stopped_early})"
     )
+    print(f"[logged] trace={result.trace_path} summary={result.summary_path}")
     return 1
 
 
