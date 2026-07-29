@@ -14,6 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from controller_core.x_axis_cartesian_impedance import (  # noqa: E402
+    WRIST_ORIENTATION_MASK,
     CartesianImpedanceConfig,
     XAxisCartesianImpedanceController,
 )
@@ -457,3 +458,149 @@ def test_reanchor_yaml_parsing():
         {k: v for k, v in ctrl_section.items() if not k.startswith(("posture_re", "reanchor"))}
     )
     assert default_cfg.posture_reanchor_on_settle is False
+
+
+# --- wrist_orientation_task (2026-07-29, AGENTS.md sec 3 "directional ceiling" fix) ---
+
+
+def test_wrist_orientation_mask_shape():
+    # Zero on the three proximal joints (shoulder_pan, shoulder_lift, elbow),
+    # nonzero and heaviest on wrist_2 -- see the mask's own docstring in
+    # controller_core/x_axis_cartesian_impedance.py for the legacy-controller
+    # provenance of these ratios.
+    assert WRIST_ORIENTATION_MASK.shape == (6,)
+    np.testing.assert_allclose(WRIST_ORIENTATION_MASK[:3], 0.0)
+    assert np.all(WRIST_ORIENTATION_MASK[3:] > 0.0)
+    assert WRIST_ORIENTATION_MASK[4] == pytest.approx(1.0)
+    assert WRIST_ORIENTATION_MASK[4] > WRIST_ORIENTATION_MASK[3]
+    assert WRIST_ORIENTATION_MASK[4] > WRIST_ORIENTATION_MASK[5]
+
+
+def test_wrist_orientation_task_off_by_default_and_zero_when_disabled():
+    # Flag off (default) with nonzero gains still set: term must be exactly
+    # zero and tau must match a reference controller that never set the
+    # gains at all (proves the flag actually gates the term, not just the
+    # gains happening to be zero).
+    state = _make_state(q=np.full(6, 0.1), qd=np.full(6, 0.05), target_x=0.42)
+    with_gains_off = _controller(wrist_orientation_task=False, kp_rot_wrist=50.0, kd_rot_wrist=20.0)
+    reference = _controller()
+    out_gated = with_gains_off.compute(state)
+    out_ref = reference.compute(state)
+    np.testing.assert_allclose(out_gated.tau_orient_wrist, np.zeros(6), atol=1e-12)
+    np.testing.assert_allclose(out_gated.tau, out_ref.tau, atol=1e-12)
+    assert out_gated.wrist_orientation_task_active is False
+    assert out_ref.wrist_orientation_task_active is False
+
+
+def test_wrist_orientation_task_matches_masked_jacobian_transpose_formula():
+    from controller_core.kinematics_utils import orientation_error_vec_wxyz
+
+    # J = I isolates J_rot to exactly the last three rows of the identity,
+    # so J_rot.T @ m is trivial to predict by hand. Zero every other gain
+    # (kp_x/kd_x/.../kd_joint/kp_rot/kd_rot) so tau_preclip is exactly
+    # tau_orient_wrist -- nothing else contributes.
+    kp_rot_wrist, kd_rot_wrist = 3.0, 2.0
+    quat_ref = np.array([1.0, 0.0, 0.0, 0.0])
+    quat_cur = np.array([np.cos(0.1), np.sin(0.1), 0.0, 0.0])  # small rotation about world X
+    omega = np.array([0.1, -0.2, 0.05])
+
+    cfg = CartesianImpedanceConfig(
+        kp_x=0.0, kd_x=0.0, kp_y=0.0, kd_y=0.0, kp_z=0.0, kd_z=0.0,
+        kp_rot=0.0, kd_rot=0.0, kp_posture=0.0, kd_posture=0.0, kd_joint=0.0,
+        tau_max_nm=np.full(6, 1e6),
+        wrist_orientation_task=True,
+        kp_rot_wrist=kp_rot_wrist,
+        kd_rot_wrist=kd_rot_wrist,
+    )
+    ctl = XAxisCartesianImpedanceController(cfg)
+    reset_state = {
+        "time": 0.0, "q": np.zeros(6), "qd": np.zeros(6),
+        "ee_pos": np.array([0.4, 0.1, 0.5]), "ee_quat": quat_ref,
+        "ee_lin_vel": np.zeros(3), "ee_ang_vel": np.zeros(3),
+        "target_x": 0.4, "jacobian": np.eye(6),
+    }
+    ctl.reset_from_state(reset_state)
+    state = dict(reset_state)
+    state.update(ee_quat=quat_cur, ee_ang_vel=omega, target_x=0.4)
+    out = ctl.compute(state)
+
+    e_rot_expected = orientation_error_vec_wxyz(quat_ref, quat_cur)
+    m_wrist_expected = kp_rot_wrist * e_rot_expected - kd_rot_wrist * omega
+    j_rot = np.eye(6)[3:6, :]
+    tau_orient_wrist_expected = (j_rot.T @ m_wrist_expected) * WRIST_ORIENTATION_MASK
+
+    np.testing.assert_allclose(out.tau_orient_wrist, tau_orient_wrist_expected, atol=1e-10)
+    np.testing.assert_allclose(out.tau, tau_orient_wrist_expected, atol=1e-10)
+    assert out.wrist_orientation_task_active is True
+    # Confirms it does NOT just replicate the (currently zero-gain) kp_rot/kd_rot
+    # wrench term -- the wrench's own M block used kp_rot=kd_rot=0, so the
+    # wrench itself is identically zero here.
+    np.testing.assert_allclose(out.wrench, np.zeros(6), atol=1e-12)
+
+
+def test_wrist_orientation_task_flows_through_backtracking_and_clip():
+    # Deliberately large kp_rot_wrist + a tight tau_max so the term must be
+    # visibly scaled down by the same geometric backtracking / hard clip
+    # every other torque term goes through -- no bypass.
+    quat_ref = np.array([1.0, 0.0, 0.0, 0.0])
+    quat_cur = np.array([np.cos(0.5), np.sin(0.5), 0.0, 0.0])
+    cfg = CartesianImpedanceConfig(
+        kp_x=0.0, kd_x=0.0, kp_y=0.0, kd_y=0.0, kp_z=0.0, kd_z=0.0,
+        kp_rot=0.0, kd_rot=0.0, kp_posture=0.0, kd_posture=0.0, kd_joint=0.0,
+        tau_max_nm=np.full(6, 1.0),
+        torque_headroom=1.0,
+        wrist_orientation_task=True,
+        kp_rot_wrist=1000.0,
+        kd_rot_wrist=0.0,
+    )
+    ctl = XAxisCartesianImpedanceController(cfg)
+    reset_state = {
+        "time": 0.0, "q": np.zeros(6), "qd": np.zeros(6),
+        "ee_pos": np.array([0.4, 0.1, 0.5]), "ee_quat": quat_ref,
+        "ee_lin_vel": np.zeros(3), "ee_ang_vel": np.zeros(3),
+        "target_x": 0.4, "jacobian": np.eye(6),
+    }
+    ctl.reset_from_state(reset_state)
+    state = dict(reset_state)
+    state.update(ee_quat=quat_cur, target_x=0.4)
+    out = ctl.compute(state)
+
+    assert np.all(np.abs(out.tau) <= 1.0 + 1e-9)
+    # The unclipped nominal term is large; the final tau_orient_wrist diag
+    # field is the backtracked/clipped version, strictly smaller in norm.
+    assert np.linalg.norm(out.tau_orient_wrist) < np.linalg.norm(out.tau_task_nominal) + 1000.0
+    assert np.all(np.abs(out.tau_orient_wrist) <= 1.0 + 1e-9)
+
+
+def test_wrist_orientation_task_yaml_parsing():
+    ctrl_section = {
+        "gains": {"kp_rot_wrist": 12.0, "kd_rot_wrist": 6.0},
+        "torque_limits_mode": "initial",
+        "torque_limits_initial": {
+            name: 100.0
+            for name in (
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            )
+        },
+        "wrist_orientation_task": True,
+    }
+    cfg = CartesianImpedanceConfig.from_controller_yaml_section(ctrl_section)
+    assert cfg.wrist_orientation_task is True
+    assert cfg.kp_rot_wrist == 12.0
+    assert cfg.kd_rot_wrist == 6.0
+    default_cfg = CartesianImpedanceConfig.from_controller_yaml_section(
+        {
+            k: v
+            for k, v in ctrl_section.items()
+            if k != "wrist_orientation_task"
+        }
+        | {"gains": {}}
+    )
+    assert default_cfg.wrist_orientation_task is False
+    assert default_cfg.kp_rot_wrist == 0.0
+    assert default_cfg.kd_rot_wrist == 0.0

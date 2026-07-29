@@ -26,10 +26,23 @@
 # against the already-validated envelope).
 #
 # kp_rot_wrist/kd_rot_wrist chosen by direct empirical sweep against the
-# documented -0.20m/+0.20m height_alpha=0.5 case (kp_rot_wrist in
-# {10, 20, 40, 60}); see the status doc for the sweep table. No EXISTING gain
-# (kp_x, kp_posture, kd_joint, lambda_regularization, ...) is changed from
-# the tuned baseline -- this is a pure additive change.
+# documented -0.20m/+0.20m height_alpha=0.5 case. Result: kp_rot_wrist=0.0
+# (damping-only) is the stable choice -- ANY nonzero kp_rot_wrist (tried 5,
+# 10, 20, 40 at kd_rot_wrist=10) reproduces a slow-growing orientation
+# oscillation through J_rot.T at this near-singular pose that a short
+# (1-3s) hold does not catch but a long (10s+) hold does (e.g. kp=5/kd=10:
+# clean at 2s hold, guard-trips at ~11s). This is the same qualitative
+# instability mode documented for kp_rot in the tuned baseline's own
+# comment (positive feedback near the wrist_2=0 singularity, there via the
+# eps-regularized Lambda; here via J_rot.T directly -- a raw, un-shaped
+# Jacobian-transpose PD is not immune to a near-singular Jacobian either).
+# kd_rot_wrist=10.0 alone (matching kd_rot's own already-validated damping
+# value, just delivered through the wrist-masked J_rot.T path instead of
+# the Lambda pipeline) is clean and stable through a 30s hold in both
+# directions. See docs/status/wrist_orientation_task_2026-07-29.md for the
+# full sweep table and before/after numbers. No EXISTING gain (kp_x,
+# kp_posture, kd_joint, lambda_regularization, ...) is changed from the
+# tuned baseline -- this is a pure additive change.
 mujoco:
   scene_xml: "assets/ur5e_torque/scene.xml"
   joint_order:
@@ -84,8 +97,8 @@ controller:
     kp_posture: 25.0
     kd_posture: 6.0
     kd_joint: 4.0
-    kp_rot_wrist: 20.0
-    kd_rot_wrist: 5.0
+    kp_rot_wrist: 0.0
+    kd_rot_wrist: 10.0
   wrist_orientation_task: true
   task_space_inertia_shaping: true
   posture_reanchor_on_settle: true
