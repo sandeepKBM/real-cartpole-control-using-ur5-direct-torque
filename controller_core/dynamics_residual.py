@@ -40,6 +40,17 @@ def predict_joint_acceleration(
 
     Uses ``np.linalg.solve`` rather than an explicit matrix inverse (better
     conditioned, standard practice for a one-off linear solve).
+
+    Note: this function only ever uses ``tau_total_physical - bias``, so any
+    additive term common to both cancels algebraically before it ever reaches
+    here. In particular, a caller that would otherwise compute
+    ``tau_total_physical = tau + gravity(q)`` and ``bias = coriolis(q, qd) +
+    gravity(q)`` may instead pass the raw commanded ``tau`` and
+    ``coriolis(q, qd)`` (no gravity in either) directly -- same result, one
+    fewer dynamics call. See
+    ``docs/status/residual_observer_dynamics_optimization_2026-07-30.md`` for
+    the verified derivation and the caller that does this
+    (``hardware/direct_torque_transport.py``'s residual observer).
     """
     mass_matrix = np.asarray(mass_matrix, dtype=np.float64).reshape(6, 6)
     tau_total_physical = np.asarray(tau_total_physical, dtype=np.float64).reshape(6)

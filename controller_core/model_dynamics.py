@@ -103,6 +103,18 @@ class PinocchioUR5eDynamics:
         self.data = self.model.createData()
         self.nv = int(self.model.nv)
 
+        # Dedicated zero-gravity model/data for `coriolis()` -- see that
+        # method's docstring. A second `buildModelFromMJCF` parse is a
+        # one-time __init__ cost (not hot-path), and keeping a fully separate
+        # Model/Data pair (rather than mutating `self.model.gravity` in place
+        # around each call) avoids any risk of a stale/misordered
+        # gravity-restore leaking into a `gravity()`/`bias()` call on
+        # `self.model`/`self.data` from the same instance.
+        self._model_zero_gravity = pin.buildModelFromMJCF(str(mjcf_path))
+        self._model_zero_gravity.gravity.linear = np.zeros(3)
+        self._model_zero_gravity.gravity.angular = np.zeros(3)
+        self._data_zero_gravity = self._model_zero_gravity.createData()
+
         # Joint order must match the controller's canonical ordering.
         model_joints = [name for name in self.model.names if name != "universe"]
         expected = list(expected_joint_order)
@@ -150,9 +162,30 @@ class PinocchioUR5eDynamics:
         ).copy()
 
     def coriolis(self, q: np.ndarray, qd: np.ndarray) -> np.ndarray:
+        """``C(q, qd) @ qd`` -- velocity-product torques only, no gravity.
+
+        Computed as a single ``rnea`` call against a dedicated zero-gravity
+        model/data pair (``self._model_zero_gravity``), not as
+        ``bias(q, qd) - gravity(q)`` (two separate rnea/computeGeneralizedGravity
+        calls, each redoing its own forward-kinematics pass). This is an
+        exact algebraic identity -- ``rnea(q, qd, 0)`` with gravity zeroed
+        returns exactly the ``C(q, qd) @ qd`` term, since with no gravity
+        contribution the manipulator equation's non-linear-effects term
+        reduces to pure Coriolis/centrifugal torque -- verified against the
+        previous two-call formula to ~1e-14 abs / ~1e-13 rel across random
+        (q, qd) samples (well inside this module's existing 1e-12 parity
+        tolerance, see ``tests/mujoco/test_pinocchio_parity.py::
+        test_coriolis_is_bias_minus_gravity``) and ~1.5-2x faster on this
+        machine (see
+        ``docs/status/residual_observer_dynamics_optimization_2026-07-30.md``).
+        """
         q = self._q(q)
         qd = self._q(qd)
-        return self.bias(q, qd) - self.gravity(q)
+        zero_qdd = np.zeros(self.nv, dtype=np.float64)
+        return np.asarray(
+            self._pin.rnea(self._model_zero_gravity, self._data_zero_gravity, q, qd, zero_qdd),
+            dtype=np.float64,
+        ).copy()
 
     def mass_matrix(self, q: np.ndarray) -> np.ndarray:
         q = self._q(q)

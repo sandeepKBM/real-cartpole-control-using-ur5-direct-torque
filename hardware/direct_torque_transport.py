@@ -380,21 +380,30 @@ def run_x_transport_direct_torque(
             # Diagnostic-only dynamics residual observer (see the setup
             # comment above and docs/status/direct_torque_residual_observer_2026-07-29.md).
             # Reuses this cycle's already-computed mass_matrix (from whichever
-            # dynamics_source is active) rather than recomputing it. gravity(q)
-            # is added back to `tau` (the Python-side commanded torque) to
-            # reconstruct the TRUE total physical torque, since PolyScope's
-            # directTorque() auto-adds gravity compensation that Python never
-            # sends (AGENTS.md: never add gravity twice) -- bias(q, qd)
-            # subtracts an equal g(q) term back out, so qdd_pred is
-            # insensitive to any residual mismatch between this Pinocchio
-            # model's gravity(q) and PolyScope's own internal one, as long as
-            # both are evaluated consistently here.
+            # dynamics_source is active) rather than recomputing it.
+            #
+            # PolyScope's directTorque() auto-adds gravity compensation that
+            # Python never sends (AGENTS.md: never add gravity twice), so the
+            # TRUE total physical torque is `tau + gravity(q)`, and the
+            # matching bias term is `coriolis(q, qd) + gravity(q)`. The
+            # gravity(q) term is IDENTICAL in both (same function, same q,
+            # evaluated the same way) and cancels algebraically:
+            #   (tau + g(q)) - (C(q,qd)qd + g(q)) = tau - C(q,qd)qd
+            # so this only ever needs the raw commanded `tau` and
+            # `coriolis(q, qd)` -- one Pinocchio call (a dedicated
+            # zero-gravity-model rnea, see
+            # controller_core/model_dynamics.py::PinocchioUR5eDynamics.coriolis)
+            # instead of the previous two (gravity() + bias()). Verified
+            # numerically equivalent to ~1e-14 abs and ~1.5-2x faster on this
+            # machine -- see
+            # docs/status/residual_observer_dynamics_optimization_2026-07-30.md
+            # and dynamics_residual.py::predict_joint_acceleration's docstring
+            # for the same derivation.
             qdd_pred = qdd_measured = qdd_residual = None
             if residual_dynamics is not None and residual_accel_estimator is not None:
                 t_residual = monotonic_ns()
-                tau_true_total = tau + residual_dynamics.gravity(link_state.q)
-                bias = residual_dynamics.bias(link_state.q, link_state.qd)
-                qdd_pred = predict_joint_acceleration(mass_matrix, tau_true_total, bias)
+                coriolis_term = residual_dynamics.coriolis(link_state.q, link_state.qd)
+                qdd_pred = predict_joint_acceleration(mass_matrix, tau, coriolis_term)
                 real_dt_s = dt_s if interval_ns is None else max(dt_s, interval_ns / 1e9)
                 qdd_measured = residual_accel_estimator.update(link_state.qd, real_dt_s)
                 if qdd_measured is not None:
