@@ -184,6 +184,21 @@ def _default_output_dir(control_mode: str) -> Path:
 
 def main() -> int:
     args = parse_args()
+    # Opt-in check moved before dashboard power-on / connect (matches
+    # tools/ur5e_direct_torque_height_latency_test.py's already-correct
+    # order) -- previously power_on_and_release() ran unconditionally, and
+    # --probe-only --control-mode direct_torque opened a real control
+    # connection + issued a real stopJ() before this check ever ran.
+    needs_motion = not args.probe_only
+    if needs_motion and not args.motion_opt_in:
+        print("Refusing motion without --i-understand-this-moves-the-robot", file=sys.stderr)
+        return 2
+    if needs_motion and not args.yes:
+        typed = input(f"Type MOVE to run X transport (mode={args.control_mode}): ").strip()
+        if typed != "MOVE":
+            print("Aborted.", file=sys.stderr)
+            return 2
+
     if not args.skip_dashboard_power_on:
         print("Dashboard status:")
         for cmd, resp in power_on_and_release(args.robot_ip).items():
@@ -192,7 +207,7 @@ def main() -> int:
 
     remote = query_remote_control(args.robot_ip)
     print(f"is_in_remote_control: {remote}")
-    if not remote and not args.probe_only:
+    if not remote and needs_motion:
         print(
             "\nRemote control is OFF. Enable it in PolyScope before motion:\n"
             "  docs/hardware/URSIM_REMOTE_CONTROL.md\n",
@@ -202,15 +217,18 @@ def main() -> int:
 
     if args.probe_only:
         if args.control_mode == "direct_torque":
+            # Receive-only probe -- mirrors the position-mode probe below
+            # (connect(with_control=False), plain disconnect(), no
+            # stop/motion command ever issued).
             link = UR5eDirectTorqueLink(args.robot_ip, frequency_hz=500.0)
             try:
-                link.connect()
+                link.connect(with_control=False)
             except RTDELinkError as exc:
                 print(f"RTDE connect failed: {exc}", file=sys.stderr)
                 return 1
             state = link.read_state()
             print(f"PROBE OK (direct_torque) q={state.q.round(4).tolist()} tcp_x={state.tcp_pose[0]:.4f}")
-            link.safe_stop("probe_complete")
+            link.disconnect()
             return 0
         link = UR5eLink(args.robot_ip, frequency_hz=125.0)
         link.connect(with_control=False)
@@ -218,15 +236,6 @@ def main() -> int:
         print(f"PROBE OK (position) q={state.q.round(4).tolist()} tcp_x={state.tcp_pose[0]:.4f}")
         link.disconnect()
         return 0
-
-    if not args.motion_opt_in:
-        print("Refusing motion without --i-understand-this-moves-the-robot", file=sys.stderr)
-        return 2
-    if not args.yes:
-        typed = input(f"Type MOVE to run X transport (mode={args.control_mode}): ").strip()
-        if typed != "MOVE":
-            print("Aborted.", file=sys.stderr)
-            return 2
 
     output_dir = args.output_dir or _default_output_dir(str(args.control_mode))
     start_q_rad = None if args.start_q_rad is None else np.asarray(args.start_q_rad, dtype=np.float64)

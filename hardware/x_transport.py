@@ -127,7 +127,16 @@ def run_x_transport(
         )
 
     link = UR5eDirectTorqueLink(robot_ip, frequency_hz=500.0)
-    link.connect()
+    if not motion_opt_in:
+        # Mirror run_x_transport_position's / run_x_transport_direct_torque's
+        # own raise-before-connect check (hardware/position_transport.py,
+        # hardware/direct_torque_transport.py) -- previously this branch
+        # called link.connect() (which unconditionally opens BOTH the RTDE
+        # receive and control interfaces) before any opt-in check ran,
+        # unlike the position branch a few lines above, which never opens
+        # control unless motion_opt_in is True.
+        raise ValueError("motion_opt_in must be True for a live direct-torque transport")
+    link.connect(with_control=motion_opt_in)
     if not skip_joint_move:
         from .joint_motion import move_joints_to_pose, verify_joint_pose
         from .poses import HEIGHT_ALPHA_0_5_Q

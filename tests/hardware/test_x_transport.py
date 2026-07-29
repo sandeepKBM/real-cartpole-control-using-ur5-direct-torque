@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from hardware.poses import HEIGHT_ALPHA_0_5_Q  # noqa: E402
-from hardware.x_transport import _joint_move_ur5e_link, _validate_start_q_rad  # noqa: E402
+from hardware.x_transport import _joint_move_ur5e_link, _validate_start_q_rad, run_x_transport  # noqa: E402
 from hardware.link import UR5eLink  # noqa: E402
 
 
@@ -141,3 +141,110 @@ def test_joint_move_requires_motion_opt_in():
     with pytest.raises(ValueError, match="motion_opt_in"):
         _joint_move_ur5e_link(link, motion_opt_in=False, target_q_rad=ALPHA_0_1_Q)
     assert control.move_j_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# run_x_transport(control_mode="direct_torque", motion_opt_in=False) --
+# guardrail-ordering regression test.
+#
+# Real bug found 2026-07-29: the direct_torque branch of run_x_transport()
+# called UR5eDirectTorqueLink.connect() -- which unconditionally opens BOTH
+# the RTDE receive AND control interfaces -- before motion_opt_in was ever
+# checked, unlike the sibling position branch a few lines above (which never
+# opens the control socket unless motion_opt_in is True). Not exploitable in
+# practice because both real CLI callers already gate motion_opt_in at their
+# own outer layer first, but this was a real, untested footgun at the
+# library boundary. Fixed by checking motion_opt_in before connect() and
+# calling connect(with_control=motion_opt_in).
+# --------------------------------------------------------------------------- #
+class _FakeDirectTorqueLink:
+    """Records every call so the test can assert none of them fired."""
+
+    def __init__(self, robot_ip: str, frequency_hz: float = 500.0) -> None:
+        self.robot_ip = robot_ip
+        self.frequency_hz = frequency_hz
+        self.connect_calls: list[bool] = []
+        self.direct_torque_calls = 0
+        self.move_j_calls = 0
+        self.safe_stop_calls = 0
+        self.read_state_calls = 0
+
+    def connect(self, *, with_control: bool = True) -> None:
+        self.connect_calls.append(with_control)
+
+    def read_state(self):
+        self.read_state_calls += 1
+        raise AssertionError("read_state() should never be reached when motion_opt_in is False")
+
+    def direct_torque(self, tau_nm, *, friction_comp: bool = True) -> None:
+        self.direct_torque_calls += 1
+
+    def move_j(self, q_rad, *, speed_rad_s: float = 0.5, acceleration_rad_s2: float = 0.5) -> None:
+        self.move_j_calls += 1
+
+    def safe_stop(self, reason: str) -> None:
+        self.safe_stop_calls += 1
+
+
+def test_direct_torque_transport_blocks_before_connect_without_motion_opt_in(monkeypatch):
+    fakes: list[_FakeDirectTorqueLink] = []
+
+    def _factory(robot_ip: str, frequency_hz: float = 500.0):
+        link = _FakeDirectTorqueLink(robot_ip, frequency_hz)
+        fakes.append(link)
+        return link
+
+    monkeypatch.setattr("hardware.x_transport.UR5eDirectTorqueLink", _factory)
+
+    with pytest.raises(ValueError, match="motion_opt_in"):
+        run_x_transport(
+            control_mode="direct_torque",
+            robot_ip="127.0.0.1",
+            config_path=Path("unused.yaml"),
+            target_x_delta_m=0.02,
+            move_duration_s=1.0,
+            duration_s=2.0,
+            output_dir=None,
+            motion_opt_in=False,
+        )
+
+    assert len(fakes) == 1, "run_x_transport should construct exactly one UR5eDirectTorqueLink"
+    fake = fakes[0]
+    assert fake.connect_calls == [], "connect() must never be called when motion_opt_in is False"
+    assert fake.read_state_calls == 0
+    assert fake.direct_torque_calls == 0
+    assert fake.move_j_calls == 0
+    assert fake.safe_stop_calls == 0
+
+
+def test_direct_torque_transport_connects_with_control_when_opted_in(monkeypatch):
+    """Sanity check the positive path: when motion_opt_in is True, connect()
+    is still called with with_control=True (i.e. this fix doesn't silently
+    downgrade the real, opted-in case to a receive-only connection)."""
+    fakes: list[_FakeDirectTorqueLink] = []
+
+    def _factory(robot_ip: str, frequency_hz: float = 500.0):
+        link = _FakeDirectTorqueLink(robot_ip, frequency_hz)
+        fakes.append(link)
+        return link
+
+    monkeypatch.setattr("hardware.x_transport.UR5eDirectTorqueLink", _factory)
+
+    # motion_opt_in=True proceeds past the guard into move_joints_to_pose /
+    # run_x_transport_direct_torque, which need real RTDE machinery this fake
+    # doesn't provide -- read_state() deliberately raises AssertionError
+    # (never RTDEStateError) so any failure past connect() is unambiguous.
+    with pytest.raises(AssertionError, match="should never be reached"):
+        run_x_transport(
+            control_mode="direct_torque",
+            robot_ip="127.0.0.1",
+            config_path=Path("unused.yaml"),
+            target_x_delta_m=0.02,
+            move_duration_s=1.0,
+            duration_s=2.0,
+            output_dir=None,
+            motion_opt_in=True,
+        )
+
+    assert len(fakes) == 1
+    assert fakes[0].connect_calls == [True], "connect(with_control=True) must still fire when opted in"

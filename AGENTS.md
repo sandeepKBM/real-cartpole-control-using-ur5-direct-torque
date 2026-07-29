@@ -199,12 +199,20 @@ robot safety-status bit checked every cycle in all four loops (item 6 above);
 self-referential speed guard replaced with a fixed ceiling.
 
 **Found, not yet fixed — flagged for a deliberate decision, not silently patched:**
-- **URScript (Mode 3) runs a hand-ported control law, not the validated one.** The on-robot
-  script omits nullspace posture projection and singular-value wrench scaling (both added
-  specifically to handle the wrist singularity the transport start pose sits at) and uses a
-  per-joint torque clamp instead of geometric backtracking. `tests/hardware/test_urscript_gen.py`
-  has no numerical-parity coverage against `x_axis_cartesian_impedance.py`. The ~250-run OSC
-  validation campaign does not cover what Mode 3 actually executes on the real arm.
+- **URScript (Mode 3) still omits singular-value wrench scaling; no real-hardware validation
+  exists for any URScript path yet (corrected 2026-07-29).** Nullspace posture projection and
+  geometric backtracking (previously listed here as missing) were fixed in commit `b24cdf4`
+  (2026-07-26) and are now numerically parity-tested against `x_axis_cartesian_impedance.py`
+  in `tests/hardware/test_urscript_parity.py` (415 lines) — see
+  `test_nullspace_projection_matches_python` (`atol=1e-8`) and
+  `test_backtracking_matches_python_under_saturation` (`atol=1e-6` under saturation); this file
+  is distinct from, and newer than, `tests/hardware/test_urscript_gen.py`, which this paragraph
+  previously (incorrectly) cited as having no such coverage. What's still genuinely open: the
+  on-robot script still omits `cond(J)`-based singular-value wrench scaling —
+  `test_gap_singular_scaling` in the same file currently asserts that gap exists (Python nulls
+  task torque near the singularity; URScript doesn't), not that it's closed. The ~250-run OSC
+  validation campaign, and this parity suite, are both Python-vs-Python only — no real-hardware
+  validation exists yet for any of the three URScript control-law behaviors above, fixed or not.
 - **`controller_core/x_axis_cartesian_impedance.py`'s global `cond(J)`-based `singular_scale`
   nulls task authority at the transport start pose.** Measured: freezes the controller for
   ~0.2s at the start of every move (`tau≈1e-11 Nm`), escaping only via numerical-noise

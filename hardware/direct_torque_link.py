@@ -53,7 +53,13 @@ class UR5eDirectTorqueLink:
         self._control: Any | None = None
         self._receive: Any | None = None
 
-    def connect(self) -> None:
+    def connect(self, *, with_control: bool = True) -> None:
+        """Open the receive socket, and the control socket too if
+        ``with_control`` (default True, matching every existing call site's
+        prior unconditional behavior exactly). Set ``with_control=False`` for
+        a receive-only probe that never opens (and never validates
+        ``directTorque()`` on) the control interface -- mirrors
+        ``UR5eLink.connect(with_control=...)``."""
         if self._receive is None:
             if self._receive_factory is not None:
                 self._receive = self._receive_factory(self.robot_ip, self.frequency_hz)
@@ -64,7 +70,7 @@ class UR5eDirectTorqueLink:
                 except Exception as exc:
                     raise RTDELinkError(f"Failed to open RTDE receive interface: {exc}") from exc
 
-        if self._control is None:
+        if with_control and self._control is None:
             if self._control_factory is not None:
                 self._control = self._control_factory(self.robot_ip, self.frequency_hz)
             else:
