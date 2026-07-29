@@ -1,0 +1,171 @@
+# SAC, action_mode "gains" (the best-performing architecture of the seven
+# real RL attempts so far, per docs/status/sac_gains_mode_experiment_
+# 2026-07-29.md's 2/8 result), trained across a RANGE of poses instead of a
+# single fixed height_alpha -- a genuinely different question from all seven
+# prior attempts, which all targeted the specific height_alpha=0.5,
+# -0.20m orientation-error bug (now solved better, and non-RL, by
+# controller.wrist_orientation_task -- commit bd5bba3, docs/status/
+# wrist_orientation_task_2026-07-29.md). Every fixed-gain config in this repo
+# (config/ur5e_mujoco_torque_osc_tuned*.yaml) is tuned and validated at one
+# specific pose; a state-conditioned policy could in principle read the
+# current pose (height_alpha is part of GainSchedulingEnv's observation --
+# both directly via ee_pos z and indirectly via sin(q)/cos(q), see
+# rl_gain_scheduling/gain_scheduling_env.py's _build_obs_and_info) and adjust
+# behavior accordingly, something no single static gain vector can do by
+# construction. This config is the fair test of that specific claim.
+#
+# Base: config/rl_gain_scheduling_sac_gains_alpha05.yaml (preserved
+# unmodified), itself based on config/rl_gain_scheduling_alpha05_
+# bidirectional_adaptive_lambda_residual_penalized_safety_fix.yaml. Differs
+# from rl_gain_scheduling_sac_gains_alpha05.yaml in exactly one respect:
+#   env.height_alpha_range widened from [0.5, 0.5] (fixed) to [0.0, 0.5] --
+#   matching the range this project's fixed-gain controllers have real
+#   validated behavior at (alpha=0.0 is the extensively-characterized
+#   canonical transport pose; alpha=0.5 is the one the whole directional-
+#   asymmetry investigation focused on). target_x_delta_range_m stays
+#   [-0.20, 0.20] unchanged. Every other field (controller gains/flags,
+#   reward weights, SAC hyperparameters, n_envs=24) is unchanged from the
+#   alpha05 config for direct comparability -- this isolates the one
+#   variable this experiment is actually testing.
+#
+# See docs/status/sac_multi_alpha_generalization_2026-07-29.md for the pilot
+# outcome, full run results, and the multi-pose evaluation grid (height_alpha
+# in {0.0, 0.25, 0.5} x dx in {-0.20, -0.10, 0.10, 0.20}, evaluated against
+# config/ur5e_mujoco_torque_osc_tuned.yaml at alpha=0.0 and
+# config/ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml at alpha=0.5 as the
+# two fixed-gain baselines -- there is no single fixed-gain config validated
+# identically at all three poses).
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  posture_reanchor_on_settle: true
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  # Flags that make the documented directional-asymmetry bug actually
+  # reproduce at alpha=0.5 -- copied unchanged from the source config / from
+  # config/ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml. Kept active
+  # across the whole sampled alpha range (not just 0.5) for one consistent
+  # controller-math setup throughout training.
+  lambda_diagonal_shaping: true
+  lambda_adaptive_regularization: true
+  lambda_regularization_far: 1.0e-4
+  lambda_cond_low: 1.0e4
+  lambda_cond_high: 1.0e8
+  jacobian_singular_cond_max: 1.0e18
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+env:
+  control_decimation_steps: 1
+  # Widened from the source config's [0.5, 0.5] (fixed) -- the one change
+  # this experiment makes. [0.0, 0.5] matches this repo's validated
+  # fixed-gain pose range (alpha=0.0 canonical, alpha=0.5 the directional-
+  # asymmetry case); alpha=0.25 (evaluated below) is intermediate and has
+  # never been validated by any fixed-gain config in this repo.
+  height_alpha_range: [0.0, 0.5]
+  target_x_delta_range_m: [-0.20, 0.20]
+  move_duration_s: 1.0
+  hold_duration_s: 2.0
+  max_episode_seconds: 3.0
+  record_lightweight_trace: true
+  full_trace_logging: false
+  gain_bounds:
+    kp_x: [0.0, 800.0]
+    kd_x: [0.0, 80.0]
+    kp_y: [0.0, 160.0]
+    kd_y: [0.0, 30.0]
+    kp_z: [0.0, 240.0]
+    kd_z: [0.0, 40.0]
+    kp_rot: [0.0, 30.0]
+    kd_rot: [0.0, 40.0]
+    kp_posture: [0.0, 100.0]
+    kd_posture: [0.0, 24.0]
+    kd_joint: [0.0, 16.0]
+  action_mode: "gains"
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  gain_smooth_weight: 0.01
+  torque_smooth_weight: 0.001
+  terminal_safety_penalty: -25.0
+  terminal_quality_weight: 50.0
+  progress_weight: 50.0
+  move_phase_disturbance_scale: 0.3
+
+training:
+  policy: "MlpPolicy"
+  net_arch: [128, 128]
+  # PPO-only keys (n_steps, n_epochs, gae_lambda, clip_range) and PPO's own
+  # top-level ent_coef are never read under --algo sac -- all SAC
+  # hyperparameters live under training.sac below.
+  device: "cpu"
+  seed: 0
+  # Unchanged from the alpha05 config (validated memory-safe on both ilab4
+  # and westeros on 2026-07-29). This run has westeros to itself (checked
+  # via uptime/free -h before launch), so no cross-experiment CPU
+  # contention concern here, but kept at 24 for direct comparability with
+  # the alpha05 run's own resource profile.
+  n_envs: 24
+  # Full-run budget, matching all prior attempts' total_timesteps for direct
+  # comparability. Actually launched via a short pilot first
+  # (--total-timesteps override), see docs/status/
+  # sac_multi_alpha_generalization_2026-07-29.md.
+  total_timesteps: 3000000
+  sac:
+    learning_rate: 3.0e-4
+    buffer_size: 300000
+    learning_starts: 10000
+    batch_size: 256
+    # SB3 names this 'tau' -- renamed here to never read as joint torque
+    # anywhere in this codebase; mapped explicitly at the SAC(...) call site.
+    polyak_tau: 0.005
+    gamma: 0.99
+    train_freq: 1
+    gradient_steps: 1
+    action_noise: null
+    ent_coef: "auto"
+    target_update_interval: 1
+    target_entropy: "auto"
