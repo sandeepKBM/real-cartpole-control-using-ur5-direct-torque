@@ -120,6 +120,7 @@ def move_cartesian_bounded(
     trace_path: Path | None = None,
     summary_path: Path | None = None,
     max_shoulder_pan_delta_rad: float | None = None,
+    max_stale_state_cycles: int = 5,
 ) -> MoveResult:
     """Stream one bounded, safety-monitored Cartesian move.
 
@@ -138,6 +139,8 @@ def move_cartesian_bounded(
         )
     if not link.has_control:
         raise RuntimeError("move_cartesian_bounded requires link.connect(with_control=True)")
+    if max_stale_state_cycles < 1:
+        raise ValueError("max_stale_state_cycles must be >= 1")
 
     trace_rows: list[dict[str, Any]] = []
 
@@ -171,6 +174,7 @@ def move_cartesian_bounded(
                 "max_shoulder_pan_delta_rad": (
                     None if max_shoulder_pan_delta_rad is None else float(max_shoulder_pan_delta_rad)
                 ),
+                "max_stale_state_cycles": int(max_stale_state_cycles),
                 "safety_limits": {
                     "max_off_axis_drift_m": float(monitor.limits.max_off_axis_drift_m),
                     "max_orientation_error_rad": float(monitor.limits.max_orientation_error_rad),
@@ -217,7 +221,7 @@ def move_cartesian_bounded(
     # DeadlineMonitor/StaleStateMonitor for the trip-condition reasoning).
     safety_limits = getattr(link, "limits", None) or UR5eSafetyLimits()
     deadline_monitor = DeadlineMonitor(safety_limits.max_deadline_ms)
-    stale_monitor = StaleStateMonitor()
+    stale_monitor = StaleStateMonitor(max_frozen_cycles=max_stale_state_cycles)
 
     move_start = time.monotonic()
     for i, waypoint in enumerate(waypoints):

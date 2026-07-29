@@ -104,6 +104,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Abort if shoulder_pan changes by more than this amount during the servoL move.",
     )
+    p.add_argument(
+        "--max-stale-state-cycles",
+        type=int,
+        default=5,
+        help=(
+            "Abort after this many consecutive repeated robot timestamps while the host loop advances. "
+            "Default preserves the normal hardware guard."
+        ),
+    )
     p.add_argument("--dry-run", action="store_true", help="Plan the move and print it. No connection at all.")
     p.add_argument(
         "--i-understand-this-moves-the-robot",
@@ -210,6 +219,7 @@ def main() -> int:
             trace_path=trace_path,
             summary_path=summary_path,
             max_shoulder_pan_delta_rad=args.max_shoulder_pan_delta_rad,
+            max_stale_state_cycles=args.max_stale_state_cycles,
         )
     finally:
         link.disconnect()
