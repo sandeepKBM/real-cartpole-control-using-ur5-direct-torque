@@ -19,6 +19,11 @@ class PhaseLatencyRecorder:
     build_state_ns: list[int] = field(default_factory=list)
     controller_ns: list[int] = field(default_factory=list)
     safety_ns: list[int] = field(default_factory=list)
+    # Diagnostic-only dynamics residual observer (2026-07-29, direct_torque
+    # only) -- see docs/status/direct_torque_residual_observer_2026-07-29.md.
+    # Not a safety phase; included here only so its per-cycle cost is visible
+    # in the same latency breakdown as every other phase.
+    residual_observer_ns: list[int] = field(default_factory=list)
     direct_torque_ns: list[int] = field(default_factory=list)
     sleep_ns: list[int] = field(default_factory=list)
     total_work_ns: list[int] = field(default_factory=list)
@@ -39,6 +44,7 @@ class PhaseLatencyRecorder:
             "build_state": self.build_state_ns,
             "controller": self.controller_ns,
             "safety": self.safety_ns,
+            "residual_observer": self.residual_observer_ns,
             "direct_torque": self.direct_torque_ns,
             "sleep": self.sleep_ns,
             "total_work": self.total_work_ns,
@@ -64,6 +70,7 @@ class PhaseLatencyRecorder:
                         "build_state",
                         "controller",
                         "safety",
+                        "residual_observer",
                         "direct_torque",
                     )
                     if getattr(self, f"{k}_ns")

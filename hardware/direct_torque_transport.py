@@ -11,6 +11,8 @@ from typing import Any
 import numpy as np
 import yaml
 
+from controller_core.dynamics_residual import joint_acceleration_residual, predict_joint_acceleration
+from controller_core.model_dynamics import PinocchioUR5eDynamics
 from controller_core.safety import ImpedanceSafetyConfig, ImpedanceSafetyMonitor
 from controller_core.x_axis_cartesian_impedance import (
     CartesianImpedanceConfig,
@@ -20,6 +22,7 @@ from simulation.ur5e_mujoco_torque import x_profile_target
 from transport_metrics import compute_valid_move_hold_metrics, summarize_move_hold_trace
 
 from .direct_torque_link import UR5eDirectTorqueLink
+from .joint_accel_estimator import JointAccelEstimator
 from .latency import PhaseLatencyRecorder
 from .link import RTDEStateError
 from .local_dynamics import LocalPinocchioDynamics, LocalPinocchioFastDynamics, normalize_dynamics_source
@@ -70,6 +73,9 @@ def run_x_transport_direct_torque(
     max_tcp_accel_mps2_override: float | None = None,
     accel_gap_cycles_override: int | None = None,
     speed_lowpass_alpha_override: float | None = None,
+    enable_residual_observer: bool = True,
+    residual_qdd_gap_cycles: int = 1,
+    residual_qdd_lowpass_alpha: float = 1.0,
 ) -> DirectTorqueTransportResult:
     if not motion_opt_in:
         raise ValueError("motion_opt_in must be True for a live direct-torque transport")
@@ -125,6 +131,24 @@ def run_x_transport_direct_torque(
     tracker = TimingTracker(frequency_hz)
     phases = PhaseLatencyRecorder() if record_latency else None
 
+    # Diagnostic-only dynamics residual observer (2026-07-29, direct_torque
+    # only -- see docs/status/direct_torque_residual_observer_2026-07-29.md).
+    # Predicts qdd from known rigid-body dynamics + the true total commanded
+    # torque and compares it to a noise-robust qdd estimated from consecutive
+    # qd samples; logged to trace_rows for post-hoc analysis ONLY. Built
+    # unconditionally from a dedicated PinocchioUR5eDynamics instance
+    # (independent of `dynamics_source`, which only affects the CONTROLLER's
+    # own J/M source) so the residual model is identical regardless of which
+    # dynamics_source this run uses. Constructed before link.connect(), same
+    # as gain_overrides above, so a bad gap_cycles/lowpass_alpha value fails
+    # before ever touching the robot.
+    residual_dynamics = PinocchioUR5eDynamics() if enable_residual_observer else None
+    residual_accel_estimator = (
+        JointAccelEstimator(gap_cycles=residual_qdd_gap_cycles, lowpass_alpha=residual_qdd_lowpass_alpha)
+        if enable_residual_observer
+        else None
+    )
+
     link.connect()
     state0 = link.read_state()
     x0 = float(state0.tcp_pose[0])
@@ -136,6 +160,8 @@ def run_x_transport_direct_torque(
     else:
         init_robot_state = link.build_robot_state(state0, time_s=0.0, target_x=x0, target_x_vel=0.0)
     controller.reset_from_state(init_robot_state)
+    if residual_accel_estimator is not None:
+        residual_accel_estimator.reset(state0.qd)
     safety.reset()
     safety.set_initial_position(
         np.asarray(state0.tcp_pose[:3], dtype=np.float64),
@@ -325,6 +351,31 @@ def run_x_transport_direct_torque(
             )
             prev_cycle_start_ns = cycle_start_ns
 
+            # Diagnostic-only dynamics residual observer (see the setup
+            # comment above and docs/status/direct_torque_residual_observer_2026-07-29.md).
+            # Reuses this cycle's already-computed mass_matrix (from whichever
+            # dynamics_source is active) rather than recomputing it. gravity(q)
+            # is added back to `tau` (the Python-side commanded torque) to
+            # reconstruct the TRUE total physical torque, since PolyScope's
+            # directTorque() auto-adds gravity compensation that Python never
+            # sends (AGENTS.md: never add gravity twice) -- bias(q, qd)
+            # subtracts an equal g(q) term back out, so qdd_pred is
+            # insensitive to any residual mismatch between this Pinocchio
+            # model's gravity(q) and PolyScope's own internal one, as long as
+            # both are evaluated consistently here.
+            qdd_pred = qdd_measured = qdd_residual = None
+            if residual_dynamics is not None and residual_accel_estimator is not None:
+                t_residual = monotonic_ns()
+                tau_true_total = tau + residual_dynamics.gravity(link_state.q)
+                bias = residual_dynamics.bias(link_state.q, link_state.qd)
+                qdd_pred = predict_joint_acceleration(mass_matrix, tau_true_total, bias)
+                real_dt_s = dt_s if interval_ns is None else max(dt_s, interval_ns / 1e9)
+                qdd_measured = residual_accel_estimator.update(link_state.qd, real_dt_s)
+                if qdd_measured is not None:
+                    qdd_residual = joint_acceleration_residual(qdd_measured, qdd_pred)
+                if phases is not None:
+                    phases.record("residual_observer_ns", monotonic_ns() - t_residual)
+
             trace_rows.append(
                 {
                     "time_s": t_s,
@@ -349,6 +400,19 @@ def run_x_transport_direct_torque(
                     "tau_coriolis": tau_coriolis.tolist(),
                     "coriolis_feedforward_active": bool(coriolis_feedforward),
                     "tau_applied": tau.tolist(),
+                    # Diagnostic-only, never read by ImpedanceSafetyMonitor or
+                    # CartesianMoveMonitor -- see the computation above and
+                    # docs/status/direct_torque_residual_observer_2026-07-29.md.
+                    # qdd_measured/qdd_residual are None for the first
+                    # residual_qdd_gap_cycles cycles (estimator still filling
+                    # its gap window) or whenever enable_residual_observer is
+                    # False.
+                    "qdd_pred": None if qdd_pred is None else qdd_pred.tolist(),
+                    "qdd_measured": None if qdd_measured is None else qdd_measured.tolist(),
+                    "qdd_residual": None if qdd_residual is None else qdd_residual.tolist(),
+                    "qdd_residual_norm": (
+                        None if qdd_residual is None else float(np.linalg.norm(qdd_residual))
+                    ),
                     "cycle_work_ms": work_ns / 1e6,
                     "lateness_ms": lateness_ns / 1e6,
                 }
