@@ -31,16 +31,29 @@ from hardware.safety import EStopLatch  # noqa: E402
 POSE_NAMES = ("height_alpha_0_5", "active_origin")
 
 
-def _resolve_pose(name: str, height_alpha: float | None) -> list[float]:
+def _resolve_pose(name: str, height_alpha: float | None, shoulder_pan_override_rad: float | None) -> list[float]:
     if height_alpha is not None:
-        return q_for_height_alpha(height_alpha).tolist()
-    if name == "active_origin":
+        q = q_for_height_alpha(height_alpha).tolist()
+    elif name == "active_origin":
         from hardware.poses import ACTIVE_ORIGIN_Q
 
-        return ACTIVE_ORIGIN_Q.tolist()
-    if name == "height_alpha_0_5":
-        return HEIGHT_ALPHA_0_5_Q.tolist()
-    raise ValueError(f"unknown pose {name!r}")
+        q = ACTIVE_ORIGIN_Q.tolist()
+    elif name == "height_alpha_0_5":
+        q = HEIGHT_ALPHA_0_5_Q.tolist()
+    else:
+        raise ValueError(f"unknown pose {name!r}")
+    if shoulder_pan_override_rad is not None:
+        # Base rotation only -- same real-world-wall-clearance pattern used
+        # 2026-07-28 for the alpha=0.1 pose (shoulder_pan=-0.7853981633974483
+        # rad = -45deg there). Rotating the base changes nothing about the
+        # rest of the arm's configuration/reach shape, only which absolute
+        # direction it points -- but the SAME angle does not guarantee the
+        # SAME real clearance at a different pose (different shoulder_lift/
+        # elbow/wrist angles change the arm's physical shape). Always
+        # re-verify visually via --dry-run + eyeballing before a real move.
+        q = list(q)
+        q[0] = float(shoulder_pan_override_rad)
+    return q
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,6 +61,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--robot-ip", required=True)
     p.add_argument("--pose", default="height_alpha_0_5", choices=POSE_NAMES)
     p.add_argument("--height-alpha", type=float, default=None, help="Override --pose with 0..1 interpolation.")
+    p.add_argument(
+        "--shoulder-pan-override-rad",
+        type=float,
+        default=None,
+        help=(
+            "Override joint 0 (base rotation) only, on top of whichever pose is resolved -- "
+            "for real-world wall/obstacle clearance, same pattern used 2026-07-28 "
+            "(-0.7853981633974483 rad = -45deg for the alpha=0.1 pose). Does not change "
+            "the rest of the arm's configuration. Always re-check with --dry-run first: the "
+            "same angle does not guarantee the same clearance at a different pose."
+        ),
+    )
     p.add_argument("--speed-rad-s", type=float, default=0.5)
     p.add_argument("--acceleration-rad-s2", type=float, default=0.5)
     p.add_argument("--q-tolerance-rad", type=float, default=0.03)
@@ -60,7 +85,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    target_q = _resolve_pose(args.pose, args.height_alpha)
+    target_q = _resolve_pose(args.pose, args.height_alpha, args.shoulder_pan_override_rad)
     print(f"target_q_rad={target_q}")
 
     if args.dry_run:
