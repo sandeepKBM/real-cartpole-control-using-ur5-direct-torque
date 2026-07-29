@@ -149,6 +149,22 @@ def parse_args() -> argparse.Namespace:
         help="Optional JSON object of gain overrides for a single-candidate smoke run.",
     )
     p.add_argument(
+        "--use-legacy-baseline-gains",
+        action="store_true",
+        help=(
+            "Substitute the hardcoded BASELINE_GAINS constant for the named --config's own "
+            "gains before applying --gain-overrides-json. Off by default: without this flag, "
+            "the config's own controller.gains are used as-is (the sane, expected behavior "
+            "for validating a named config). This flag exists only for reproducing pre-2026-07-30 "
+            "sweep behavior, which silently used BASELINE_GAINS regardless of --config unless "
+            "every field was re-specified via --gain-overrides-json -- a real, silent-wrong-"
+            "results footgun found during the height_alpha=0.2/0.3 validation sweep (see "
+            "docs/status/bug_audit_2026-07-29.md and tools/ur5e_pose_sweep_transport.py's "
+            "workaround, which is no longer needed after this fix but is left in place as "
+            "defensive belt-and-suspenders)."
+        ),
+    )
+    p.add_argument(
         "--start-q-rad",
         nargs=6,
         type=float,
@@ -283,6 +299,24 @@ def _load_base_cfg(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, 
     base_controller_cfg = cfg["controller"]
     base_gains = controller_gain_summary(base_controller_cfg)["controller_gains"]
     return cfg, base_gains
+
+
+def _resolve_candidate_gains(
+    base_gains: dict[str, float],
+    *,
+    use_legacy_baseline_gains: bool,
+    gain_overrides_json: str | None,
+) -> dict[str, float]:
+    """Default: the named --config's own gains, untouched. --use-legacy-baseline-gains
+    substitutes the hardcoded BASELINE_GAINS constant first (pre-2026-07-30 behavior,
+    kept only for reproducing old sweeps). --gain-overrides-json always applies last,
+    on top of whichever base was selected."""
+    candidate_gains = dict(base_gains)
+    if use_legacy_baseline_gains:
+        candidate_gains.update(BASELINE_GAINS)
+    if gain_overrides_json is not None:
+        candidate_gains.update(_normalize_gain_overrides(gain_overrides_json))
+    return candidate_gains
 
 
 def _candidate_payload(base_cfg: dict[str, Any], gains: dict[str, float], *, gravity_mode: str) -> dict[str, Any]:
@@ -568,10 +602,11 @@ def run() -> int:
     run_logger = RunLogger(output_root=output_root, source_script=Path(__file__).name)
 
     base_cfg, base_gains = _load_base_cfg(args)
-    candidate_gains = dict(base_gains)
-    candidate_gains.update(BASELINE_GAINS)
-    if args.gain_overrides_json is not None:
-        candidate_gains.update(_normalize_gain_overrides(args.gain_overrides_json))
+    candidate_gains = _resolve_candidate_gains(
+        base_gains,
+        use_legacy_baseline_gains=args.use_legacy_baseline_gains,
+        gain_overrides_json=args.gain_overrides_json,
+    )
 
     candidate_label = _candidate_label(1)
     candidate_config_path = _candidate_config_path(output_root, "baseline", candidate_label)
