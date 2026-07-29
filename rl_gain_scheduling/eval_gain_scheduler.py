@@ -41,7 +41,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from stable_baselines3 import PPO  # noqa: E402
+from stable_baselines3 import PPO, SAC  # noqa: E402
+from stable_baselines3.common.base_class import BaseAlgorithm  # noqa: E402
 
 from observability.run_logger import RunLogger  # noqa: E402
 from rl_gain_scheduling.gain_scheduling_env import (  # noqa: E402
@@ -63,7 +64,7 @@ def _interpolated_start_q(alpha: float) -> np.ndarray:
 
 def _run_learned(
     *,
-    model: PPO,
+    model: BaseAlgorithm,
     env: GainSchedulingEnv,
     alpha: float,
     dx: float,
@@ -120,7 +121,16 @@ def main() -> int:
     import argparse
 
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--model-path", type=Path, required=True, help="Path to a trained PPO model .zip.")
+    p.add_argument("--model-path", type=Path, required=True, help="Path to a trained model .zip.")
+    p.add_argument(
+        "--algo",
+        type=str,
+        choices=["ppo", "sac"],
+        default="ppo",
+        help="Algorithm the model was trained with (must match, since PPO/SAC use different "
+        "policy classes and PPO.load() on a SAC checkpoint raises). Default 'ppo' reproduces "
+        "this script's original behavior exactly for existing PPO models.",
+    )
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     p.add_argument(
         "--baseline-config",
@@ -149,7 +159,8 @@ def main() -> int:
     move_duration_s = float(cfg["env"]["move_duration_s"])
     max_episode_seconds = float(cfg["env"]["max_episode_seconds"])
 
-    model = PPO.load(str(args.model_path))
+    model_cls = {"ppo": PPO, "sac": SAC}[args.algo]
+    model = model_cls.load(str(args.model_path))
     env = GainSchedulingEnv(config_path=args.config)
     env._full_trace_logging = True
 
