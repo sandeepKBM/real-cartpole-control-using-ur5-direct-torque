@@ -8,10 +8,18 @@ of commanding any robot motion regardless of what flags you pass it. Use
 Two modes:
   --once   connect, read state one time, print it, exit.
   --watch  connect and read state continuously (Ctrl-C to stop), with real
-           liveness detection: if reads start failing, this reconnects with
-           backoff a bounded number of times, and if that doesn't recover,
-           it stops and reports failure rather than looping forever on stale
-           data (see hardware/safety.py::ConnectionHealth).
+           liveness detection covering BOTH failure modes: (a) if reads start
+           raising, this reconnects with backoff a bounded number of times,
+           and if that doesn't recover, it stops and reports failure rather
+           than looping forever (see hardware/safety.py::ConnectionHealth);
+           (b) if reads keep SUCCEEDING but the robot's own reported
+           timestamp stops advancing while the host clock keeps moving --
+           ur_rtde can return the last buffered packet without raising when
+           the underlying stream stalls -- the same reconnect-then-fail-loudly
+           path fires (see hardware/safety.py::StaleStateMonitor). Found the
+           hard way 2026-07-30: a real robot RTDE stall left this loop
+           silently printing the identical frozen state for 2000+ cycles with
+           no warning, because only failure mode (a) was wired in originally.
 
 Examples:
   python tools/ur5e_connect.py --robot-ip 192.168.1.10 --once
@@ -29,7 +37,8 @@ from _bootstrap import ensure_repo_root
 ensure_repo_root()
 
 from hardware.link import RTDEStateError, UR5eLink  # noqa: E402
-from hardware.safety import EStopLatch, UR5eSafetyLimits  # noqa: E402
+from hardware.safety import EStopLatch, StaleStateMonitor, UR5eSafetyLimits  # noqa: E402
+from hardware.timing import monotonic_ns  # noqa: E402
 
 RECONNECT_ATTEMPTS = 2
 RECONNECT_BACKOFF_S = (1.0, 3.0)
@@ -54,11 +63,30 @@ def run_once(link: UR5eLink) -> int:
     return 0
 
 
+def _attempt_reconnect(link: UR5eLink) -> bool:
+    """Shared by both failure modes: an explicit read exception, and a
+    frozen-but-non-erroring stream caught by StaleStateMonitor. Returns True
+    on success. Caller is responsible for tripping estop / reporting failure
+    if this returns False."""
+    for attempt, backoff_s in enumerate(RECONNECT_BACKOFF_S[:RECONNECT_ATTEMPTS], start=1):
+        time.sleep(backoff_s)
+        try:
+            link.disconnect()
+            link.connect(with_control=False)
+            link.read_state()
+            print(f"[reconnected] on attempt {attempt}")
+            return True
+        except (RTDEStateError, Exception) as reconnect_exc:  # noqa: BLE001
+            print(f"[reconnect attempt {attempt} failed] {reconnect_exc}")
+    return False
+
+
 def run_watch(link: UR5eLink, estop: EStopLatch, frequency_hz: float) -> int:
     link.connect(with_control=False)
     print(f"[connected] {link.robot_ip} (receive-only) -- watching at {frequency_hz} Hz, Ctrl-C to stop")
     period_s = 1.0 / frequency_hz
     cycle = 0
+    stale_monitor = StaleStateMonitor()
     try:
         while True:
             estop.raise_if_tripped()
@@ -70,24 +98,25 @@ def run_watch(link: UR5eLink, estop: EStopLatch, frequency_hz: float) -> int:
                 print(f"[read failed] ({link.health.consecutive_failures}) {exc}")
                 if tripped:
                     print("[reconnecting]")
-                    reconnected = False
-                    for attempt, backoff_s in enumerate(RECONNECT_BACKOFF_S[:RECONNECT_ATTEMPTS], start=1):
-                        time.sleep(backoff_s)
-                        try:
-                            link.disconnect()
-                            link.connect(with_control=False)
-                            link.read_state()
-                            reconnected = True
-                            print(f"[reconnected] on attempt {attempt}")
-                            break
-                        except (RTDEStateError, Exception) as reconnect_exc:  # noqa: BLE001
-                            print(f"[reconnect attempt {attempt} failed] {reconnect_exc}")
-                    if not reconnected:
+                    if not _attempt_reconnect(link):
                         reason = "connection lost and reconnect attempts exhausted"
                         estop.trip(reason)
                         link.disconnect()
                         print(f"[FAIL] {reason}")
                         return 1
+                    stale_monitor = StaleStateMonitor()
+                continue
+
+            stale_reason = stale_monitor.record(state.robot_timestamp_s, monotonic_ns())
+            if stale_reason is not None:
+                print(f"[stream stalled] {stale_reason}")
+                print("[reconnecting]")
+                if not _attempt_reconnect(link):
+                    estop.trip(stale_reason)
+                    link.disconnect()
+                    print(f"[FAIL] {stale_reason}")
+                    return 1
+                stale_monitor = StaleStateMonitor()
                 continue
 
             if cycle % max(1, int(frequency_hz)) == 0:
