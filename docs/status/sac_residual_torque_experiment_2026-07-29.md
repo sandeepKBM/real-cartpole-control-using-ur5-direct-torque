@@ -25,7 +25,34 @@ attempt's exact 0/8 result.
 
 ## Verdict
 
-TBD -- filled in after the full 3,000,000-step run and grid evaluation complete.
+**SAC does not beat the fixed-gain baseline in `residual_torque` mode, on either baseline
+config -- but it is a genuinely different failure than PPO's.** Full grid results (`height_
+alpha=0.5`, `dx` in `{-0.20,-0.15,-0.10,-0.05,0.05,0.10,0.15,0.20}`):
+
+| comparison | SAC-residual valid | baseline valid |
+|---|---|---|
+| vs `ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml` (original broken baseline, PPO-4-comparable) | **1/8 (12%)** | 7/8 (88%) |
+| vs `ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml` (today's structural fix, real bar to clear) | **1/8 (12%)** | 8/8 (100%) |
+
+Marginally less bad than the 4th PPO attempt's 0/8 on the same grid/architecture, but not a
+meaningful improvement -- both are far below either fixed-gain baseline, and neither today's
+structural controller fix nor the algorithm swap (PPO to SAC) at this architecture/reward
+budget produces a policy that helps.
+
+**The residual did NOT collapse to near-zero** -- this is the headline honest finding the task
+asked to check for specifically. Mean `|residual_tau|` across the grid is **0.25-0.58 Nm**
+(using a real, substantial fraction of the `[3.0, 3.0, 3.0, 1.5, 1.5, 1.5]` Nm per-joint
+budget, peaking at 1.66 Nm on individual joints/steps), not the near-zero "learned to defer to
+baseline" pattern the task flagged as the less-bad alternative failure mode. Instead, SAC
+learned an **active, substantive, and actively harmful** correction: 7 of 8 grid cells fail via
+`|axis_error| grew for 100 consecutive steps` (`controller_core/safety.py`'s monotonic-growth
+guard) -- the exact same failure signature the fixed-config-corrected 4th PPO attempt hit on
+all 8 of its cells (see `docs/status/rl_gain_scheduling_alpha05_directional_fix_2026-07-29.md`).
+This is real evidence the bottleneck is the `residual_torque` architecture and/or reward shape
+(specifically, whatever is inducing this indiscriminate axis-error-growth guard trip) rather
+than being specific to PPO's on-policy optimization -- an off-policy algorithm with a replay
+buffer, automatic entropy tuning, and 3x this task's typical training-signal reuse reaches a
+qualitatively similar dead end.
 
 ## Setup
 
@@ -97,31 +124,151 @@ only to confirm the eval pipeline itself works end-to-end (`--algo sac` load, tr
 
 ## Full run (3,000,000 steps, `--run-name sac_residual_alpha05`)
 
-TBD.
+Launched on `ilab4` in the foreground of one continuously-open SSH connection (per AGENTS.md
+sec 8), with `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1`
+exported, `n_envs=24`. Completed cleanly: verified by loading the saved model and reading
+`model.num_timesteps` directly (`3000000`, exact -- no partial/truncated run). Wall clock ~44
+minutes (`time_elapsed` field in the training log reached ~2650s at the final logged interval),
+sustained throughput settling to **~1050-1080 fps** as the replay buffer filled and
+`gradient_steps=1`/`train_freq=1` updates continued each step (slightly below the pilot's
+1200-1360 fps early on, expected as buffer-read/update overhead grows, still CPU-step-bound
+overall). Memory stayed low and flat throughout -- cgroup `memory.current` measured at ~12.8-
+12.9GiB partway through the run, far under the ~81.4GiB per-user cap; no memory-safety concern
+at any point. `ent_coef` (automatic entropy tuning) annealed steadily from ~0.58 at the start
+down to ~0.003-0.004 by the end (124,428 gradient updates total) -- the policy became
+increasingly deterministic/confident over training, not stuck in a permanently-exploratory
+regime. One benign `shutil.rmtree` cleanup traceback again printed after "Saved final model"
+(same interpreter-shutdown noise as the pilot, not a training failure).
+
+No TensorBoard `rollout/ep_rew_mean` scalar was available for this run (pre-existing property
+of this training script's env construction -- `_make_env_factory` in `train_ppo_gain_
+scheduler.py` does not wrap `GainSchedulingEnv` in SB3's `Monitor`, so SB3 never populates
+`ep_info_buffer` and never logs `rollout/*` scalars; confirmed via `event_accumulator.Reload()`
+on the pilot's own event file, which lists only `time/fps` and `train/*` tags). This predates
+and is unrelated to this task's own changes -- not fixed here (a training-script instrumentation
+gap, out of scope for a single training-run task per this project's rule against mixing training
+logic changes with unrelated fixes).
 
 ## Evaluation
 
-TBD -- grid: `height_alpha=0.5`, `dx` in `{-0.20, -0.15, -0.10, -0.05, 0.05, 0.10, 0.15, 0.20}`
+Grid: `height_alpha=0.5`, `dx` in `{-0.20, -0.15, -0.10, -0.05, 0.05, 0.10, 0.15, 0.20}`
 (matching `docs/status/rl_gain_scheduling_alpha05_directional_fix_2026-07-29.md`'s exact grid),
-against both:
-- `config/ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml` (original broken baseline, direct
-  comparability with the 4th PPO attempt's exact 0/8 result), and
-- `config/ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml` (today's best fixed-gain controller
-  -- the real bar to clear).
+via `rl_gain_scheduling/eval_gain_scheduler.py --algo sac`, against both baselines.
+
+### vs `config/ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml` (original broken baseline)
+
+| dx (m) | learned valid | learned quality | baseline valid | baseline quality | learned termination |
+|---|---|---|---|---|---|
+| -0.20 | False | 0.408 | False (documented bug) | 0.270 | `\|axis_error\| grew for 100 consecutive steps` |
+| -0.15 | **True** | 0.441 | True | 0.362 | duration_complete |
+| -0.10 | False | 0.606 | True | 0.461 | `\|axis_error\| grew for 100 consecutive steps` |
+| -0.05 | False | 0.480 | True | 0.611 | `\|axis_error\| grew for 100 consecutive steps` |
+| +0.05 | False | 0.554 | True | 0.631 | `\|axis_error\| grew for 100 consecutive steps` |
+| +0.10 | False | 0.556 | True | 0.519 | `\|axis_error\| grew for 100 consecutive steps` |
+| +0.15 | False | 0.454 | True | 0.438 | `\|axis_error\| grew for 100 consecutive steps` |
+| +0.20 | False | 0.379 | True | 0.342 | `\|axis_error\| grew for 100 consecutive steps` |
+
+**learned: 1/8 (12%), baseline: 7/8 (88%)** (baseline fails exactly `dx=-0.20m` via the
+documented orientation guard, matching the original finding).
+
+### vs `config/ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml` (today's structural fix)
+
+| dx (m) | learned valid | learned quality | baseline valid | baseline quality |
+|---|---|---|---|---|
+| -0.20 | False | 0.408 | **True** | 0.326 |
+| -0.15 | **True** | 0.441 | True | 0.431 |
+| -0.10 | False | 0.606 | True | 0.536 |
+| -0.05 | False | 0.480 | True | 0.676 |
+| +0.05 | False | 0.554 | True | 0.729 |
+| +0.10 | False | 0.556 | True | 0.669 |
+| +0.15 | False | 0.454 | True | 0.600 |
+| +0.20 | False | 0.379 | True | 0.489 |
+
+**learned: 1/8 (12%), baseline: 8/8 (100%)** -- the wrist-orientation-task fix cleanly resolves
+the exact `dx=-0.20m` case that both the original baseline and every RL attempt (PPO and SAC)
+have failed to fix, with no regression anywhere else in the grid. This is the real bar, and
+SAC-residual is far from clearing it.
+
+`learned` quality/termination values are identical across both tables (same policy, same
+`--config`, only `--baseline-config` differs) -- confirms determinism (`deterministic=True` in
+`model.predict`) and that the comparison is apples-to-apples.
+
+**Residual-magnitude check on the fully-trained (3M-step) policy**, computed from the eval
+trace (`residual_tau` logged every control step):
+
+| dx (m) | termination | mean \|residual\| (Nm) | max \|residual\| (Nm) |
+|---|---|---|---|
+| -0.05 | axis-error-growth | 0.269 | 1.175 |
+| -0.10 | axis-error-growth | 0.337 | 1.114 |
+| -0.15 | duration_complete (valid) | 0.250 | 1.368 |
+| -0.20 | axis-error-growth | 0.371 | 1.466 |
+| +0.05 | axis-error-growth | 0.254 | 1.354 |
+| +0.10 | axis-error-growth | 0.310 | 1.452 |
+| +0.15 | axis-error-growth | 0.451 | 1.483 |
+| +0.20 | axis-error-growth | 0.578 | 1.639 |
+
+Grid-wide mean `|residual|` = **0.353 Nm** -- a real, substantial, non-collapsed correction
+(not the "learned to do nothing" pattern), and one that grows with `|dx|` rather than shrinking
+toward the trivial cases. The one cell that stays valid (`dx=-0.15m`) has the second-smallest
+mean residual (0.250 Nm) in the whole grid, consistent with "small residual near the edge of
+the easy region, large and destabilizing residual further out" rather than random noise.
+
+## Recommendation
+
+- **Do not adopt this policy** -- it underperforms both fixed-gain baselines on nearly the
+  entire grid, and where it fails it fails by actively destabilizing (axis-error-growth), not
+  by passively doing nothing.
+- **Use `config/ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml` for this problem** -- it is a
+  strictly better fixed-gain option than both the original baseline and every RL attempt (PPO
+  x4, SAC x1) so far, at zero training cost and zero regression risk.
+- **The algorithm was not the bottleneck.** Swapping PPO for SAC -- a genuinely different
+  optimization paradigm (off-policy, replay buffer, automatic entropy tuning, ~124k gradient
+  updates vs PPO's on-policy epochs) -- reached a qualitatively similar dead end (same dominant
+  failure signature: `|axis_error| grew for 100 consecutive steps`) rather than a different one.
+  Combined with the 4th PPO attempt hitting the identical failure signature on all 8 cells, this
+  is real evidence that the `residual_torque` action space and/or this reward shape (specifically
+  whatever induces the axis-error-growth guard trip -- hypothesized in the PPO doc as
+  high-frequency residual-torque oscillation on the X axis, not yet verified at trace level for
+  either algorithm) is the actual bottleneck, not which RL algorithm is doing the optimizing.
+- **If this architecture is revisited**, the axis-error-growth guard trip deserves the
+  trace-level investigation the PPO doc already flagged as the next step (e.g. plotting
+  `residual_tau` frequency content on a previously-easy cell) before spending more training
+  compute on either algorithm.
+- Per `docs/hardware/AUTO_TUNING_PLAN.md`'s "Revisited 2026-07-29" section, the concrete
+  prerequisite for ever considering this bounded-residual architecture for real-hardware
+  step-wise fine-tuning was "must first beat the fixed-gain baseline in simulation, at the exact
+  case it's meant to fix." That prerequisite is still not met -- now confirmed under both PPO
+  and SAC -- so no real-hardware extension of this architecture is warranted at this time.
 
 ## Files changed
 
-- `config/rl_gain_scheduling_sac_residual_alpha05.yaml` (new).
-- `docs/status/sac_residual_torque_experiment_2026-07-29.md` (this file, new).
-- `rl_gain_scheduling/eval_gain_scheduler.py` -- NOT edited by this task (already had `--algo`
-  support from the parallel agent's work by the time this experiment needed it).
+- `config/rl_gain_scheduling_sac_residual_alpha05.yaml` (new, this task).
+- `docs/status/sac_residual_torque_experiment_2026-07-29.md` (this file, new, this task).
+- `rl_gain_scheduling/eval_gain_scheduler.py` -- NOT edited by this task; `--algo {ppo,sac}`
+  support (commit `60e7c76`) was added by the parallel gains-mode-SAC agent before this
+  experiment needed it, and reused as-is here (verified working via the pilot sanity eval).
+- No files under `hardware/`, `controller_core/`, or `simulation/` touched -- pure config +
+  training-run + doc, matching this task's simulation-only scope.
 
 ## Tests run
 
-TBD (final list at completion) -- `pytest tests/mujoco/test_gain_scheduling_env.py
-tests/mujoco/test_train_gain_scheduler.py -q` passed (28 passed) before launching training, to
-confirm the shared training/eval code path was unaffected by the parallel agent's
-`eval_gain_scheduler.py` edit.
+- `pytest tests/mujoco/test_gain_scheduling_env.py tests/mujoco/test_train_gain_scheduler.py -q`
+  (28 passed) -- run before launching training, to confirm the shared training/eval code path
+  (including the parallel agent's `--algo` addition) was sound.
+- `pytest -q` (full suite) -- run after training/eval completed: **348 passed, 1 failed**. The
+  one failure (`tests/hardware/test_direct_torque_transport_timing.py::
+  test_transport_records_timing_and_deadline_loop`) is the same pre-existing failure already
+  documented in `docs/status/wrist_orientation_task_2026-07-29.md` (a `dominant_phase`
+  whitelist assertion that doesn't yet include `"local_dynamics"`, traced to the unrelated,
+  earlier-landed commit `dee0190`) -- not a regression from this task, which touched no files
+  under `hardware/` or `controller_core/`.
+
+## Tests not run
+
+- No hardware-in-the-loop or real-RTDE tests (out of scope -- simulation only, per task).
+- No retraining/ablation of `training.sac.*` hyperparameters -- this was one real training
+  attempt at a placeholder-but-reasonable hyperparameter set (per this config's own header),
+  not a hyperparameter sweep; a sweep was out of scope for the available compute window.
 
 ## Rollback
 
@@ -129,4 +276,6 @@ confirm the shared training/eval code path was unaffected by the parallel agent'
 rm config/rl_gain_scheduling_sac_residual_alpha05.yaml docs/status/sac_residual_torque_experiment_2026-07-29.md
 ```
 No shared code was modified by this task (the `--algo` support in `eval_gain_scheduler.py` was
-added by the parallel agent, not here) -- rollback is config/doc-file removal only.
+added by the parallel agent, not here) -- rollback is config/doc-file removal only. Trained
+model artifacts live under `outputs/rl_gain_scheduling/sac_residual_alpha05*/` (gitignored, not
+git-recoverable, not touched by this rollback).
