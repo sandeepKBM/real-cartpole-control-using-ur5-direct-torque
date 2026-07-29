@@ -34,7 +34,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from stable_baselines3 import PPO, SAC  # noqa: E402
-from stable_baselines3.common.callbacks import CheckpointCallback  # noqa: E402
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback  # noqa: E402
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv  # noqa: E402
 
 from rl_gain_scheduling.gain_scheduling_env import GainSchedulingEnv  # noqa: E402
@@ -42,6 +42,73 @@ from rl_gain_scheduling.gain_scheduling_env import GainSchedulingEnv  # noqa: E4
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "rl_gain_scheduling.yaml"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs" / "rl_gain_scheduling"
 ALGO_CLASSES = {"ppo": PPO, "sac": SAC}
+
+
+class HeightAlphaCurriculumCallback(BaseCallback):
+    """Progressively shifts config.env.height_alpha_range over training.
+
+    Opt-in (config.env.curriculum.enabled, default absent/false = this
+    callback is never constructed and training is byte-identical to before
+    it existed -- see main()). Reads config.env.curriculum.stages, a list of
+    {alpha_range: [lo, hi], timestep_frac: float} dicts (fracs must sum to
+    ~1.0), and converts timestep_frac into an absolute cumulative timestep
+    boundary using the run's ACTUAL total_timesteps budget (whatever this
+    invocation passes to model.learn() -- so a short --total-timesteps pilot
+    override exercises the full stage sequence in miniature, not just stage
+    0, which is the point of piloting the mechanism itself).
+
+    At each stage boundary this calls
+    VecEnv.env_method("set_height_alpha_range", lo, hi) -- a VecEnv base
+    class API implemented identically by SubprocVecEnv (pickles the call to
+    each remote worker process, which invokes the method on its own live
+    GainSchedulingEnv instance) and DummyVecEnv (calls it in-process
+    directly) -- so this works unmodified under either vectorization backend
+    main() picks based on n_envs. The policy/optimizer are never touched
+    here: this only changes what height_alpha range future reset() calls in
+    each worker sample from, so training continues uninterrupted across
+    stage transitions (no env rebuild, no model reload).
+    """
+
+    def __init__(self, stages: list[dict], total_timesteps: int, verbose: int = 1):
+        super().__init__(verbose)
+        if not stages:
+            raise ValueError("config.env.curriculum.stages must be a non-empty list")
+        fracs = [float(s["timestep_frac"]) for s in stages]
+        frac_sum = sum(fracs)
+        if not (0.99 <= frac_sum <= 1.01):
+            raise ValueError(f"config.env.curriculum.stages timestep_frac values sum to {frac_sum!r}, expected ~1.0")
+        self._ranges: list[tuple[float, float]] = [
+            (float(s["alpha_range"][0]), float(s["alpha_range"][1])) for s in stages
+        ]
+        cumulative = 0.0
+        self._boundaries: list[int] = []
+        for f in fracs:
+            cumulative += f
+            self._boundaries.append(round(cumulative * total_timesteps))
+        self._boundaries[-1] = total_timesteps  # exact: last stage always covers the run's true end
+        self._stage_idx = -1
+
+    def _stage_for_timestep(self, t: int) -> int:
+        for idx, boundary in enumerate(self._boundaries):
+            if t < boundary or idx == len(self._boundaries) - 1:
+                return idx
+        return len(self._boundaries) - 1
+
+    def _apply_stage(self, idx: int) -> None:
+        lo, hi = self._ranges[idx]
+        self.training_env.env_method("set_height_alpha_range", lo, hi)
+        self._stage_idx = idx
+        if self.verbose:
+            print(f"[curriculum] stage {idx + 1}/{len(self._ranges)} @ t={self.num_timesteps}: height_alpha_range=({lo}, {hi})")
+
+    def _on_training_start(self) -> None:
+        self._apply_stage(0)
+
+    def _on_step(self) -> bool:
+        idx = self._stage_for_timestep(self.num_timesteps)
+        if idx != self._stage_idx:
+            self._apply_stage(idx)
+        return True
 
 
 def parse_args() -> argparse.Namespace:
@@ -182,11 +249,18 @@ def main() -> int:
         save_path=str(checkpoint_dir),
         name_prefix=f"{algo}_gain_scheduler",
     )
+    callbacks: list[BaseCallback] = [checkpoint_callback]
+    curriculum_cfg = cfg.get("env", {}).get("curriculum")
+    if curriculum_cfg is not None and bool(curriculum_cfg.get("enabled", False)):
+        callbacks.append(
+            HeightAlphaCurriculumCallback(stages=list(curriculum_cfg["stages"]), total_timesteps=total_timesteps)
+        )
+    callback = CallbackList(callbacks)
 
     try:
         model.learn(
             total_timesteps=total_timesteps,
-            callback=checkpoint_callback,
+            callback=callback,
             progress_bar=False,
             reset_num_timesteps=(args.resume is None),
         )

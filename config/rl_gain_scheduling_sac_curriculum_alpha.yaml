@@ -1,0 +1,205 @@
+# SAC, action_mode "gains" (the best-performing action-mode of the eight
+# real RL attempts run on 2026-07-29 -- 2/8 valid at height_alpha=0.5,
+# docs/status/sac_gains_mode_experiment_2026-07-29.md), now trained with a
+# CURRICULUM over height_alpha instead of either a fixed pose (the eight
+# prior attempts) or a single wide fixed range sampled uniformly for the
+# whole run (docs/status/sac_multi_alpha_generalization_2026-07-29.md's
+# [0.0, 0.5]-range attempt, which made alpha=0.5 performance WORSE than the
+# dedicated single-pose run -- 0/4 vs 2/8 on the shared dx subset -- a
+# classic too-hard/non-stationary training distribution).
+#
+# This config tests a genuinely different idea: start training concentrated
+# near an EASY pose close to the well-characterized canonical alpha=0 pose,
+# then progressively shift/widen the sampled range up toward alpha=0.5 as
+# training progresses, via rl_gain_scheduling/train_ppo_gain_scheduler.py's
+# new HeightAlphaCurriculumCallback (env.curriculum block below). The policy
+# is never restarted across stage transitions -- only the env's sampling
+# range for future reset() calls changes, mid-run, via VecEnv.env_method.
+#
+# Separately reframes the TASK, per this session's instructions: instead of
+# re-proving the already-validated +/-0.20m fixed-gain envelope,
+# target_x_delta_range_m is widened to [-0.24, 0.24] -- approaching but
+# staying meaningfully under the documented dx=0.25m Z-drift structural
+# failure point (AGENTS.md sec 3), so training and eval both cover territory
+# the fixed-gain controller has never been validated at (0.20-0.24m).
+#
+# Base: config/rl_gain_scheduling_sac_gains_alpha05.yaml (preserved
+# unmodified). Differs in exactly three respects:
+#   1. env.height_alpha_range: [0.5, 0.5] (fixed) -> [0.05, 0.15] (stage-0
+#      range; matches env.curriculum.stages[0] below, so the env's
+#      state-at-construction is already correct for t=0 without relying on
+#      the callback's _on_training_start() to fire first).
+#   2. env.target_x_delta_range_m: [-0.20, 0.20] -> [-0.24, 0.24].
+#   3. env.curriculum block added (new, opt-in via curriculum.enabled).
+# reward.* is UNCHANGED from the alpha05 (v1, 2/8) config -- deliberately.
+# docs/status/rl_undershoot_instability_diagnosis_2026-07-29.md found that
+# even a narrowly-scoped, well-motivated reward change (substituting
+# hold_phase_x_drift_from_hold_start_m for a target-relative term) traded
+# one failure mode for a materially worse one (2/8 -> 0/8, doubled guard
+# trips) on a single 3M-step run -- real evidence that ad hoc reward
+# iteration on this problem is risky, not free. progress_weight (50.0) and
+# terminal_quality_weight (50.0) already scale relatively with
+# |target_x_delta| (compute_valid_move_hold_metrics's own tolerances are
+# max(fixed_floor, fraction * |target|)), so no explicit "reward larger
+# displacement more" term was added -- widening target_x_delta_range_m
+# alone already exposes the policy to, and lets the existing reward shape
+# score, the larger-displacement regime this experiment is after.
+#
+# See docs/status/rl_curriculum_alpha_max_displacement_2026-07-29.md for the
+# pilot outcome, full run results, and the dx=0.23m frontier-test evaluation.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  posture_reanchor_on_settle: true
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  # Unchanged from the alpha05 source config -- kept active across the whole
+  # curriculum (not just the alpha=0.5 end) for one consistent controller-math
+  # setup throughout training.
+  lambda_diagonal_shaping: true
+  lambda_adaptive_regularization: true
+  lambda_regularization_far: 1.0e-4
+  lambda_cond_low: 1.0e4
+  lambda_cond_high: 1.0e8
+  jacobian_singular_cond_max: 1.0e18
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+env:
+  control_decimation_steps: 1
+  # Stage-0 range (matches env.curriculum.stages[0].alpha_range below) --
+  # this is what the env samples from before the curriculum callback's
+  # _on_training_start() fires, so it must already agree with stage 0.
+  height_alpha_range: [0.05, 0.15]
+  # Widened from all eight prior attempts' [-0.20, 0.20] -- approaching but
+  # staying meaningfully under the documented dx=0.25m Z-drift structural
+  # failure point (AGENTS.md sec 3). This is the "reframe toward maximizing
+  # safe displacement, not re-proving the validated envelope" change.
+  target_x_delta_range_m: [-0.24, 0.24]
+  move_duration_s: 1.0
+  hold_duration_s: 2.0
+  max_episode_seconds: 3.0
+  record_lightweight_trace: true
+  full_trace_logging: false
+  gain_bounds:
+    kp_x: [0.0, 800.0]
+    kd_x: [0.0, 80.0]
+    kp_y: [0.0, 160.0]
+    kd_y: [0.0, 30.0]
+    kp_z: [0.0, 240.0]
+    kd_z: [0.0, 40.0]
+    kp_rot: [0.0, 30.0]
+    kd_rot: [0.0, 40.0]
+    kp_posture: [0.0, 100.0]
+    kd_posture: [0.0, 24.0]
+    kd_joint: [0.0, 16.0]
+  action_mode: "gains"
+  # Curriculum over height_alpha (new mechanism, rl_gain_scheduling/
+  # train_ppo_gain_scheduler.py's HeightAlphaCurriculumCallback). 5 stages,
+  # each 20% of the run's actual total_timesteps (whatever budget is passed
+  # to model.learn() -- so a --total-timesteps pilot override exercises all
+  # 5 stages in miniature, not just stage 0). Each stage's alpha_range center
+  # moves progressively higher and the range widens slightly (0.10 wide in
+  # stage 1 -> 0.20 wide by stage 3+) so later stages still cover earlier,
+  # easier poses rather than abruptly abandoning them -- a partial hedge
+  # against catastrophic forgetting of the easy end, though full retention
+  # is not guaranteed and is checked honestly in the eval writeup (alpha=0.1
+  # is only in-distribution for the first 20% of training).
+  #   stage 1: [0.05, 0.15] (0-20%)   -- near the canonical alpha=0 pose
+  #   stage 2: [0.10, 0.25] (20-40%)
+  #   stage 3: [0.15, 0.35] (40-60%)
+  #   stage 4: [0.25, 0.45] (60-80%)
+  #   stage 5: [0.35, 0.50] (80-100%) -- covers the alpha=0.5 target pose
+  curriculum:
+    enabled: true
+    stages:
+      - alpha_range: [0.05, 0.15]
+        timestep_frac: 0.20
+      - alpha_range: [0.10, 0.25]
+        timestep_frac: 0.20
+      - alpha_range: [0.15, 0.35]
+        timestep_frac: 0.20
+      - alpha_range: [0.25, 0.45]
+        timestep_frac: 0.20
+      - alpha_range: [0.35, 0.50]
+        timestep_frac: 0.20
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  gain_smooth_weight: 0.01
+  torque_smooth_weight: 0.001
+  terminal_safety_penalty: -25.0
+  terminal_quality_weight: 50.0
+  progress_weight: 50.0
+  move_phase_disturbance_scale: 0.3
+
+training:
+  policy: "MlpPolicy"
+  net_arch: [128, 128]
+  device: "cpu"
+  seed: 0
+  # Matches the alpha05/multi_alpha configs' validated memory-safe setting
+  # on both ilab4 and westeros on 2026-07-29.
+  n_envs: 24
+  # Full-run budget, matching all prior attempts' total_timesteps for direct
+  # comparability. Actually launched via a short pilot first
+  # (--total-timesteps override) to confirm the curriculum mechanism itself
+  # works before committing the full budget -- see docs/status/
+  # rl_curriculum_alpha_max_displacement_2026-07-29.md.
+  total_timesteps: 3000000
+  sac:
+    learning_rate: 3.0e-4
+    buffer_size: 300000
+    learning_starts: 10000
+    batch_size: 256
+    polyak_tau: 0.005
+    gamma: 0.99
+    train_freq: 1
+    gradient_steps: 1
+    action_noise: null
+    ent_coef: "auto"
+    target_update_interval: 1
+    target_entropy: "auto"

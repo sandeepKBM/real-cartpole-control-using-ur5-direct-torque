@@ -10,9 +10,18 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from rl_gain_scheduling.train_ppo_gain_scheduler import (  # noqa: E402
+    HeightAlphaCurriculumCallback,
     _build_ppo_kwargs,
     _build_sac_kwargs,
 )
+
+_CURRICULUM_STAGES = [
+    {"alpha_range": [0.05, 0.15], "timestep_frac": 0.20},
+    {"alpha_range": [0.10, 0.25], "timestep_frac": 0.20},
+    {"alpha_range": [0.15, 0.35], "timestep_frac": 0.20},
+    {"alpha_range": [0.25, 0.45], "timestep_frac": 0.20},
+    {"alpha_range": [0.35, 0.50], "timestep_frac": 0.20},
+]
 
 _PPO_TRAINING_CFG = {
     "policy": "MlpPolicy",
@@ -145,3 +154,96 @@ def test_sac_smoke_train_two_steps():
     policy = kwargs.pop("policy")
     model = SAC(policy, env, device="cpu", seed=0, verbose=0, **kwargs)
     model.learn(total_timesteps=64)
+
+
+def test_curriculum_callback_rejects_bad_frac_sum():
+    bad_stages = [
+        {"alpha_range": [0.0, 0.5], "timestep_frac": 0.5},
+        {"alpha_range": [0.0, 0.5], "timestep_frac": 0.2},
+    ]  # sums to 0.7, not ~1.0
+    with pytest.raises(ValueError):
+        HeightAlphaCurriculumCallback(stages=bad_stages, total_timesteps=1000)
+
+
+def test_curriculum_callback_rejects_empty_stages():
+    with pytest.raises(ValueError):
+        HeightAlphaCurriculumCallback(stages=[], total_timesteps=1000)
+
+
+def test_curriculum_callback_stage_boundaries_are_progressive():
+    """Pure-logic check of _stage_for_timestep against the real 5-stage
+    config used by config/rl_gain_scheduling_sac_curriculum_alpha.yaml --
+    each 20% quintile of total_timesteps should map to consecutive stage
+    indices 0..4, and the very last timestep must resolve to the final
+    stage exactly (boundary correctness matters most at both ends: t=0
+    must be stage 0, t=total_timesteps-1 must be the last stage)."""
+    total = 100_000
+    cb = HeightAlphaCurriculumCallback(stages=_CURRICULUM_STAGES, total_timesteps=total)
+    assert cb._stage_for_timestep(0) == 0
+    assert cb._stage_for_timestep(19_999) == 0
+    assert cb._stage_for_timestep(20_001) == 1
+    assert cb._stage_for_timestep(39_999) == 1
+    assert cb._stage_for_timestep(40_001) == 2
+    assert cb._stage_for_timestep(60_001) == 3
+    assert cb._stage_for_timestep(80_001) == 4
+    assert cb._stage_for_timestep(total - 1) == 4
+    # Monotonic non-decreasing across the whole range, no skipped-back stages.
+    prev = -1
+    for t in range(0, total, 1000):
+        idx = cb._stage_for_timestep(t)
+        assert idx >= prev
+        prev = idx
+
+
+def test_curriculum_callback_reaches_live_dummyvecenv_workers():
+    """Integration test proving env_method genuinely reaches worker envs
+    mid-training, not just that the callback's own bookkeeping is correct
+    in isolation -- this is the exact mechanism the real 3M-step curriculum
+    run depends on. Uses a tiny total_timesteps and tiny stage fractions so
+    multiple real stage transitions happen within a fast test."""
+    from stable_baselines3 import SAC
+    from stable_baselines3.common.vec_env import DummyVecEnv
+
+    from rl_gain_scheduling.gain_scheduling_env import GainSchedulingEnv
+
+    repo_root = Path(__file__).resolve().parents[2]
+    config_path = repo_root / "config" / "rl_gain_scheduling_alpha05_bidirectional.yaml"
+    n_envs = 2
+    env = DummyVecEnv([lambda: GainSchedulingEnv(config_path=config_path) for _ in range(n_envs)])
+
+    tiny_stages = [
+        {"alpha_range": [0.0, 0.1], "timestep_frac": 0.5},
+        {"alpha_range": [0.4, 0.5], "timestep_frac": 0.5},
+    ]
+    total_timesteps = 64
+    callback = HeightAlphaCurriculumCallback(stages=tiny_stages, total_timesteps=total_timesteps)
+
+    training_cfg = {
+        "policy": "MlpPolicy",
+        "net_arch": [16, 16],
+        "sac": {
+            "learning_rate": 3.0e-4,
+            "buffer_size": 200,
+            "learning_starts": 16,
+            "batch_size": 16,
+            "polyak_tau": 0.005,
+            "gamma": 0.99,
+            "train_freq": 1,
+            "gradient_steps": 1,
+            "action_noise": None,
+            "ent_coef": "auto",
+            "target_update_interval": 1,
+            "target_entropy": "auto",
+        },
+    }
+    kwargs = _build_sac_kwargs(training_cfg)
+    policy = kwargs.pop("policy")
+    model = SAC(policy, env, device="cpu", seed=0, verbose=0, **kwargs)
+    model.learn(total_timesteps=total_timesteps, callback=callback)
+
+    # By the end of training every worker env's live height_alpha_range must
+    # have been pushed to the final stage's range -- proves env_method
+    # actually mutated the live objects, not copies (DummyVecEnv holds the
+    # real env instances directly, so this is a genuine end-to-end check).
+    for worker_env in env.envs:
+        assert worker_env._height_alpha_range == (0.4, 0.5)

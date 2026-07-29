@@ -516,6 +516,31 @@ def test_hold_drift_relative_to_target_flag_removes_convergence_penalty(tmp_path
     )
 
 
+def test_set_height_alpha_range_updates_sampling():
+    env = GainSchedulingEnv()
+    env.set_height_alpha_range(0.35, 0.5)
+    assert env._height_alpha_range == (0.35, 0.5)
+    sampled = []
+    for seed in range(20):
+        env.reset(seed=seed, options={"target_x_delta": 0.0})
+        sampled.append(env._alpha)
+    assert all(0.35 <= a <= 0.5 for a in sampled)
+    # Not a degenerate constant-sampling bug -- confirm real spread across
+    # the new range (would fail if set_height_alpha_range silently no-op'd
+    # and reset() kept sampling the original config range instead).
+    assert max(sampled) - min(sampled) > 0.02
+
+
+def test_set_height_alpha_range_rejects_invalid_bounds():
+    env = GainSchedulingEnv()
+    with pytest.raises(ValueError):
+        env.set_height_alpha_range(0.6, 0.4)  # low > high
+    with pytest.raises(ValueError):
+        env.set_height_alpha_range(-0.1, 0.5)  # low < 0
+    with pytest.raises(ValueError):
+        env.set_height_alpha_range(0.1, 1.5)  # high > 1
+
+
 if __name__ == "__main__":
     test_env_reset_and_step_shapes()
     test_env_height_sampling_respects_joint_limits()

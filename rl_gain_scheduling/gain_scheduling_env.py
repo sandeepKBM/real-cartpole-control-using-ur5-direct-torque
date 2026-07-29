@@ -618,6 +618,26 @@ class GainSchedulingEnv(gym.Env):
             (self._output_dir / "summary.json").write_text(json_dumps_safe(run_summary), encoding="utf-8")
         self._trace_writer = None
 
+    def set_height_alpha_range(self, low: float, high: float) -> None:
+        """Mutate the sampled height_alpha range for future reset() calls.
+
+        Exists so a curriculum callback (rl_gain_scheduling/
+        train_ppo_gain_scheduler.py's HeightAlphaCurriculumCallback) can push
+        a new training-distribution range into a live worker env mid-run,
+        via VecEnv.env_method (works identically for SubprocVecEnv, which
+        pickles the call to the remote worker process and calls this method
+        on its own env instance, and DummyVecEnv, which calls it directly).
+        Only affects height_alpha sampling in reset() -- does not touch the
+        episode already in progress, and does not affect anything if never
+        called (default behavior, set once from config in __init__, is
+        unchanged).
+        """
+        low = float(low)
+        high = float(high)
+        if not (0.0 <= low <= high <= 1.0):
+            raise ValueError(f"height_alpha range [{low}, {high}] invalid (need 0 <= low <= high <= 1)")
+        self._height_alpha_range = (low, high)
+
     def close(self) -> None:
         if self._trace_writer is not None:
             self._trace_writer.__exit__(None, None, None)
