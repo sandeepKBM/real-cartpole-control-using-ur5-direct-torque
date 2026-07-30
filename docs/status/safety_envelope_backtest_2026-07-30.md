@@ -288,3 +288,120 @@ candidates' agreement on it uninterpreted; (3) get a considered answer on the
 `|qd|`-vs-`d(cond(J))/dt` design choice from someone who can reason about the wrist-
 singularity dynamics directly, since this doc picked `|qd|` for practical/empirical reasons,
 not because the alternative was tested and lost.
+
+## 9. Follow-up: sim noise-injection X-transport, validating commit 8eccd1d + Candidate C
+
+Direct answer to "does the DeadlineMonitor-style graduated-tolerance fix (commit `8eccd1d`,
+merged into this worktree via `git rebase origin/feature/ur5e-mujoco-torque-control` before
+this section's work started) actually solve the problem it was built for, and does Candidate
+C help?" -- tested against clean, controlled, repeatable synthetic RTDE sensor noise in
+MuJoCo instead of the 2 real hardware data points SS4/SS8 had to rely on.
+
+**Method** (`experiments/sim_noise_injection_x_transport.py`): a real X-transport move+hold
+rollout using the SAME controller/physics this whole project runs (`simulation/
+ur5e_mujoco_torque.py`, `config/ur5e_mujoco_torque_osc_tuned.yaml`, no simplified stand-in).
+Per cycle, a COPY of the true EE position/joint angles gets independent per-axis Gaussian
+noise at the real measured std (`tcp_pos_std_m=[8.88e-06,9.86e-06,3.25e-06]`,
+`q_std_rad_max=1.695e-05`, from `hardware_captures/2026-07-28_thinkrobot_172.16.71.77/
+stationary_noise_capture_154018_stats.json`) -- mirroring `rl_gain_scheduling/
+gain_scheduling_env.py`'s own convention that noise perturbs only what a check READS, never
+the true physics state. **Caveat, explicit**: that capture's `qd_std_radps` is exactly 0.0 --
+an RTDE deadband at rest, not evidence real motion-time `qd` noise is zero -- so no synthetic
+`qd` noise is injected anywhere here; every conclusion below about `|qd|`-based checks
+inherits this gap. The real, imported `hardware.safety.CartesianMoveMonitor` (commit
+`8eccd1d`'s current version) evaluates the noisy copy every cycle; its math is never
+reimplemented.
+
+**A real bug found and fixed while building this harness, not a finding about the
+production code**: the first version of this script forgot to apply
+`config/ur5e_mujoco_torque_osc_tuned.yaml`'s `home_qpos` before building state, leaving the
+rollout at MuJoCo's raw all-zero default pose (an even more degenerate singularity than the
+intended one) with the controller's own documented `singular_scale` freeze (AGENTS.md SS3,
+"nulls task authority at the transport start pose") never escaping -- zero real motion for
+the entire run (`1e-13 m` achieved on a commanded `0.02 m` move). Fixed by calling
+`resolve_start_q`/`apply_start_q` exactly as `tools/ur5e_mujoco_torque_experiments.py`'s own
+`run()` does; `tests/mujoco/test_sim_noise_injection_x_transport.py::
+test_true_trajectory_actually_moves` regression-guards this specifically.
+
+**A second, real, unplanned finding, found only after that fix** (measured directly on the
+now-correctly-moving trajectory, not assumed): the ACHIEVED real controller output has
+enough genuine high-frequency content (closed-loop torque-tracking chatter, not sensor
+noise) that the unfiltered (`accel_gap_cycles=1`) double-differenced accel ESTIMATE reaches
+up to **3.62 m/s^2** for the canonical `dx=0.02m/T=1.0s` move with **zero injected sensor
+noise** -- ~31x the smooth kinematic theoretical peak (0.1155 m/s^2) and enough on its own to
+trip `max_tcp_accel_mps2=0.5` (the real production default). This is the same
+"double-differencing amplifies high-frequency content by ~1/dt^2" mechanism this project's
+own code already documents for sensor noise (`CartesianMoveLimits.accel_gap_cycles`
+docstring) -- it turns out to apply just as much to real controller output jitter, a related
+but distinct problem from RTDE sensor noise specifically. Three profiles were therefore
+tested, not two:
+
+| Profile | base_accel | Noise-free (zero injected noise) | Purpose |
+|---|---|---|---|
+| `canonical_dx0.02_T1.0` | 0.5 (real production default) | **already TRIPS** (controller chatter alone, `0.5541>0.5`) | Shows the tight default is unusable at `gap=1` regardless of sensor noise |
+| `canonical_dx0.02_T1.0_headroom` | 4.5 (real margin over the measured 3.62 achieved peak) | clean | Isolates the sensor-noise-specific question cleanly |
+| `large_displacement_dx-0.20_T1.0` | 0.8 (matches several real hardware runs' actual threshold) | **already TRIPS** (`1.0558>0.8`, sustained, "3 consecutive cycles") | The genuine-catch case -- theoretical peak accel 5.7735×0.20/1.0²=1.1547 m/s², matching this project's own real-hardware notes for exactly this move |
+
+**Results, 30 seeds each (real measured noise std, seeds 0-29), 4 `CartesianMoveMonitor`
+configurations compared per profile** (`default`=`accel_max_consecutive_violations=1`, today's
+old rigid rule; `graduated`=commit `8eccd1d`'s new fields at its own defaults
+[`accel_max_consecutive_violations=3`, `accel_hard_multiple=5.0`, same for speed];
+`graduated_filtered`=`graduated` PLUS the older, separate `accel_gap_cycles=5`,
+`speed_lowpass_alpha=0.2` filtering; `qdgrowth`=Candidate C):
+
+| Profile | default | graduated | graduated_filtered | qdgrowth (Candidate C) |
+|---|---|---|---|---|
+| canonical (tight default, already chatter-unsafe) | 30/30 | 30/30 | 30/30 | 30/30 |
+| canonical_headroom (clean, noise-free-safe) | **30/30 spurious** | **30/30 spurious** | **0/30** | **30/30 spurious** |
+| large_displacement (genuine catch) | 30/30 (correct) | 30/30 (correct) | 30/30 (correct) | 30/30 (correct) |
+
+**Headline result: the graduated-tolerance fix (commit `8eccd1d`), tested alone at its own
+default `accel_hard_multiple=5.0`, does NOT eliminate spurious noise-driven trips at real
+measured RTDE noise magnitudes -- 30/30 seeds still spuriously trip on the one profile
+constructed to be genuinely physically clean** (`canonical_headroom`, base_accel=4.5, real
+measured margin of ~0.9 m/s² over the noise-free achieved peak of 3.62 m/s²). Root cause,
+confirmed directly (see the script's own noise-only Monte Carlo, not just this table): the
+real measured position-noise magnitude, double-differenced at `gap=1`/500Hz, has a mean
+accel-estimate error of ~2.0-2.7 m/s² -- large enough that individual noisy cycles exceed a
+4.5 m/s² threshold often enough, AND with enough short-range correlation (consecutive accel
+estimates share one of their two position samples, so noise excursions cluster rather than
+behaving as independent per-cycle draws), that 3-in-a-row violations reliably occur within a
+1000-cycle rollout. The graduated fix's `hard_multiple` safety valve is not what's firing
+here (that's designed for genuine one-shot catastrophic events, and did not need to fire at
+this profile's noise level) -- it's the ordinary N-consecutive branch, defeated by noise
+autocorrelation the design didn't account for. **Only combining graduated tolerance with the
+older, separate `accel_gap_cycles`/`speed_lowpass_alpha` filtering succeeds** (0/30 spurious
+on `canonical_headroom`) **while still catching the genuine case** (30/30 on
+`large_displacement`, all four configurations agree, no disqualifying miss anywhere in this
+round).
+
+**Candidate C (`qd_growth_rate`) does not help here, and was not expected to.** 30/30 spurious
+on `canonical_headroom`, identical to `default`. This is a real, clean confirmation of
+Candidate C's actual scope, not a contradiction of SS8: `QdGrowthRateCandidate` only ever
+SHRINKS the threshold when a sustained `|qd|` growth trend is detected: pure IID sensor
+position noise produces `growth_rate≈0` (no real trend across independent draws), so its
+threshold stays at exactly the same base value as `default` -- and it has no
+consecutive/grace mechanism of its own, so it inherits `default`'s exact single-cycle
+vulnerability. Candidate C was designed to distinguish a static-but-high-risk pose from an
+actively-diverging one (SS8's real problem: Candidate B's wrist_2=0 nuisance-trips); it was
+never a noise-tolerance mechanism, and this round's data shows exactly that boundary, not a
+new failure.
+
+**Updated verdict.** Commit `8eccd1d` alone is not sufficient to close the real-hardware
+spurious-trip problem SS4 documented, when the accel threshold is tight enough (or the
+achieved motion chatter is large enough) that the noise floor's mean already approaches the
+threshold -- which real production defaults (`0.5`) already are, independent of RTDE sensor
+noise, per this round's own controller-chatter finding. The combination that actually works
+in this backtest is graduated tolerance + the pre-existing `accel_gap_cycles`/
+`speed_lowpass_alpha` filtering together, both already-shipped mechanisms in
+`hardware/safety.py`; neither alone is enough at these real noise/chatter magnitudes.
+Candidate C remains valuable for its own, different, narrower purpose (SS8) but is not a
+substitute for either. **Recommendation, concrete and specific**: before trusting commit
+`8eccd1d`'s defaults on real hardware, either (a) always pair `accel_max_consecutive_violations`
+with a non-trivial `accel_gap_cycles`/`speed_lowpass_alpha` setting (this round found `gap=5,
+alpha=0.2` sufficient for this noise magnitude, but that pairing was picked here for this
+report, not independently validated as a recommended production default), or (b) re-tune
+`max_tcp_accel_mps2` itself with real controller-chatter headroom in mind, not just
+theoretical kinematic peaks -- this round's own measurement (3.62 m/s² achieved chatter vs.
+0.1155 m/s² kinematic theory for the same move) shows those two numbers are not
+interchangeable. Full per-seed data: `experiments/sim_noise_injection_x_transport_results.json`.

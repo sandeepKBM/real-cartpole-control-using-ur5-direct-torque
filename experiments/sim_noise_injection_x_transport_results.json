@@ -1,0 +1,2489 @@
+{
+  "canonical_dx0.02_T1.0": {
+    "name": "canonical_dx0.02_T1.0",
+    "profile": {
+      "target_x_delta": 0.02,
+      "move_duration_s": 1.0,
+      "hold_duration_s": 1.0,
+      "base_accel": 0.5,
+      "base_speed": 0.05
+    },
+    "peak_accel_theory_mps2": 0.11547,
+    "peak_speed_theory_mps": 0.0375,
+    "peak_accel_achieved_mps2": 3.6168455781415454,
+    "peak_speed_achieved_mps": 0.1274151816935983,
+    "n_steps": 1000,
+    "dt_s": 0.002,
+    "noise_free_reference": {
+      "default": {
+        "tripped": true,
+        "cycle": 328,
+        "time_s": 0.6560000000000005,
+        "reason": "TCP acceleration 0.5541 m/s^2 > 0.5 m/s^2"
+      },
+      "graduated": {
+        "tripped": true,
+        "cycle": 330,
+        "time_s": 0.6600000000000005,
+        "reason": "TCP acceleration 0.7626 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+      },
+      "graduated_filtered": {
+        "tripped": true,
+        "cycle": 335,
+        "time_s": 0.6700000000000005,
+        "reason": "TCP acceleration 0.7842 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+      },
+      "qdgrowth": {
+        "tripped": true,
+        "cycle": 326,
+        "time_s": 0.6520000000000005,
+        "reason": "TCP acceleration 0.4004 m/s^2 > 0.38438904460763246 m/s^2"
+      }
+    },
+    "n_seeds": 30,
+    "n_default_trip": 30,
+    "n_graduated_trip": 30,
+    "n_graduated_filtered_trip": 30,
+    "n_qdgrowth_trip": 30,
+    "per_seed": [
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6784 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6784 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 336,
+          "time_s": 0.6720000000000005,
+          "reason": "TCP acceleration 1.0258 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6784 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 0.5621 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 4,
+          "time_s": 0.008,
+          "reason": "TCP acceleration 3.1748 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 336,
+          "time_s": 0.6720000000000005,
+          "reason": "TCP acceleration 0.6217 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 0.5621 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6540 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6540 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 334,
+          "time_s": 0.6680000000000005,
+          "reason": "TCP acceleration 0.6354 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6540 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 2.0866 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 2.5230 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 332,
+          "time_s": 0.6640000000000005,
+          "reason": "TCP acceleration 0.5305 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 2.0866 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 1.3033 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 4,
+          "time_s": 0.008,
+          "reason": "TCP acceleration 1.6320 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 335,
+          "time_s": 0.6700000000000005,
+          "reason": "TCP acceleration 0.7936 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 1.3033 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.0142 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.0142 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 335,
+          "time_s": 0.6700000000000005,
+          "reason": "TCP acceleration 0.6951 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.0142 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.1143 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 1.0588 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 337,
+          "time_s": 0.6740000000000005,
+          "reason": "TCP acceleration 1.0781 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.1143 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.7765 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 3.9781 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 337,
+          "time_s": 0.6740000000000005,
+          "reason": "TCP acceleration 1.3127 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.7765 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.5434 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.5434 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 335,
+          "time_s": 0.6700000000000005,
+          "reason": "TCP acceleration 0.7635 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.5434 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.8267 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.8267 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 335,
+          "time_s": 0.6700000000000005,
+          "reason": "TCP acceleration 0.8116 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.8267 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.6471 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 6,
+          "time_s": 0.012,
+          "reason": "TCP acceleration 3.3118 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 333,
+          "time_s": 0.6660000000000005,
+          "reason": "TCP acceleration 0.6954 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.6471 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.8455 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 6,
+          "time_s": 0.012,
+          "reason": "TCP acceleration 3.3840 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 335,
+          "time_s": 0.6700000000000005,
+          "reason": "TCP acceleration 0.8404 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.8455 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.8094 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 6,
+          "time_s": 0.012,
+          "reason": "TCP acceleration 3.7751 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 336,
+          "time_s": 0.6720000000000005,
+          "reason": "TCP acceleration 1.0516 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.8094 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.5084 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 5.9129 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 334,
+          "time_s": 0.6680000000000005,
+          "reason": "TCP acceleration 0.7232 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.5084 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 6.4915 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 6.4915 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 336,
+          "time_s": 0.6720000000000005,
+          "reason": "TCP acceleration 0.9684 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 6.4915 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.9293 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.9293 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 336,
+          "time_s": 0.6720000000000005,
+          "reason": "TCP acceleration 1.0315 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.9293 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 1.3526 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 4,
+          "time_s": 0.008,
+          "reason": "TCP acceleration 3.4284 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 335,
+          "time_s": 0.6700000000000005,
+          "reason": "TCP acceleration 0.6536 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 1.3526 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.4174 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.4174 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 335,
+          "time_s": 0.6700000000000005,
+          "reason": "TCP acceleration 0.7845 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.4174 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.2792 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.2792 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 336,
+          "time_s": 0.6720000000000005,
+          "reason": "TCP acceleration 0.6954 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.2792 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.0930 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 2.9680 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 335,
+          "time_s": 0.6700000000000005,
+          "reason": "TCP acceleration 0.8180 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.0930 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.0714 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 2.2728 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 334,
+          "time_s": 0.6680000000000005,
+          "reason": "TCP acceleration 0.5945 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.0714 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.8799 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 3.2308 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 336,
+          "time_s": 0.6720000000000005,
+          "reason": "TCP acceleration 0.7668 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.8799 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 2.4251 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 4,
+          "time_s": 0.008,
+          "reason": "TCP acceleration 2.3388 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 336,
+          "time_s": 0.6720000000000005,
+          "reason": "TCP acceleration 0.8555 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 2.4251 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.5920 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 6,
+          "time_s": 0.012,
+          "reason": "TCP acceleration 4.1491 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 336,
+          "time_s": 0.6720000000000005,
+          "reason": "TCP acceleration 0.8325 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.5920 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6409 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6409 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 336,
+          "time_s": 0.6720000000000005,
+          "reason": "TCP acceleration 1.0253 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6409 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6878 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6878 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 336,
+          "time_s": 0.6720000000000005,
+          "reason": "TCP acceleration 0.8605 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6878 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.1770 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 3.1732 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 336,
+          "time_s": 0.6720000000000005,
+          "reason": "TCP acceleration 0.5213 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.1770 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.1767 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.1767 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 334,
+          "time_s": 0.6680000000000005,
+          "reason": "TCP acceleration 0.7323 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.1767 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 4.0606 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 4.0606 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 335,
+          "time_s": 0.6700000000000005,
+          "reason": "TCP acceleration 0.7810 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 4.0606 m/s^2 > 0.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 2.2372 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 3.1271 m/s^2 > 0.5 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 336,
+          "time_s": 0.6720000000000005,
+          "reason": "TCP acceleration 0.7686 m/s^2 > 0.5 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 2.2372 m/s^2 > 0.5 m/s^2"
+        }
+      }
+    ]
+  },
+  "canonical_dx0.02_T1.0_headroom": {
+    "name": "canonical_dx0.02_T1.0_headroom",
+    "profile": {
+      "target_x_delta": 0.02,
+      "move_duration_s": 1.0,
+      "hold_duration_s": 1.0,
+      "base_accel": 4.5,
+      "base_speed": 0.2
+    },
+    "peak_accel_theory_mps2": 0.11547,
+    "peak_speed_theory_mps": 0.0375,
+    "peak_accel_achieved_mps2": 3.6168455781415454,
+    "peak_speed_achieved_mps": 0.1274151816935983,
+    "n_steps": 1000,
+    "dt_s": 0.002,
+    "noise_free_reference": {
+      "default": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null
+      },
+      "graduated": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null
+      },
+      "graduated_filtered": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null
+      },
+      "qdgrowth": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null
+      }
+    },
+    "n_seeds": 30,
+    "n_default_trip": 30,
+    "n_graduated_trip": 30,
+    "n_graduated_filtered_trip": 0,
+    "n_qdgrowth_trip": 30,
+    "per_seed": [
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 13,
+          "time_s": 0.02600000000000001,
+          "reason": "TCP acceleration 4.5575 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 250,
+          "time_s": 0.5000000000000003,
+          "reason": "TCP acceleration 6.0509 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 13,
+          "time_s": 0.02600000000000001,
+          "reason": "TCP acceleration 4.5575 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 9,
+          "time_s": 0.018000000000000002,
+          "reason": "TCP acceleration 4.7703 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 330,
+          "time_s": 0.6600000000000005,
+          "reason": "TCP acceleration 5.2362 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 9,
+          "time_s": 0.018000000000000002,
+          "reason": "TCP acceleration 4.7703 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 10,
+          "time_s": 0.020000000000000004,
+          "reason": "TCP acceleration 5.0504 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 330,
+          "time_s": 0.6600000000000005,
+          "reason": "TCP acceleration 5.3515 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 10,
+          "time_s": 0.020000000000000004,
+          "reason": "TCP acceleration 5.0504 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 12,
+          "time_s": 0.024000000000000007,
+          "reason": "TCP acceleration 5.3316 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 203,
+          "time_s": 0.4060000000000003,
+          "reason": "TCP acceleration 5.8010 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 12,
+          "time_s": 0.024000000000000007,
+          "reason": "TCP acceleration 5.3316 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 41,
+          "time_s": 0.08200000000000006,
+          "reason": "TCP acceleration 4.7590 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 89,
+          "time_s": 0.17800000000000013,
+          "reason": "TCP acceleration 4.5350 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 41,
+          "time_s": 0.08200000000000006,
+          "reason": "TCP acceleration 4.7590 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 24,
+          "time_s": 0.04800000000000003,
+          "reason": "TCP acceleration 4.6747 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 355,
+          "time_s": 0.7100000000000005,
+          "reason": "TCP acceleration 10.2769 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 24,
+          "time_s": 0.04800000000000003,
+          "reason": "TCP acceleration 4.6747 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 12,
+          "time_s": 0.024000000000000007,
+          "reason": "TCP acceleration 5.5907 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 40,
+          "time_s": 0.08000000000000006,
+          "reason": "TCP acceleration 5.0360 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 12,
+          "time_s": 0.024000000000000007,
+          "reason": "TCP acceleration 5.5907 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 15,
+          "time_s": 0.030000000000000013,
+          "reason": "TCP acceleration 5.0797 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 331,
+          "time_s": 0.6620000000000005,
+          "reason": "TCP acceleration 6.3152 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 15,
+          "time_s": 0.030000000000000013,
+          "reason": "TCP acceleration 5.0797 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 8,
+          "time_s": 0.016,
+          "reason": "TCP acceleration 5.5187 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 335,
+          "time_s": 0.6700000000000005,
+          "reason": "TCP acceleration 8.2041 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 8,
+          "time_s": 0.016,
+          "reason": "TCP acceleration 5.5187 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 6.7913 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 247,
+          "time_s": 0.4940000000000004,
+          "reason": "TCP acceleration 6.2922 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 6.7913 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 20,
+          "time_s": 0.04000000000000002,
+          "reason": "TCP acceleration 6.0421 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 345,
+          "time_s": 0.6900000000000005,
+          "reason": "TCP acceleration 8.1225 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 20,
+          "time_s": 0.04000000000000002,
+          "reason": "TCP acceleration 6.0421 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 13,
+          "time_s": 0.02600000000000001,
+          "reason": "TCP acceleration 4.6150 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 339,
+          "time_s": 0.6780000000000005,
+          "reason": "TCP acceleration 5.0464 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 13,
+          "time_s": 0.02600000000000001,
+          "reason": "TCP acceleration 4.6150 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 15,
+          "time_s": 0.030000000000000013,
+          "reason": "TCP acceleration 5.9823 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 272,
+          "time_s": 0.5440000000000004,
+          "reason": "TCP acceleration 4.5360 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 15,
+          "time_s": 0.030000000000000013,
+          "reason": "TCP acceleration 5.9823 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 5.9129 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 341,
+          "time_s": 0.6820000000000005,
+          "reason": "TCP acceleration 7.0688 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 5.9129 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 6.4915 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 93,
+          "time_s": 0.18600000000000014,
+          "reason": "TCP acceleration 5.5190 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 6.4915 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.9293 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 329,
+          "time_s": 0.6580000000000005,
+          "reason": "TCP acceleration 4.5707 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.9293 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 7,
+          "time_s": 0.014,
+          "reason": "TCP acceleration 4.8605 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 17,
+          "time_s": 0.034000000000000016,
+          "reason": "TCP acceleration 4.9363 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 7,
+          "time_s": 0.014,
+          "reason": "TCP acceleration 4.8605 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 8,
+          "time_s": 0.016,
+          "reason": "TCP acceleration 6.4741 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 297,
+          "time_s": 0.5940000000000004,
+          "reason": "TCP acceleration 4.9786 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 8,
+          "time_s": 0.016,
+          "reason": "TCP acceleration 6.4741 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 8,
+          "time_s": 0.016,
+          "reason": "TCP acceleration 6.2460 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 192,
+          "time_s": 0.3840000000000003,
+          "reason": "TCP acceleration 5.1628 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 8,
+          "time_s": 0.016,
+          "reason": "TCP acceleration 6.2460 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 10,
+          "time_s": 0.020000000000000004,
+          "reason": "TCP acceleration 5.1528 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 144,
+          "time_s": 0.2880000000000002,
+          "reason": "TCP acceleration 6.2101 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 10,
+          "time_s": 0.020000000000000004,
+          "reason": "TCP acceleration 5.1528 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 9,
+          "time_s": 0.018000000000000002,
+          "reason": "TCP acceleration 6.0570 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 345,
+          "time_s": 0.6900000000000005,
+          "reason": "TCP acceleration 8.4428 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 9,
+          "time_s": 0.018000000000000002,
+          "reason": "TCP acceleration 6.0570 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 4,
+          "time_s": 0.008,
+          "reason": "TCP acceleration 5.0430 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 353,
+          "time_s": 0.7060000000000005,
+          "reason": "TCP acceleration 7.9289 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 4,
+          "time_s": 0.008,
+          "reason": "TCP acceleration 5.0430 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 5,
+          "time_s": 0.01,
+          "reason": "TCP acceleration 6.1214 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 335,
+          "time_s": 0.6700000000000005,
+          "reason": "TCP acceleration 10.9702 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 5,
+          "time_s": 0.01,
+          "reason": "TCP acceleration 6.1214 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 22,
+          "time_s": 0.044000000000000025,
+          "reason": "TCP acceleration 4.7240 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 337,
+          "time_s": 0.6740000000000005,
+          "reason": "TCP acceleration 7.2468 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 22,
+          "time_s": 0.044000000000000025,
+          "reason": "TCP acceleration 4.7240 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 5,
+          "time_s": 0.01,
+          "reason": "TCP acceleration 4.7825 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 58,
+          "time_s": 0.11600000000000009,
+          "reason": "TCP acceleration 7.6639 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 5,
+          "time_s": 0.01,
+          "reason": "TCP acceleration 4.7825 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 23,
+          "time_s": 0.04600000000000003,
+          "reason": "TCP acceleration 4.5027 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 339,
+          "time_s": 0.6780000000000005,
+          "reason": "TCP acceleration 5.7938 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 23,
+          "time_s": 0.04600000000000003,
+          "reason": "TCP acceleration 4.5027 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 8,
+          "time_s": 0.016,
+          "reason": "TCP acceleration 5.5574 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 124,
+          "time_s": 0.2480000000000002,
+          "reason": "TCP acceleration 4.6898 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 8,
+          "time_s": 0.016,
+          "reason": "TCP acceleration 5.5574 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 38,
+          "time_s": 0.07600000000000005,
+          "reason": "TCP acceleration 6.8184 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 43,
+          "time_s": 0.08600000000000006,
+          "reason": "TCP acceleration 4.7944 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 38,
+          "time_s": 0.07600000000000005,
+          "reason": "TCP acceleration 6.8184 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 6,
+          "time_s": 0.012,
+          "reason": "TCP acceleration 5.1703 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 350,
+          "time_s": 0.7000000000000005,
+          "reason": "TCP acceleration 4.5504 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 6,
+          "time_s": 0.012,
+          "reason": "TCP acceleration 5.1703 m/s^2 > 4.5 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 5,
+          "time_s": 0.01,
+          "reason": "TCP acceleration 7.1169 m/s^2 > 4.5 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 80,
+          "time_s": 0.16000000000000011,
+          "reason": "TCP acceleration 5.6055 m/s^2 > 4.5 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": false,
+          "cycle": null,
+          "time_s": null,
+          "reason": null
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 5,
+          "time_s": 0.01,
+          "reason": "TCP acceleration 7.1169 m/s^2 > 4.5 m/s^2"
+        }
+      }
+    ]
+  },
+  "large_displacement_dx-0.20_T1.0": {
+    "name": "large_displacement_dx-0.20_T1.0",
+    "profile": {
+      "target_x_delta": -0.2,
+      "move_duration_s": 1.0,
+      "hold_duration_s": 1.0,
+      "base_accel": 0.8,
+      "base_speed": 0.5
+    },
+    "peak_accel_theory_mps2": 1.1547,
+    "peak_speed_theory_mps": 0.375,
+    "peak_accel_achieved_mps2": 13.624530646994994,
+    "peak_speed_achieved_mps": 0.6238119242975254,
+    "n_steps": 1000,
+    "dt_s": 0.002,
+    "noise_free_reference": {
+      "default": {
+        "tripped": true,
+        "cycle": 162,
+        "time_s": 0.32400000000000023,
+        "reason": "TCP acceleration 1.0558 m/s^2 > 0.8 m/s^2"
+      },
+      "graduated": {
+        "tripped": true,
+        "cycle": 164,
+        "time_s": 0.32800000000000024,
+        "reason": "TCP acceleration 2.3199 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+      },
+      "graduated_filtered": {
+        "tripped": true,
+        "cycle": 168,
+        "time_s": 0.33600000000000024,
+        "reason": "TCP acceleration 2.3084 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+      },
+      "qdgrowth": {
+        "tripped": true,
+        "cycle": 161,
+        "time_s": 0.32200000000000023,
+        "reason": "TCP acceleration 0.7206 m/s^2 > 0.536332744160395 m/s^2"
+      }
+    },
+    "n_seeds": 30,
+    "n_default_trip": 30,
+    "n_graduated_trip": 30,
+    "n_graduated_filtered_trip": 30,
+    "n_qdgrowth_trip": 30,
+    "per_seed": [
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6784 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 13,
+          "time_s": 0.02600000000000001,
+          "reason": "TCP acceleration 4.5575 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.2643 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6784 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 1.1095 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 8,
+          "time_s": 0.016,
+          "reason": "TCP acceleration 3.9031 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.3068 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 1.1095 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6540 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 10,
+          "time_s": 0.020000000000000004,
+          "reason": "TCP acceleration 5.0504 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.3532 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6540 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 2.0866 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 4,
+          "time_s": 0.008,
+          "reason": "TCP acceleration 3.8323 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.2963 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 2.0866 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 1.3033 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 4,
+          "time_s": 0.008,
+          "reason": "TCP acceleration 1.6320 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.1819 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 1.3033 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.0142 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 3.8477 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.1769 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.0142 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.1143 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 1.0588 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.6876 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.1143 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 3.9781 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 4,
+          "time_s": 0.008,
+          "reason": "TCP acceleration 1.9646 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.2718 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 3.9781 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.5434 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 1.1031 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.1392 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.5434 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.8267 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 6.7913 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.2677 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.8267 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.6471 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 7,
+          "time_s": 0.014,
+          "reason": "TCP acceleration 4.0386 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.3576 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.6471 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.8455 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 10,
+          "time_s": 0.020000000000000004,
+          "reason": "TCP acceleration 3.3611 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.2837 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.8455 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.8094 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 6,
+          "time_s": 0.012,
+          "reason": "TCP acceleration 3.7751 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.3434 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.8094 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 5.9129 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 5.9129 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.3690 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 5.9129 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 6.4915 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 6.4915 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.1907 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 6.4915 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.9293 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.9293 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 167,
+          "time_s": 0.33400000000000024,
+          "reason": "TCP acceleration 1.6123 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.9293 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 1.3526 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 4,
+          "time_s": 0.008,
+          "reason": "TCP acceleration 3.4284 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.2385 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 1.3526 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.4174 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.4174 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.4155 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.4174 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.2792 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.2792 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.2267 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 4.2792 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.0930 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 2.9680 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.2666 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.0930 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.0714 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 2.2728 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 167,
+          "time_s": 0.33400000000000024,
+          "reason": "TCP acceleration 1.8813 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.0714 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.8799 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 3.2308 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.3261 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 0.8799 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 2.4251 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 4,
+          "time_s": 0.008,
+          "reason": "TCP acceleration 2.3388 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.3532 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 2.4251 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 1.7787 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 6,
+          "time_s": 0.012,
+          "reason": "TCP acceleration 4.1491 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.2688 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 1.7787 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6409 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 2.8687 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 167,
+          "time_s": 0.33400000000000024,
+          "reason": "TCP acceleration 1.7765 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6409 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6878 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 3.2700 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.1457 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 2.6878 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.1770 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 1.6574 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.4979 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 1.1770 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.1767 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 3,
+          "time_s": 0.006,
+          "reason": "TCP acceleration 3.1967 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 167,
+          "time_s": 0.33400000000000024,
+          "reason": "TCP acceleration 1.4797 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 1,
+          "time_s": 0.002,
+          "reason": "TCP acceleration 3.1767 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 4.0606 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 4.0606 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 167,
+          "time_s": 0.33400000000000024,
+          "reason": "TCP acceleration 1.4493 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 4.0606 m/s^2 > 0.8 m/s^2"
+        }
+      },
+      {
+        "default": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 2.2372 m/s^2 > 0.8 m/s^2"
+        },
+        "graduated": {
+          "tripped": true,
+          "cycle": 4,
+          "time_s": 0.008,
+          "reason": "TCP acceleration 2.5306 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "graduated_filtered": {
+          "tripped": true,
+          "cycle": 168,
+          "time_s": 0.33600000000000024,
+          "reason": "TCP acceleration 2.2747 m/s^2 > 0.8 m/s^2 for 3 consecutive cycles"
+        },
+        "qdgrowth": {
+          "tripped": true,
+          "cycle": 2,
+          "time_s": 0.004,
+          "reason": "TCP acceleration 2.2372 m/s^2 > 0.8 m/s^2"
+        }
+      }
+    ]
+  }
+}
