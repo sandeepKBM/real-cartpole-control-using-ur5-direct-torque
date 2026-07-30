@@ -43,6 +43,7 @@ from simulation.ur5e_mujoco_torque import (  # noqa: E402
     MujocoUR5eTorqueAdapterConfig,
     build_controller,
     build_mujoco_state,
+    build_safety_config,
     compute_joint_limit_proximity,
     load_model,
 )
@@ -804,7 +805,12 @@ def _run_audit() -> int:
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "per_run_traces").mkdir(parents=True, exist_ok=True)
     (output_root / "plots").mkdir(parents=True, exist_ok=True)
-    run_logger = RunLogger(output_root=output_root, source_script=Path(__file__).name)
+    # Real safety_cfg for this run's own config, not RunLogger's default --
+    # see observability/run_logger.py's RunLogger docstring / 2026-07-30 fix
+    # for why the default silently produced wrong time-to-limit values.
+    run_logger = RunLogger(
+        output_root=output_root, source_script=Path(__file__).name, safety_cfg=build_safety_config(ctrl_cfg)
+    )
 
     model, data, site_id, joint_ids, actuator_ids = load_model(scene_xml)
     summary = {

@@ -14,6 +14,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from controller_core.safety import ImpedanceSafetyConfig  # noqa: E402
 from controller_core.x_axis_cartesian_impedance import JOINT_NAME_ORDER  # noqa: E402
 from observability.run_logger import (  # noqa: E402
     RunLogger,
@@ -222,6 +223,47 @@ def test_full_record_roundtrip_and_csv(tmp_path: Path) -> None:
     assert col in csv_rows[0]
     assert csv_rows[1]["outcome"] == "success"
     assert record.run_label == "run_a"
+
+
+def test_build_record_uses_explicit_safety_cfg_not_default(tmp_path: Path) -> None:
+    # 2026-07-30 fix: RunLogger.__init__ silently falls back to
+    # ImpedanceSafetyConfig()'s defaults when no safety_cfg is passed. Every
+    # real caller (tools/ur5e_move_hold_transport.py,
+    # tools/audit_ur5e_mujoco_gravity_torque.py,
+    # rl_gain_scheduling/eval_gain_scheduler.py) never passed the run's own
+    # real config, so *_time_to_limit_s was silently computed against the
+    # wrong threshold for every real record ever built. This proves that
+    # once a caller DOES pass its real safety_cfg (the actual fix, applied
+    # at those three call sites), RunLogger honors it end to end.
+    run_dir = tmp_path / "run_a"
+    run_dir.mkdir()
+    # Y drift of 0.05m -- over the ImpedanceSafetyConfig() default (0.03m)
+    # but under a looser real config (0.1m) that a real run might have used.
+    rows = [_make_row(0, 0.0), _make_row(1, 0.002, ee_pos=[0.4, 0.15, 0.5])]
+    _write_trace(run_dir / "trace.jsonl", rows)
+    summary = _base_summary(run_dir)
+
+    default_logger = RunLogger(output_root=tmp_path, source_script="test_source.py")
+    default_record = default_logger.build_record_from_summary(summary, run_dir=run_dir, seed=0, config_path="c.yaml")
+    assert default_record.y_drift_time_to_limit_s == 0.002  # trips the default 0.03m threshold
+
+    looser_cfg = ImpedanceSafetyConfig(max_abs_y_drift_m=0.1)
+    looser_logger = RunLogger(output_root=tmp_path, source_script="test_source.py", safety_cfg=looser_cfg)
+    looser_record = looser_logger.build_record_from_summary(summary, run_dir=run_dir, seed=0, config_path="c.yaml")
+    assert looser_record.y_drift_time_to_limit_s is None  # 0.05m never crosses the real 0.1m threshold
+
+    # Same real bug affected qd time-to-limit and orientation time-to-limit
+    # via the same self.safety_cfg default -- spot-check qd here too.
+    qd_row = [0.0] * N
+    qd_row[0] = 2.0  # over the default 1.5 rad/s, under a real 3.0 rad/s config
+    rows_qd = [_make_row(0, 0.0), _make_row(1, 0.002, qd=qd_row)]
+    _write_trace(run_dir / "trace.jsonl", rows_qd)
+    default_qd_record = default_logger.build_record_from_summary(summary, run_dir=run_dir, seed=0, config_path="c.yaml")
+    assert default_qd_record.per_joint_qd_time_to_limit_s[JOINT_NAME_ORDER[0]] == 0.002
+    real_cfg = ImpedanceSafetyConfig(max_joint_velocity_radps=3.0)
+    real_logger = RunLogger(output_root=tmp_path, source_script="test_source.py", safety_cfg=real_cfg)
+    real_qd_record = real_logger.build_record_from_summary(summary, run_dir=run_dir, seed=0, config_path="c.yaml")
+    assert real_qd_record.per_joint_qd_time_to_limit_s[JOINT_NAME_ORDER[0]] is None
 
 
 def test_missing_trace_is_tolerated(tmp_path: Path) -> None:

@@ -45,6 +45,7 @@ BASELINE_GAINS: dict[str, float] = {
 }
 
 from observability.run_logger import RunLogger  # noqa: E402
+from simulation.ur5e_mujoco_torque import build_safety_config  # noqa: E402
 from tools.tuning_common import (  # noqa: E402
     _candidate_config_payload,
     _candidate_config_path,
@@ -599,9 +600,15 @@ def run() -> int:
     (output_root / "candidate_configs").mkdir(parents=True, exist_ok=True)
     (output_root / "per_run_traces").mkdir(parents=True, exist_ok=True)
     (output_root / "plots").mkdir(parents=True, exist_ok=True)
-    run_logger = RunLogger(output_root=output_root, source_script=Path(__file__).name)
 
     base_cfg, base_gains = _load_base_cfg(args)
+    # Real safety_cfg for this sweep's own config, not RunLogger's default --
+    # see observability/run_logger.py's RunLogger docstring / 2026-07-30 fix
+    # for why the default silently produced wrong time-to-limit values.
+    run_logger = RunLogger(
+        output_root=output_root, source_script=Path(__file__).name,
+        safety_cfg=build_safety_config(base_cfg["controller"]),
+    )
     candidate_gains = _resolve_candidate_gains(
         base_gains,
         use_legacy_baseline_gains=args.use_legacy_baseline_gains,

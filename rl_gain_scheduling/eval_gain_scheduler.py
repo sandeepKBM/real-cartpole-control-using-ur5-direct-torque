@@ -45,6 +45,7 @@ from stable_baselines3 import PPO, SAC  # noqa: E402
 from stable_baselines3.common.base_class import BaseAlgorithm  # noqa: E402
 
 from observability.run_logger import RunLogger  # noqa: E402
+from simulation.ur5e_mujoco_torque import build_safety_config  # noqa: E402
 from rl_gain_scheduling.gain_scheduling_env import (  # noqa: E402
     ACTIVE_ORIGIN_Q,
     LOWER_B_Q,
@@ -164,8 +165,21 @@ def main() -> int:
     env = GainSchedulingEnv(config_path=args.config)
     env._full_trace_logging = True
 
-    learned_logger = RunLogger(output_root=output_root / "learned", source_script=__file__, backend="mujoco")
-    baseline_logger = RunLogger(output_root=output_root / "baseline", source_script=__file__, backend="mujoco")
+    # Real safety_cfg for each side's own config, not RunLogger's default --
+    # see observability/run_logger.py's RunLogger docstring / 2026-07-30 fix
+    # for why the default silently produced wrong time-to-limit values.
+    # learned/baseline use DIFFERENT config files (--config vs
+    # --baseline-config, see that flag's docstring above), so each needs its
+    # own safety_cfg, not one shared between them.
+    baseline_cfg = yaml.safe_load(args.baseline_config.read_text(encoding="utf-8"))
+    learned_logger = RunLogger(
+        output_root=output_root / "learned", source_script=__file__, backend="mujoco",
+        safety_cfg=build_safety_config(cfg["controller"]),
+    )
+    baseline_logger = RunLogger(
+        output_root=output_root / "baseline", source_script=__file__, backend="mujoco",
+        safety_cfg=build_safety_config(baseline_cfg["controller"]),
+    )
 
     results: dict[tuple[float, float], dict[str, bool]] = {}
     for alpha in args.alphas:

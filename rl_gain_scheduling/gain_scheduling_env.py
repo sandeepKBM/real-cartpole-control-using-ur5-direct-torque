@@ -598,6 +598,15 @@ class GainSchedulingEnv(gym.Env):
             "sim_time_s": float(self.data.time),
             "duration_s": self._max_episode_seconds,
             "trace_path": str(self._trace_path),
+            # 2026-07-30: was computed (passed into summarize_move_hold_trace
+            # above) but never persisted here, unlike
+            # tools/ur5e_mujoco_torque_experiments.py's summary writer -- left
+            # RunLogger's y_drift_time_to_limit_s/z_drift_time_to_limit_s
+            # unconditionally None for every env-driven (learned-policy) run,
+            # including ones whose guard fired on Y/Z drift.
+            "initial_ee_pos": (
+                self._state0.ee_pos.tolist() if self._state0 is not None else None
+            ),
         })
         if self._lightweight_trace:
             run_summary["max_abs_qd_radps"] = float(np.max(np.abs([row["qd"] for row in self._lightweight_trace])))

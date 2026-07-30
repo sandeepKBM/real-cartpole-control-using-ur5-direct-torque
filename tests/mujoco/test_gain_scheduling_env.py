@@ -446,6 +446,13 @@ def test_env_full_trace_logging_produces_valid_move_hold_metrics(tmp_path):
     assert "move_hold_quality_score" in summary
     assert "valid_move_and_hold" in summary
     assert summary["move_hold_quality_score"] > 0.5
+    # 2026-07-30 fix: initial_ee_pos was computed (passed into
+    # summarize_move_hold_trace) but never persisted into the written
+    # summary -- left RunLogger's y/z_drift_time_to_limit_s unconditionally
+    # None for every learned-policy run, including ones whose guard fired
+    # on Y/Z drift (see docs/status/safety_envelope_backtest_2026-07-30.md).
+    assert summary.get("initial_ee_pos") is not None
+    assert len(summary["initial_ee_pos"]) == 3
 
 
 def _synthetic_slow_converging_trace(env: GainSchedulingEnv, *, target_x_delta: float):
