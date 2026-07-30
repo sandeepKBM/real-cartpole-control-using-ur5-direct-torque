@@ -38,6 +38,7 @@ ensure_repo_root()
 from hardware.dashboard import power_on_and_release, query_remote_control  # noqa: E402
 from hardware.direct_torque_link import UR5eDirectTorqueLink  # noqa: E402
 from hardware.link import RTDELinkError, UR5eLink  # noqa: E402
+from hardware.safety import NOISE_ROBUST_GUARD_OVERRIDES  # noqa: E402
 from hardware.x_transport import run_x_transport  # noqa: E402
 from transport_metrics import GAIN_FIELDS  # noqa: E402
 
@@ -59,6 +60,37 @@ def _normalize_gain_overrides(raw: str) -> dict[str, float]:
     for key, value in payload.items():
         if key in GAIN_FIELDS:
             overrides[key] = float(value)
+    return overrides
+
+
+def resolve_move_limit_overrides(args: argparse.Namespace) -> dict[str, float | int]:
+    """Combine --noise-robust-guards' preset (if set) with any explicit
+    individual override flags, explicit always winning for a given field.
+
+    The preset is applied first via dict.update(), then each explicit flag
+    (if not None) overwrites its own key -- so a user who passes both
+    --noise-robust-guards and e.g. --accel-gap-cycles 8 gets gap=8, not the
+    preset's gap=5. See NOISE_ROBUST_GUARD_OVERRIDES in hardware/safety.py
+    and docs/status/safety_envelope_backtest_2026-07-30.md for the evidence
+    behind the preset values.
+    """
+    overrides: dict[str, float | int] = {}
+    if args.noise_robust_guards:
+        overrides.update(NOISE_ROBUST_GUARD_OVERRIDES)
+    if args.max_tcp_accel_mps2 is not None:
+        overrides["max_tcp_accel_mps2"] = float(args.max_tcp_accel_mps2)
+    if args.accel_gap_cycles is not None:
+        overrides["accel_gap_cycles"] = int(args.accel_gap_cycles)
+    if args.speed_lowpass_alpha is not None:
+        overrides["speed_lowpass_alpha"] = float(args.speed_lowpass_alpha)
+    if args.accel_max_consecutive_violations is not None:
+        overrides["accel_max_consecutive_violations"] = int(args.accel_max_consecutive_violations)
+    if args.accel_hard_multiple is not None:
+        overrides["accel_hard_multiple"] = float(args.accel_hard_multiple)
+    if args.speed_max_consecutive_violations is not None:
+        overrides["speed_max_consecutive_violations"] = int(args.speed_max_consecutive_violations)
+    if args.speed_hard_multiple is not None:
+        overrides["speed_hard_multiple"] = float(args.speed_hard_multiple)
     return overrides
 
 
@@ -164,6 +196,80 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--accel-max-consecutive-violations",
+        type=int,
+        default=None,
+        help=(
+            "position and direct_torque modes. Explicit override of "
+            "CartesianMoveLimits.accel_max_consecutive_violations (class default 1 "
+            "= original instant-trip behavior). Added 2026-07-30 (commit 8eccd1d) -- "
+            "DeadlineMonitor-style graduated tolerance: this many consecutive "
+            "over-threshold cycles before tripping, tolerating an isolated noise "
+            "spike while still catching a sustained real trend. See "
+            "--noise-robust-guards below: real-hardware-noise-replay backtest "
+            "evidence (docs/status/safety_envelope_backtest_2026-07-30.md) found "
+            "this field ALONE, at its own validated value, does not eliminate "
+            "spurious trips -- it must be combined with --accel-gap-cycles/"
+            "--speed-lowpass-alpha to actually work."
+        ),
+    )
+    p.add_argument(
+        "--accel-hard-multiple",
+        type=float,
+        default=None,
+        help=(
+            "position and direct_torque modes. Explicit override of "
+            "CartesianMoveLimits.accel_hard_multiple (class default 5.0). A single "
+            "cycle at or above max_tcp_accel_mps2 * this multiple trips immediately "
+            "regardless of --accel-max-consecutive-violations, catching a genuine "
+            "one-shot catastrophic event. See --accel-max-consecutive-violations."
+        ),
+    )
+    p.add_argument(
+        "--speed-max-consecutive-violations",
+        type=int,
+        default=None,
+        help=(
+            "position and direct_torque modes. Explicit override of "
+            "CartesianMoveLimits.speed_max_consecutive_violations (class default 1). "
+            "Same graduated-tolerance mechanism as --accel-max-consecutive-violations, "
+            "applied to the TCP speed check instead of acceleration."
+        ),
+    )
+    p.add_argument(
+        "--speed-hard-multiple",
+        type=float,
+        default=None,
+        help=(
+            "position and direct_torque modes. Explicit override of "
+            "CartesianMoveLimits.speed_hard_multiple (class default 5.0). Same "
+            "immediate-trip safety valve as --accel-hard-multiple, applied to the "
+            "TCP speed check."
+        ),
+    )
+    p.add_argument(
+        "--noise-robust-guards",
+        action="store_true",
+        help=(
+            "position and direct_torque modes. Convenience flag applying the full "
+            "validated 6-parameter combination found to actually close the "
+            "real-hardware noise-driven-spurious-trip gap (2026-07-30 backtest, "
+            "docs/status/safety_envelope_backtest_2026-07-30.md section 9, "
+            "experiments/safety-envelope-study branch): the graduated-tolerance "
+            "fields ALONE still spuriously tripped 30/30 replayed seeds at real "
+            "measured RTDE noise magnitudes; only pairing them with "
+            "accel_gap_cycles/speed_lowpass_alpha filtering closed it (0/30 "
+            "spurious), while still catching the real genuine-catch case "
+            "(-0.20m/1.0s move, theoretical peak accel 1.1547 m/s^2). Preset "
+            "values: accel_max_consecutive_violations=3, accel_hard_multiple=5.0, "
+            "speed_max_consecutive_violations=3, speed_hard_multiple=5.0, "
+            "accel_gap_cycles=5, speed_lowpass_alpha=0.2 (see "
+            "hardware.safety.NOISE_ROBUST_GUARD_OVERRIDES). The preset is applied "
+            "first; any individual override flag above still wins for that "
+            "specific field."
+        ),
+    )
+    p.add_argument(
         "--coriolis-feedforward",
         action="store_true",
         help=(
@@ -259,6 +365,7 @@ def main() -> int:
         except (ValueError, json.JSONDecodeError) as exc:
             print(f"--gain-overrides-json invalid: {exc}", file=sys.stderr)
             return 2
+    move_limit_overrides = resolve_move_limit_overrides(args)
     try:
         result = run_x_transport(
             control_mode=str(args.control_mode),
@@ -275,16 +382,18 @@ def main() -> int:
             start_q_rad=start_q_rad,
             coriolis_feedforward=bool(args.coriolis_feedforward),
             gain_overrides=gain_overrides,
-            max_tcp_accel_mps2_override=(
-                None if args.max_tcp_accel_mps2 is None else float(args.max_tcp_accel_mps2)
-            ),
-            accel_gap_cycles_override=(
-                None if args.accel_gap_cycles is None else int(args.accel_gap_cycles)
-            ),
+            max_tcp_accel_mps2_override=move_limit_overrides.get("max_tcp_accel_mps2"),
+            accel_gap_cycles_override=move_limit_overrides.get("accel_gap_cycles"),
             enable_residual_observer=not bool(args.disable_residual_observer),
-            speed_lowpass_alpha_override=(
-                None if args.speed_lowpass_alpha is None else float(args.speed_lowpass_alpha)
+            speed_lowpass_alpha_override=move_limit_overrides.get("speed_lowpass_alpha"),
+            accel_max_consecutive_violations_override=move_limit_overrides.get(
+                "accel_max_consecutive_violations"
             ),
+            accel_hard_multiple_override=move_limit_overrides.get("accel_hard_multiple"),
+            speed_max_consecutive_violations_override=move_limit_overrides.get(
+                "speed_max_consecutive_violations"
+            ),
+            speed_hard_multiple_override=move_limit_overrides.get("speed_hard_multiple"),
         )
     except (RTDELinkError, ValueError) as exc:
         print(f"RTDE/start-pose failed: {exc}", file=sys.stderr)

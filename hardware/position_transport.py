@@ -50,6 +50,10 @@ def _load_cartesian_limits(
     max_tcp_accel_mps2_override: float | None = None,
     accel_gap_cycles_override: int | None = None,
     speed_lowpass_alpha_override: float | None = None,
+    accel_max_consecutive_violations_override: int | None = None,
+    accel_hard_multiple_override: float | None = None,
+    speed_max_consecutive_violations_override: int | None = None,
+    speed_hard_multiple_override: float | None = None,
 ) -> CartesianMoveLimits:
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     safety_raw = (cfg.get("controller", {}) or {}).get("safety", {}) or {}
@@ -84,6 +88,18 @@ def _load_cartesian_limits(
         overrides["accel_gap_cycles"] = int(accel_gap_cycles_override)
     if speed_lowpass_alpha_override is not None:
         overrides["speed_lowpass_alpha"] = float(speed_lowpass_alpha_override)
+    # DeadlineMonitor-style graduated tolerance overrides (2026-07-30) -- see
+    # CartesianMoveLimits.accel_max_consecutive_violations' docstring and
+    # NOISE_ROBUST_GUARD_OVERRIDES in hardware/safety.py. Explicit opt-in
+    # only; default (None) leaves the class's own no-op defaults untouched.
+    if accel_max_consecutive_violations_override is not None:
+        overrides["accel_max_consecutive_violations"] = int(accel_max_consecutive_violations_override)
+    if accel_hard_multiple_override is not None:
+        overrides["accel_hard_multiple"] = float(accel_hard_multiple_override)
+    if speed_max_consecutive_violations_override is not None:
+        overrides["speed_max_consecutive_violations"] = int(speed_max_consecutive_violations_override)
+    if speed_hard_multiple_override is not None:
+        overrides["speed_hard_multiple"] = float(speed_hard_multiple_override)
     return CartesianMoveLimits.for_robot(robot_ip, base=base, **overrides)
 
 
@@ -103,6 +119,10 @@ def run_x_transport_position(
     max_tcp_accel_mps2_override: float | None = None,
     accel_gap_cycles_override: int | None = None,
     speed_lowpass_alpha_override: float | None = None,
+    accel_max_consecutive_violations_override: int | None = None,
+    accel_hard_multiple_override: float | None = None,
+    speed_max_consecutive_violations_override: int | None = None,
+    speed_hard_multiple_override: float | None = None,
 ) -> PositionTransportResult:
     """Stream the same min-jerk move+hold X profile through ``servoL``.
 
@@ -140,6 +160,10 @@ def run_x_transport_position(
             max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
             accel_gap_cycles_override=accel_gap_cycles_override,
             speed_lowpass_alpha_override=speed_lowpass_alpha_override,
+            accel_max_consecutive_violations_override=accel_max_consecutive_violations_override,
+            accel_hard_multiple_override=accel_hard_multiple_override,
+            speed_max_consecutive_violations_override=speed_max_consecutive_violations_override,
+            speed_hard_multiple_override=speed_hard_multiple_override,
         )
     )
     dt_s = 1.0 / float(rate_hz)

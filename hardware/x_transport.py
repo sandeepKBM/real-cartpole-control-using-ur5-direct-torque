@@ -76,6 +76,10 @@ def run_x_transport(
     max_tcp_accel_mps2_override: float | None = None,
     accel_gap_cycles_override: int | None = None,
     speed_lowpass_alpha_override: float | None = None,
+    accel_max_consecutive_violations_override: int | None = None,
+    accel_hard_multiple_override: float | None = None,
+    speed_max_consecutive_violations_override: int | None = None,
+    speed_hard_multiple_override: float | None = None,
     enable_residual_observer: bool = True,
 ) -> XTransportResult:
     mode = normalize_control_mode(control_mode)
@@ -118,6 +122,10 @@ def run_x_transport(
             max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
             accel_gap_cycles_override=accel_gap_cycles_override,
             speed_lowpass_alpha_override=speed_lowpass_alpha_override,
+            accel_max_consecutive_violations_override=accel_max_consecutive_violations_override,
+            accel_hard_multiple_override=accel_hard_multiple_override,
+            speed_max_consecutive_violations_override=speed_max_consecutive_violations_override,
+            speed_hard_multiple_override=speed_hard_multiple_override,
         )
         return XTransportResult(
             ok=raw_pos.ok,
@@ -177,6 +185,10 @@ def run_x_transport(
         max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
         accel_gap_cycles_override=accel_gap_cycles_override,
         speed_lowpass_alpha_override=speed_lowpass_alpha_override,
+        accel_max_consecutive_violations_override=accel_max_consecutive_violations_override,
+        accel_hard_multiple_override=accel_hard_multiple_override,
+        speed_max_consecutive_violations_override=speed_max_consecutive_violations_override,
+        speed_hard_multiple_override=speed_hard_multiple_override,
         enable_residual_observer=enable_residual_observer,
     )
     return XTransportResult(

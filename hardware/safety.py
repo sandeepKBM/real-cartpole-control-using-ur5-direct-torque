@@ -547,6 +547,31 @@ class CartesianMoveLimits:
         return limits
 
 
+# Validated 6-parameter combination that closes the real-hardware
+# noise-driven-spurious-trip gap the graduated tolerance above does NOT close
+# on its own (2026-07-30 backtest: docs/status/safety_envelope_backtest_2026-07-30.md
+# section 9, experiments/safety-envelope-study branch). Using real measured
+# RTDE noise magnitudes, the graduated-tolerance fields alone
+# (accel_max_consecutive_violations=3/accel_hard_multiple=5.0, same for speed)
+# still spuriously tripped 30/30 seeds on a profile constructed to be
+# genuinely physically clean; only combining them with the older, separately
+# existing accel_gap_cycles/speed_lowpass_alpha filtering (a 2026-07-28 fix,
+# unrelated to the graduated-tolerance work) closed the gap: 0/30 spurious
+# trips, while still correctly catching the real genuine-catch case (the
+# documented -0.20m/1.0s min-jerk move, theoretical peak accel 1.1547 m/s^2)
+# 30/30. Exposed via --noise-robust-guards in tools/ur5e_move.py and
+# tools/ur5e_direct_torque_x_transport.py: apply this preset first, then let
+# any explicit individual override flag win for that specific field.
+NOISE_ROBUST_GUARD_OVERRIDES: dict[str, float | int] = {
+    "accel_max_consecutive_violations": 3,
+    "accel_hard_multiple": 5.0,
+    "speed_max_consecutive_violations": 3,
+    "speed_hard_multiple": 5.0,
+    "accel_gap_cycles": 5,
+    "speed_lowpass_alpha": 0.2,
+}
+
+
 def is_likely_ursim(robot_ip: str) -> bool:
     """True for loopback targets (Docker URSim on the same machine)."""
     ip = str(robot_ip).strip().lower()

@@ -45,7 +45,13 @@ from hardware.motion import (  # noqa: E402
     peak_velocity_mps,
     plan_waypoints,
 )
-from hardware.safety import CartesianMoveLimits, CartesianMoveMonitor, EStopLatch, UR5eSafetyLimits  # noqa: E402
+from hardware.safety import (  # noqa: E402
+    NOISE_ROBUST_GUARD_OVERRIDES,
+    CartesianMoveLimits,
+    CartesianMoveMonitor,
+    EStopLatch,
+    UR5eSafetyLimits,
+)
 
 _AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -93,6 +99,71 @@ def parse_args() -> argparse.Namespace:
         help="Override acceleration estimator speed EMA alpha in (0,1]. Smaller is smoother.",
     )
     p.add_argument(
+        "--accel-max-consecutive-violations",
+        type=int,
+        default=None,
+        help=(
+            "Override CartesianMoveLimits.accel_max_consecutive_violations (class "
+            "default 1 = original instant-trip behavior). Added 2026-07-30 (commit "
+            "8eccd1d) -- DeadlineMonitor-style graduated tolerance: this many "
+            "consecutive over-threshold cycles before tripping. See "
+            "--noise-robust-guards below: real-hardware-noise-replay backtest "
+            "evidence found this field ALONE does not eliminate spurious trips."
+        ),
+    )
+    p.add_argument(
+        "--accel-hard-multiple",
+        type=float,
+        default=None,
+        help=(
+            "Override CartesianMoveLimits.accel_hard_multiple (class default 5.0). "
+            "A single cycle >= max_tcp_accel_mps2 * this multiple trips immediately "
+            "regardless of --accel-max-consecutive-violations."
+        ),
+    )
+    p.add_argument(
+        "--speed-max-consecutive-violations",
+        type=int,
+        default=None,
+        help=(
+            "Override CartesianMoveLimits.speed_max_consecutive_violations (class "
+            "default 1). Same graduated-tolerance mechanism as "
+            "--accel-max-consecutive-violations, applied to the TCP speed check."
+        ),
+    )
+    p.add_argument(
+        "--speed-hard-multiple",
+        type=float,
+        default=None,
+        help=(
+            "Override CartesianMoveLimits.speed_hard_multiple (class default 5.0). "
+            "Same immediate-trip safety valve as --accel-hard-multiple, applied to "
+            "the TCP speed check."
+        ),
+    )
+    p.add_argument(
+        "--noise-robust-guards",
+        action="store_true",
+        help=(
+            "Convenience flag applying the full validated 6-parameter combination "
+            "found to actually close the real-hardware noise-driven-spurious-trip "
+            "gap (2026-07-30 backtest, "
+            "docs/status/safety_envelope_backtest_2026-07-30.md section 9, "
+            "experiments/safety-envelope-study branch): the graduated-tolerance "
+            "fields ALONE still spuriously tripped 30/30 replayed seeds at real "
+            "measured RTDE noise magnitudes; only pairing them with "
+            "accel_gap_cycles/speed_lowpass_alpha filtering closed it (0/30 "
+            "spurious), while still catching the real genuine-catch case "
+            "(-0.20m/1.0s move, theoretical peak accel 1.1547 m/s^2). Preset "
+            "values: accel_max_consecutive_violations=3, accel_hard_multiple=5.0, "
+            "speed_max_consecutive_violations=3, speed_hard_multiple=5.0, "
+            "accel_gap_cycles=5, speed_lowpass_alpha=0.2 (see "
+            "hardware.safety.NOISE_ROBUST_GUARD_OVERRIDES). The preset is applied "
+            "first; any individual override flag above still wins for that "
+            "specific field."
+        ),
+    )
+    p.add_argument(
         "--output-dir",
         type=Path,
         default=None,
@@ -126,6 +197,39 @@ def parse_args() -> argparse.Namespace:
         help="Skip the interactive typed-MOVE confirmation (for scripted use; still requires the opt-in flag above).",
     )
     return p.parse_args()
+
+
+def build_move_limit_overrides(args: argparse.Namespace) -> dict[str, float | int]:
+    """Combine --noise-robust-guards' preset (if set) with any explicit
+    individual override flags, explicit always winning for a given field.
+
+    The preset is applied first via dict.update(), then each explicit flag
+    (if not None) overwrites its own key -- so a user who passes both
+    --noise-robust-guards and e.g. --accel-gap-cycles 8 gets gap=8, not the
+    preset's gap=5. See NOISE_ROBUST_GUARD_OVERRIDES in hardware/safety.py
+    and docs/status/safety_envelope_backtest_2026-07-30.md for the evidence
+    behind the preset values.
+    """
+    overrides: dict[str, float | int] = {}
+    if args.noise_robust_guards:
+        overrides.update(NOISE_ROBUST_GUARD_OVERRIDES)
+    if args.max_tcp_speed_mps is not None:
+        overrides["max_tcp_speed_mps"] = float(args.max_tcp_speed_mps)
+    if args.max_tcp_accel_mps2 is not None:
+        overrides["max_tcp_accel_mps2"] = float(args.max_tcp_accel_mps2)
+    if args.accel_gap_cycles is not None:
+        overrides["accel_gap_cycles"] = int(args.accel_gap_cycles)
+    if args.speed_lowpass_alpha is not None:
+        overrides["speed_lowpass_alpha"] = float(args.speed_lowpass_alpha)
+    if args.accel_max_consecutive_violations is not None:
+        overrides["accel_max_consecutive_violations"] = int(args.accel_max_consecutive_violations)
+    if args.accel_hard_multiple is not None:
+        overrides["accel_hard_multiple"] = float(args.accel_hard_multiple)
+    if args.speed_max_consecutive_violations is not None:
+        overrides["speed_max_consecutive_violations"] = int(args.speed_max_consecutive_violations)
+    if args.speed_hard_multiple is not None:
+        overrides["speed_hard_multiple"] = float(args.speed_hard_multiple)
+    return overrides
 
 
 def main() -> int:
@@ -164,15 +268,7 @@ def main() -> int:
     # CartesianMoveMonitor guard during the move tautological: peak_v can never
     # exceed 1.2x itself, so neither could ever trip on an aggressive-but-nominal
     # move, only on >20% overshoot from what was already planned.
-    move_limit_overrides = {}
-    if args.max_tcp_speed_mps is not None:
-        move_limit_overrides["max_tcp_speed_mps"] = float(args.max_tcp_speed_mps)
-    if args.max_tcp_accel_mps2 is not None:
-        move_limit_overrides["max_tcp_accel_mps2"] = float(args.max_tcp_accel_mps2)
-    if args.accel_gap_cycles is not None:
-        move_limit_overrides["accel_gap_cycles"] = int(args.accel_gap_cycles)
-    if args.speed_lowpass_alpha is not None:
-        move_limit_overrides["speed_lowpass_alpha"] = float(args.speed_lowpass_alpha)
+    move_limit_overrides = build_move_limit_overrides(args)
     move_limits = CartesianMoveLimits.for_robot(args.robot_ip, **move_limit_overrides)
     if peak_v > move_limits.max_tcp_speed_mps:
         print(

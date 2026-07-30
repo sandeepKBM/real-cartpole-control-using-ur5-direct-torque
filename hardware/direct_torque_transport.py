@@ -74,6 +74,10 @@ def run_x_transport_direct_torque(
     max_tcp_accel_mps2_override: float | None = None,
     accel_gap_cycles_override: int | None = None,
     speed_lowpass_alpha_override: float | None = None,
+    accel_max_consecutive_violations_override: int | None = None,
+    accel_hard_multiple_override: float | None = None,
+    speed_max_consecutive_violations_override: int | None = None,
+    speed_hard_multiple_override: float | None = None,
     enable_residual_observer: bool = True,
     residual_qdd_gap_cycles: int = 1,
     residual_qdd_lowpass_alpha: float = 1.0,
@@ -202,6 +206,18 @@ def run_x_transport_direct_torque(
         accel_overrides["accel_gap_cycles"] = int(accel_gap_cycles_override)
     if speed_lowpass_alpha_override is not None:
         accel_overrides["speed_lowpass_alpha"] = float(speed_lowpass_alpha_override)
+    # DeadlineMonitor-style graduated tolerance overrides (2026-07-30) -- see
+    # CartesianMoveLimits.accel_max_consecutive_violations' docstring and
+    # NOISE_ROBUST_GUARD_OVERRIDES in hardware/safety.py. Explicit opt-in
+    # only; default (None) leaves the class's own no-op defaults untouched.
+    if accel_max_consecutive_violations_override is not None:
+        accel_overrides["accel_max_consecutive_violations"] = int(accel_max_consecutive_violations_override)
+    if accel_hard_multiple_override is not None:
+        accel_overrides["accel_hard_multiple"] = float(accel_hard_multiple_override)
+    if speed_max_consecutive_violations_override is not None:
+        accel_overrides["speed_max_consecutive_violations"] = int(speed_max_consecutive_violations_override)
+    if speed_hard_multiple_override is not None:
+        accel_overrides["speed_hard_multiple"] = float(speed_hard_multiple_override)
     if accel_overrides:
         move_limits = replace(move_limits, **accel_overrides)
     move_monitor = CartesianMoveMonitor(move_limits)
