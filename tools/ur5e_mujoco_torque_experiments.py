@@ -862,6 +862,13 @@ def run() -> int:
                 tau_controller = np.asarray(diag.get("tau_controller", diag.get("tau_raw", tau)), dtype=np.float64).reshape(6)
                 tau_gravity = np.asarray(diag.get("tau_gravity", np.zeros(6, dtype=np.float64)), dtype=np.float64).reshape(6)
                 tau_applied = np.asarray(diag.get("tau_applied", tau_controller + tau_gravity), dtype=np.float64).reshape(6)
+                # Controller-internal diagnostics already computed inside
+                # controller.compute() (see CartesianImpedanceOutput) but
+                # previously discarded every cycle here -- mirrors the fix
+                # applied to hardware/direct_torque_transport.py. Absent
+                # (None) for controller kinds that don't compute them (e.g.
+                # zero_torque, direct_torque_profile).
+                controller_output = diag.get("controller_output") or {}
                 total_effort += control_effort * dt
                 total_energy_proxy += energy_proxy * dt
                 row = {
@@ -904,6 +911,10 @@ def run() -> int:
                     "safety_ok": bool(diag.get("safety_ok", True)),
                     "safety_reason": str(diag.get("safety_reason", "")),
                     "controller_kind": str(diag.get("controller_kind", "")),
+                    "jacobian_cond": controller_output.get("jacobian_cond"),
+                    "singular_scale": controller_output.get("singular_scale"),
+                    "task_scale": controller_output.get("task_scale"),
+                    "task_backtrack_iters": controller_output.get("task_backtrack_iters"),
                     "termination_reason": termination_reason,
                     "control_effort_l2": control_effort,
                     "control_energy_proxy": energy_proxy,
@@ -981,6 +992,13 @@ def run() -> int:
             tau_controller = np.asarray(diag.get("tau_controller", diag.get("tau_raw", tau)), dtype=np.float64).reshape(6)
             tau_gravity = np.asarray(diag.get("tau_gravity", np.zeros(6, dtype=np.float64)), dtype=np.float64).reshape(6)
             tau_applied = np.asarray(diag.get("tau_applied", tau_controller + tau_gravity), dtype=np.float64).reshape(6)
+            # Controller-internal diagnostics already computed inside
+            # controller.compute() (see CartesianImpedanceOutput) but
+            # previously discarded every cycle here -- mirrors the fix
+            # applied to hardware/direct_torque_transport.py. Absent (None)
+            # for controller kinds that don't compute them (e.g.
+            # zero_torque, direct_torque_profile).
+            controller_output = diag.get("controller_output") or {}
             total_effort += control_effort * dt
             total_energy_proxy += energy_proxy * dt
             row = {
@@ -1023,6 +1041,10 @@ def run() -> int:
                 "safety_ok": bool(post_safety.ok),
                 "safety_reason": str(post_safety.reason),
                 "controller_kind": str(diag.get("controller_kind", "")),
+                "jacobian_cond": controller_output.get("jacobian_cond"),
+                "singular_scale": controller_output.get("singular_scale"),
+                "task_scale": controller_output.get("task_scale"),
+                "task_backtrack_iters": controller_output.get("task_backtrack_iters"),
                 "termination_reason": "",
                 "control_effort_l2": control_effort,
                 "control_energy_proxy": energy_proxy,

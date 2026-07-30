@@ -550,6 +550,57 @@ def test_gravity_comp_hold_reports_applied_gravity_torque(tmp_path: Path) -> Non
     assert "tau_applied_clipped" in first_row
     assert "gravity_compensation_active" in first_row
     assert run_dir.exists()
+    # zero_torque never calls a controller that computes jacobian_cond /
+    # singular_scale / task_scale / task_backtrack_iters (see
+    # ZeroTorqueControllerOutput.as_dict in simulation/ur5e_mujoco_torque.py),
+    # so the trace-row builder must leave these keys cleanly None rather than
+    # fabricate values -- not simply omit them, so downstream trace readers
+    # can rely on the keys always existing.
+    for key in ("jacobian_cond", "singular_scale", "task_scale", "task_backtrack_iters"):
+        assert key in first_row
+        assert first_row[key] is None
+
+
+def test_controller_rollout_trace_reports_jacobian_singularity_diagnostics(tmp_path: Path) -> None:
+    # XAxisCartesianImpedanceController and TorqueTaskQPController both
+    # populate CartesianImpedanceOutput's jacobian_cond/singular_scale/
+    # task_scale/task_backtrack_iters fields every compute() call (see
+    # controller_core/x_axis_cartesian_impedance.py and
+    # controller_core/torque_task_qp.py) -- previously computed every step
+    # but silently dropped by the MuJoCo trace-row builder. This checks both
+    # controller kinds report real, finite values in trace.jsonl.
+    for controller_kind in ("impedance", "torque_qp"):
+        summary, run_dir, _ = _run_experiment_cli(
+            tmp_path,
+            "--mode",
+            "controller-rollout",
+            "--controller-kind",
+            controller_kind,
+            "--gravity-mode",
+            "gravity_comp",
+            "--trajectory-profile",
+            "min_jerk_move_hold",
+            "--move-duration",
+            "0.1",
+            "--duration",
+            "0.2",
+            "--target-x-delta",
+            "0.01",
+            "--config",
+            str(TRANSPORT_CONFIG_PATH),
+            "--no-plot",
+        )
+        trace_path = Path(summary["trace_path"])
+        assert trace_path.exists()
+        rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+        assert rows, f"expected non-empty trace for controller_kind={controller_kind!r}"
+        first_row = rows[0]
+        assert np.isfinite(float(first_row["jacobian_cond"]))
+        assert float(first_row["jacobian_cond"]) > 0.0
+        assert 0.0 < float(first_row["singular_scale"]) <= 1.0
+        assert np.isfinite(float(first_row["task_scale"]))
+        assert int(first_row["task_backtrack_iters"]) >= 0
+        assert run_dir.exists()
 
 
 @pytest.mark.parametrize(
