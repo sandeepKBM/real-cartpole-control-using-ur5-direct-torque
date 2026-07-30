@@ -365,6 +365,166 @@ def test_cartesian_move_monitor_lowpass_filter_smooths_speed_step():
     # (no prior estimate to blend with), so check the second cycle instead.
 
 
+# --------------------------------------------------------------------------- #
+# DeadlineMonitor-style graduated tolerance for TCP speed/accel (2026-07-30,
+# docs/status/safety_envelope_backtest_2026-07-30.md). Real-hardware evidence:
+# 15 of 21 real guard trips in this project's history were single-cycle
+# speed/accel noise spikes on an otherwise-clean move; the genuinely real
+# divergences found were multi-cycle, escalating trends. This mirrors
+# DeadlineMonitor's own already-proven two-condition pattern instead of the
+# smooth/continuous envelope designs a separate backtest found to fail for
+# real structural reasons (see that doc).
+# --------------------------------------------------------------------------- #
+def _run_x_deltas(monitor: CartesianMoveMonitor, deltas_m: list[float], dt_s: float = 0.002) -> list:
+    x = 0.0
+    decisions = []
+    for dx in deltas_m:
+        x += dx
+        pose = [x, 0.0, 0.5, 0.0, 0.0, 0.0]
+        decisions.append(
+            monitor.check(
+                q=np.zeros(6), qd=np.zeros(6), tcp_pose=pose, target_tcp_pose=pose,
+                orientation_error_rad=0.0, axis_target_moving=True, dt_s=dt_s,
+            )
+        )
+    return decisions
+
+
+def test_cartesian_move_limits_validate_rejects_bad_consecutive_violation_config():
+    with pytest.raises(ValueError):
+        CartesianMoveLimits(accel_max_consecutive_violations=0).validate()
+    with pytest.raises(ValueError):
+        CartesianMoveLimits(speed_max_consecutive_violations=0).validate()
+    with pytest.raises(ValueError):
+        CartesianMoveLimits(accel_hard_multiple=0.5).validate()
+    with pytest.raises(ValueError):
+        CartesianMoveLimits(speed_hard_multiple=0.5).validate()
+
+
+def test_cartesian_move_monitor_accel_default_still_trips_instantly_on_single_cycle():
+    # Defaults (accel_max_consecutive_violations=1) must reproduce the exact
+    # old instant-trip behavior and exact old message -- a pure regression
+    # guard for every existing production caller that never opts into this.
+    monitor = _monitor(max_tcp_speed_mps=1e9, max_tcp_accel_mps2=200.0, max_waypoint_jump_m=1e9)
+    monitor.set_start([0.0, 0.0, 0.5, 0.0, 0.0, 0.0], move_axis_index=0)
+    # speeds: 0.5, 0.5 (accel=0, clean), 3.0 (accel=1250 -- one isolated spike).
+    decisions = _run_x_deltas(monitor, [0.001, 0.001, 0.006])
+    assert decisions[0].ok is True
+    assert decisions[1].ok is True
+    assert decisions[2].ok is False
+    assert "TCP acceleration 1250.0000 m/s^2 > 200.0 m/s^2" == decisions[2].reason
+    assert "consecutive" not in decisions[2].reason
+
+
+def test_cartesian_move_monitor_accel_tolerates_isolated_transient_spikes():
+    monitor = _monitor(
+        max_tcp_speed_mps=1e9, max_tcp_accel_mps2=200.0, max_waypoint_jump_m=1e9,
+        accel_max_consecutive_violations=3, accel_hard_multiple=1e9,  # isolate the graduated path only
+    )
+    monitor.set_start([0.0, 0.0, 0.5, 0.0, 0.0, 0.0], move_axis_index=0)
+    # Speed pattern 0.5,0.5,3.0,3.0,0.5,0.5,3.0,3.0,... : each change is a
+    # single isolated accel violation (settles at the new speed for one
+    # cycle before the next change), never two violations in a row -- must
+    # not trip even if this repeats forever, mirroring
+    # test_deadline_monitor_tolerates_isolated_transient_overrun exactly.
+    deltas = [0.001, 0.001]  # warm up to steady 0.5 m/s
+    for _ in range(20):
+        deltas += [0.006, 0.006, 0.001, 0.001]  # jump to 3.0, hold, drop to 0.5, hold
+    decisions = _run_x_deltas(monitor, deltas)
+    for d in decisions:
+        assert d.ok is True, d.reason
+
+
+def test_cartesian_move_monitor_accel_trips_on_consecutive_violations():
+    monitor = _monitor(
+        max_tcp_speed_mps=1e9, max_tcp_accel_mps2=200.0, max_waypoint_jump_m=1e9,
+        accel_max_consecutive_violations=3, accel_hard_multiple=1e9,  # isolate the graduated path only
+    )
+    monitor.set_start([0.0, 0.0, 0.5, 0.0, 0.0, 0.0], move_axis_index=0)
+    # Speed climbs 0.5 -> 3.0 -> 6.0 -> 9.0: each step is a fresh 1500 m/s^2
+    # jump (three violations in a row), a real sustained-divergence shape.
+    decisions = _run_x_deltas(monitor, [0.001, 0.001, 0.006, 0.012, 0.018])
+    # 1st and 2nd consecutive violations are silent -- exactly matching
+    # DeadlineMonitor.record()'s own behavior of returning None until the
+    # Nth consecutive overrun (see test_deadline_monitor_trips_on_
+    # consecutive_overruns). Only the 3rd trips.
+    assert decisions[2].ok is True, decisions[2].reason
+    assert decisions[3].ok is True, decisions[3].reason
+    assert decisions[4].ok is False
+    assert "for 3 consecutive cycles" in decisions[4].reason
+
+
+def test_cartesian_move_monitor_accel_trips_immediately_on_hard_multiple():
+    # A single cycle over hard_multiple x the base threshold must trip on
+    # the very first such cycle, even with a lenient consecutive-violations
+    # setting -- this is the disqualifying-catch guarantee: a genuine
+    # one-shot catastrophic event must never wait for N more cycles.
+    monitor = _monitor(
+        max_tcp_speed_mps=1e9, max_tcp_accel_mps2=100.0, max_waypoint_jump_m=1e9,
+        accel_max_consecutive_violations=3, accel_hard_multiple=5.0,
+    )
+    monitor.set_start([0.0, 0.0, 0.5, 0.0, 0.0, 0.0], move_axis_index=0)
+    # speed 0.5, 0.5 (clean), then a jump to 100.5 m/s -> accel ~50000 m/s^2,
+    # far over 5x100=500 -- must trip on this very cycle, not the 3rd.
+    decisions = _run_x_deltas(monitor, [0.001, 0.001, 0.2])
+    assert decisions[2].ok is False
+    assert "consecutive" not in decisions[2].reason  # the hard-multiple path, not the graduated one
+
+
+def test_cartesian_move_monitor_speed_default_still_trips_instantly_on_single_cycle():
+    monitor = _monitor(max_tcp_speed_mps=1.0, max_tcp_accel_mps2=1e9, max_waypoint_jump_m=1e9)
+    monitor.set_start([0.0, 0.0, 0.5, 0.0, 0.0, 0.0], move_axis_index=0)
+    decisions = _run_x_deltas(monitor, [0.001, 0.01])  # 0.01/0.002 = 5.0 m/s > 1.0
+    assert decisions[0].ok is True
+    assert decisions[1].ok is False
+    assert "TCP speed 5.0000 m/s > 1.0 m/s" == decisions[1].reason
+    assert "consecutive" not in decisions[1].reason
+
+
+def test_cartesian_move_monitor_speed_tolerates_isolated_transient_spikes():
+    monitor = _monitor(
+        max_tcp_speed_mps=1.0, max_tcp_accel_mps2=1e9, max_waypoint_jump_m=1e9,
+        speed_max_consecutive_violations=3, speed_hard_multiple=1e9,  # isolate the graduated path only
+    )
+    monitor.set_start([0.0, 0.0, 0.5, 0.0, 0.0, 0.0], move_axis_index=0)
+    # A single-cycle position spike (speed=5.0 m/s) immediately followed by
+    # normal small steps -- unlike accel this is genuinely isolated (speed
+    # depends only on this cycle's own delta, no derivative-of-derivative
+    # carryover) -- must not trip even repeated forever.
+    deltas = []
+    for _ in range(30):
+        deltas += [0.01, 0.001, 0.001]  # one spike, two clean cycles
+    decisions = _run_x_deltas(monitor, deltas)
+    for d in decisions:
+        assert d.ok is True, d.reason
+
+
+def test_cartesian_move_monitor_speed_trips_on_consecutive_violations():
+    monitor = _monitor(
+        max_tcp_speed_mps=1.0, max_tcp_accel_mps2=1e9, max_waypoint_jump_m=1e9,
+        speed_max_consecutive_violations=3, speed_hard_multiple=1e9,  # isolate the graduated path only
+    )
+    monitor.set_start([0.0, 0.0, 0.5, 0.0, 0.0, 0.0], move_axis_index=0)
+    decisions = _run_x_deltas(monitor, [0.01, 0.01, 0.01])  # 5.0 m/s, 3 cycles in a row
+    # 1st and 2nd consecutive violations are silent, matching
+    # DeadlineMonitor's own record()-returns-None-until-the-Nth behavior.
+    assert decisions[0].ok is True, decisions[0].reason
+    assert decisions[1].ok is True, decisions[1].reason
+    assert decisions[2].ok is False
+    assert "for 3 consecutive cycles" in decisions[2].reason
+
+
+def test_cartesian_move_monitor_speed_trips_immediately_on_hard_multiple():
+    monitor = _monitor(
+        max_tcp_speed_mps=1.0, max_tcp_accel_mps2=1e9, max_waypoint_jump_m=1e9,
+        speed_max_consecutive_violations=3, speed_hard_multiple=5.0,
+    )
+    monitor.set_start([0.0, 0.0, 0.5, 0.0, 0.0, 0.0], move_axis_index=0)
+    decisions = _run_x_deltas(monitor, [0.02])  # 10.0 m/s > 5x1.0=5.0 -- instant trip
+    assert decisions[0].ok is False
+    assert "consecutive" not in decisions[0].reason
+
+
 def test_cartesian_move_monitor_trips_on_off_axis_drift():
     monitor = _monitor(max_off_axis_drift_m=0.01)
     start = [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]

@@ -447,6 +447,45 @@ class CartesianMoveLimits:
     accel_gap_cycles: int = 1
     speed_lowpass_alpha: float = 1.0
 
+    # DeadlineMonitor-style graduated tolerance (2026-07-30). Real-hardware
+    # evidence (docs/status/safety_envelope_backtest_2026-07-30.md,
+    # experiments/safety-envelope-study branch): of 21 real guard trips
+    # across this project's history, 15 (71%) were single-cycle TCP
+    # speed/accel noise spikes on an otherwise-clean, bounded-qd move -- not
+    # real divergence -- while the genuinely real divergences found were
+    # multi-cycle, escalating trends (qd roughly doubling cycle over cycle).
+    # A falsifiable backtest of two different smooth/state-conditioned
+    # envelope redesigns against this same real data both failed for real
+    # structural reasons (one missed a genuine catch despite a better
+    # aggregate score; the other nuisance-tripped at this project's own
+    # validated wrist_2=0 transport pose) -- see that doc. What DID hold up
+    # in the same investigation is this project's own DeadlineMonitor,
+    # which already solves the identical shape of problem (a real, isolated
+    # transient overrun must not abort a physical robot mid-motion) with
+    # two independent, rigid trip conditions instead of a smooth/continuous
+    # bound: N consecutive over-threshold cycles trips (tolerates one noise
+    # spike, still catches a sustained real trend fast since real
+    # divergences escalate quickly), and a single cycle over
+    # `hard_multiple` x the base threshold trips immediately regardless
+    # (catches a genuine one-shot catastrophic event without ever waiting
+    # for N more, and is proven by this repo's own real trip data --
+    # direct_torque_20260728_162206's single-cycle deadline spike -- to
+    # catch what a purely graduated/consecutive-only rule would miss by
+    # design). Applying that exact pattern to the TCP speed/accel checks
+    # instead of a lookalike-but-untested "funnel" is not a compromise --
+    # it is a validated pattern already proven correct in this codebase.
+    #
+    # Defaults (1, 5.0) are a no-op: max_consecutive_violations=1 means
+    # every check() call passes straight through the hard-multiple branch's
+    # exact old message/behavior, reproducing today's single-cycle instant
+    # trip exactly. Opt-in only, same convention as accel_gap_cycles/
+    # speed_lowpass_alpha above -- enabling this for a real run is a
+    # deliberate, separate decision, not a silent default change.
+    accel_max_consecutive_violations: int = 1
+    accel_hard_multiple: float = 5.0
+    speed_max_consecutive_violations: int = 1
+    speed_hard_multiple: float = 5.0
+
     def validate(self) -> None:
         for name in (
             "max_off_axis_drift_m",
@@ -465,6 +504,14 @@ class CartesianMoveLimits:
             raise ValueError("accel_gap_cycles must be >= 1")
         if not (0.0 < float(self.speed_lowpass_alpha) <= 1.0):
             raise ValueError("speed_lowpass_alpha must be in (0.0, 1.0]")
+        if int(self.accel_max_consecutive_violations) < 1:
+            raise ValueError("accel_max_consecutive_violations must be >= 1")
+        if not np.isfinite(self.accel_hard_multiple) or self.accel_hard_multiple < 1.0:
+            raise ValueError("accel_hard_multiple must be >= 1.0")
+        if int(self.speed_max_consecutive_violations) < 1:
+            raise ValueError("speed_max_consecutive_violations must be >= 1")
+        if not np.isfinite(self.speed_hard_multiple) or self.speed_hard_multiple < 1.0:
+            raise ValueError("speed_hard_multiple must be >= 1.0")
 
     @classmethod
     def from_impedance_safety_config(cls, safety_cfg) -> "CartesianMoveLimits":
@@ -561,6 +608,10 @@ class CartesianMoveMonitor:
         self._gap = max(int(limits.accel_gap_cycles), 1)
         self._corrected_clock_s = 0.0
         self._pos_history: deque[tuple[np.ndarray, float]] = deque(maxlen=self._gap)
+        # DeadlineMonitor-style consecutive-violation counters -- see
+        # CartesianMoveLimits.accel_max_consecutive_violations' docstring.
+        self._speed_consecutive_violations = 0
+        self._accel_consecutive_violations = 0
 
     def set_start(self, tcp_pose, move_axis_index: int) -> None:
         if move_axis_index not in (0, 1, 2):
@@ -576,6 +627,8 @@ class CartesianMoveMonitor:
         self._corrected_clock_s = 0.0
         self._pos_history.clear()
         self._pos_history.append((pose[:3].copy(), 0.0))
+        self._speed_consecutive_violations = 0
+        self._accel_consecutive_violations = 0
 
     def check(
         self,
@@ -657,7 +710,19 @@ class CartesianMoveMonitor:
         # gap/filter treatment.
         speed_mps = step_m / real_dt_s
         if speed_mps > self.limits.max_tcp_speed_mps:
-            decision.add(f"TCP speed {speed_mps:.4f} m/s > {self.limits.max_tcp_speed_mps} m/s")
+            speed_hard_ceiling = self.limits.max_tcp_speed_mps * self.limits.speed_hard_multiple
+            if self.limits.speed_max_consecutive_violations <= 1 or speed_mps >= speed_hard_ceiling:
+                decision.add(f"TCP speed {speed_mps:.4f} m/s > {self.limits.max_tcp_speed_mps} m/s")
+                self._speed_consecutive_violations = 0
+            else:
+                self._speed_consecutive_violations += 1
+                if self._speed_consecutive_violations >= self.limits.speed_max_consecutive_violations:
+                    decision.add(
+                        f"TCP speed {speed_mps:.4f} m/s > {self.limits.max_tcp_speed_mps} m/s "
+                        f"for {self._speed_consecutive_violations} consecutive cycles"
+                    )
+        else:
+            self._speed_consecutive_violations = 0
 
         # Gap-windowed, optionally low-pass-filtered speed sample, used ONLY
         # to feed the acceleration estimate (see CartesianMoveLimits'
@@ -681,9 +746,21 @@ class CartesianMoveMonitor:
             if self._prev_speed_mps is not None:
                 accel_mps2 = abs(gap_speed_mps - self._prev_speed_mps) / real_dt_s
                 if accel_mps2 > self.limits.max_tcp_accel_mps2:
-                    decision.add(
-                        f"TCP acceleration {accel_mps2:.4f} m/s^2 > {self.limits.max_tcp_accel_mps2} m/s^2"
-                    )
+                    accel_hard_ceiling = self.limits.max_tcp_accel_mps2 * self.limits.accel_hard_multiple
+                    if self.limits.accel_max_consecutive_violations <= 1 or accel_mps2 >= accel_hard_ceiling:
+                        decision.add(
+                            f"TCP acceleration {accel_mps2:.4f} m/s^2 > {self.limits.max_tcp_accel_mps2} m/s^2"
+                        )
+                        self._accel_consecutive_violations = 0
+                    else:
+                        self._accel_consecutive_violations += 1
+                        if self._accel_consecutive_violations >= self.limits.accel_max_consecutive_violations:
+                            decision.add(
+                                f"TCP acceleration {accel_mps2:.4f} m/s^2 > {self.limits.max_tcp_accel_mps2} m/s^2 "
+                                f"for {self._accel_consecutive_violations} consecutive cycles"
+                            )
+                else:
+                    self._accel_consecutive_violations = 0
 
             self._prev_speed_mps = gap_speed_mps
 
