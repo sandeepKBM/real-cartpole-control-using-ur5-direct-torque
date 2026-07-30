@@ -97,6 +97,13 @@ def run_x_transport(
             motion_opt_in=motion_opt_in,
             skip_joint_move=skip_joint_move,
             joint_target_q=start_q_rad,
+            max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
+            accel_gap_cycles_override=accel_gap_cycles_override,
+            speed_lowpass_alpha_override=speed_lowpass_alpha_override,
+            accel_max_consecutive_violations_override=accel_max_consecutive_violations_override,
+            accel_hard_multiple_override=accel_hard_multiple_override,
+            speed_max_consecutive_violations_override=speed_max_consecutive_violations_override,
+            speed_hard_multiple_override=speed_hard_multiple_override,
         )
         return XTransportResult(
             ok=raw.ok,

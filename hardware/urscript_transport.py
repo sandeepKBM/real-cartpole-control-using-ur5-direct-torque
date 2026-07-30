@@ -6,7 +6,7 @@ import gc
 import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -116,6 +116,13 @@ def run_urscript_x_transport(
     skip_joint_move: bool = False,
     monitor_hz: float = 125.0,
     use_lambda: bool | None = None,
+    max_tcp_accel_mps2_override: float | None = None,
+    accel_gap_cycles_override: int | None = None,
+    speed_lowpass_alpha_override: float | None = None,
+    accel_max_consecutive_violations_override: int | None = None,
+    accel_hard_multiple_override: float | None = None,
+    speed_max_consecutive_violations_override: int | None = None,
+    speed_hard_multiple_override: float | None = None,
 ) -> UrscriptTransportResult:
     """Generate URScript, run it on PolyScope, supervise from Python at monitor_hz."""
     if not motion_opt_in:
@@ -195,6 +202,30 @@ def run_urscript_x_transport(
         # point for a check that already exists) and CartesianMoveLimits' own
         # conservative defaults for the genuinely new speed/accel/jump checks.
         move_limits = CartesianMoveLimits.from_impedance_safety_config(safety_cfg)
+        if max_tcp_accel_mps2_override is not None:
+            # See the identical override in hardware/direct_torque_transport.py
+            # for the full rationale (real-hardware noise-amplification
+            # finding, 2026-07-28).
+            move_limits = replace(move_limits, max_tcp_accel_mps2=float(max_tcp_accel_mps2_override))
+        accel_overrides: dict[str, float] = {}
+        if accel_gap_cycles_override is not None:
+            accel_overrides["accel_gap_cycles"] = int(accel_gap_cycles_override)
+        if speed_lowpass_alpha_override is not None:
+            accel_overrides["speed_lowpass_alpha"] = float(speed_lowpass_alpha_override)
+        # DeadlineMonitor-style graduated tolerance overrides -- see
+        # CartesianMoveLimits.accel_max_consecutive_violations' docstring and
+        # NOISE_ROBUST_GUARD_OVERRIDES in hardware/safety.py. Explicit opt-in
+        # only; default (None) leaves the class's own no-op defaults untouched.
+        if accel_max_consecutive_violations_override is not None:
+            accel_overrides["accel_max_consecutive_violations"] = int(accel_max_consecutive_violations_override)
+        if accel_hard_multiple_override is not None:
+            accel_overrides["accel_hard_multiple"] = float(accel_hard_multiple_override)
+        if speed_max_consecutive_violations_override is not None:
+            accel_overrides["speed_max_consecutive_violations"] = int(speed_max_consecutive_violations_override)
+        if speed_hard_multiple_override is not None:
+            accel_overrides["speed_hard_multiple"] = float(speed_hard_multiple_override)
+        if accel_overrides:
+            move_limits = replace(move_limits, **accel_overrides)
         move_monitor = CartesianMoveMonitor(move_limits)
         move_monitor.set_start(state0.tcp_pose, move_axis_index=0)
         target_tcp_pose = state0.tcp_pose.copy()

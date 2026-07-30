@@ -511,6 +511,53 @@ def test_urscript_supervisor_aborts_on_deadline_overrun(tmp_path: Path, monkeypa
     assert control._stop_requested is True
 
 
+@pytest.mark.hardware
+def test_urscript_move_limit_overrides_reach_cartesian_move_monitor(tmp_path: Path, monkeypatch):
+    """The 7 CartesianMoveLimits override kwargs were previously accepted by
+    position/direct_torque modes only; urscript mode silently dropped them
+    (never even in its signature). Spy on the CartesianMoveMonitor
+    constructed inside run_urscript_x_transport (via a monkeypatched
+    subclass that captures its `limits` arg before delegating to the real
+    class) and assert all 7 fields land on it unmodified."""
+    control = _UrControl()
+    receive = _UrReceive()
+    _patch_rtde(monkeypatch, control, receive)
+
+    captured: dict[str, CartesianMoveLimits] = {}
+    real_move_monitor_cls = CartesianMoveMonitor
+
+    class _SpyMoveMonitor(real_move_monitor_cls):
+        def __init__(self, limits, *args, **kwargs):
+            captured["limits"] = limits
+            super().__init__(limits, *args, **kwargs)
+
+    monkeypatch.setattr("hardware.urscript_transport.CartesianMoveMonitor", _SpyMoveMonitor)
+
+    run_urscript_x_transport(
+        robot_ip="127.0.0.1", config_path=DEFAULT_CONFIG,
+        target_x_delta_m=0.01, move_duration_s=0.05, duration_s=0.1,
+        output_dir=tmp_path, motion_opt_in=True, skip_joint_move=True,
+        monitor_hz=200.0,
+        max_tcp_accel_mps2_override=1.23,
+        accel_gap_cycles_override=7,
+        speed_lowpass_alpha_override=0.33,
+        accel_max_consecutive_violations_override=4,
+        accel_hard_multiple_override=6.5,
+        speed_max_consecutive_violations_override=5,
+        speed_hard_multiple_override=8.5,
+    )
+
+    assert "limits" in captured
+    limits = captured["limits"]
+    assert limits.max_tcp_accel_mps2 == 1.23
+    assert limits.accel_gap_cycles == 7
+    assert limits.speed_lowpass_alpha == 0.33
+    assert limits.accel_max_consecutive_violations == 4
+    assert limits.accel_hard_multiple == 6.5
+    assert limits.speed_max_consecutive_violations == 5
+    assert limits.speed_hard_multiple == 8.5
+
+
 # --------------------------------------------------------------------------- #
 # Integration: direct_torque_transport.run_x_transport_direct_torque
 # --------------------------------------------------------------------------- #

@@ -151,7 +151,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "position and direct_torque modes. Explicit, opt-in override of "
+            "All three control modes. Explicit, opt-in override of "
             "CartesianMoveLimits.max_tcp_accel_mps2 (class default 0.5 m/s^2). Added "
             "2026-07-28: on real hardware the naive one-step-finite-difference accel "
             "estimate amplifies raw RTDE position noise (~1/dt^2 -- ~15,600x at "
@@ -161,7 +161,7 @@ def parse_args() -> argparse.Namespace:
             "varying step 1 vs step 6, every other metric -- drift/orientation/qd -- "
             "negligible). Does not fix the underlying numerical issue; a deliberate, "
             "visible override for continuing real-hardware testing, not a silent "
-            "threshold change. Not wired into urscript mode yet."
+            "threshold change."
         ),
     )
     p.add_argument(
@@ -169,7 +169,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "position and direct_torque modes. Explicit override of "
+            "All three control modes. Explicit override of "
             "CartesianMoveLimits.accel_gap_cycles (class default 1 = original "
             "single-cycle behavior). Added 2026-07-28 after "
             "tools/analyze_state_noise_capture.py measured the accel estimate's own "
@@ -188,7 +188,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "position and direct_torque modes. Explicit override of "
+            "All three control modes. Explicit override of "
             "CartesianMoveLimits.speed_lowpass_alpha (class default 1.0 = no "
             "filtering). EMA smoothing factor in (0, 1] applied to the gap-windowed "
             "speed sample before differencing for the accel estimate -- smaller = "
@@ -200,7 +200,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "position and direct_torque modes. Explicit override of "
+            "All three control modes. Explicit override of "
             "CartesianMoveLimits.accel_max_consecutive_violations (class default 1 "
             "= original instant-trip behavior). Added 2026-07-30 (commit 8eccd1d) -- "
             "DeadlineMonitor-style graduated tolerance: this many consecutive "
@@ -218,7 +218,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "position and direct_torque modes. Explicit override of "
+            "All three control modes. Explicit override of "
             "CartesianMoveLimits.accel_hard_multiple (class default 5.0). A single "
             "cycle at or above max_tcp_accel_mps2 * this multiple trips immediately "
             "regardless of --accel-max-consecutive-violations, catching a genuine "
@@ -230,7 +230,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "position and direct_torque modes. Explicit override of "
+            "All three control modes. Explicit override of "
             "CartesianMoveLimits.speed_max_consecutive_violations (class default 1). "
             "Same graduated-tolerance mechanism as --accel-max-consecutive-violations, "
             "applied to the TCP speed check instead of acceleration."
@@ -241,7 +241,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "position and direct_torque modes. Explicit override of "
+            "All three control modes. Explicit override of "
             "CartesianMoveLimits.speed_hard_multiple (class default 5.0). Same "
             "immediate-trip safety valve as --accel-hard-multiple, applied to the "
             "TCP speed check."
@@ -251,7 +251,7 @@ def parse_args() -> argparse.Namespace:
         "--noise-robust-guards",
         action="store_true",
         help=(
-            "position and direct_torque modes. Convenience flag applying the full "
+            "All three control modes. Convenience flag applying the full "
             "validated 6-parameter combination found to actually close the "
             "real-hardware noise-driven-spurious-trip gap (2026-07-30 backtest, "
             "docs/status/safety_envelope_backtest_2026-07-30.md section 9, "

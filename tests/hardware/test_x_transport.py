@@ -248,3 +248,55 @@ def test_direct_torque_transport_connects_with_control_when_opted_in(monkeypatch
 
     assert len(fakes) == 1
     assert fakes[0].connect_calls == [True], "connect(with_control=True) must still fire when opted in"
+
+
+# --------------------------------------------------------------------------- #
+# run_x_transport(control_mode="urscript") -- CartesianMoveLimits override
+# dispatch. Real gap found 2026-07-30: run_urscript_x_transport's signature
+# had no *_override kwargs at all, so the position/direct_torque branches'
+# already-wired overrides were silently dropped for urscript mode. This
+# checks the dispatch layer only (the override actually reaching
+# CartesianMoveMonitor inside run_urscript_x_transport is covered by
+# tests/hardware/test_deadline_and_staleness.py::
+# test_urscript_move_limit_overrides_reach_cartesian_move_monitor).
+# --------------------------------------------------------------------------- #
+def test_run_x_transport_urscript_forwards_move_limit_overrides(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_run_urscript_x_transport(**kwargs):
+        captured.update(kwargs)
+        from hardware.urscript_transport import UrscriptTransportResult
+
+        return UrscriptTransportResult(
+            ok=True, reason="", summary={"success": True}, script_path=None
+        )
+
+    monkeypatch.setattr(
+        "hardware.x_transport.run_urscript_x_transport", _fake_run_urscript_x_transport
+    )
+
+    run_x_transport(
+        control_mode="urscript",
+        robot_ip="127.0.0.1",
+        config_path=Path("unused.yaml"),
+        target_x_delta_m=0.02,
+        move_duration_s=1.0,
+        duration_s=2.0,
+        output_dir=None,
+        motion_opt_in=True,
+        max_tcp_accel_mps2_override=1.23,
+        accel_gap_cycles_override=7,
+        speed_lowpass_alpha_override=0.33,
+        accel_max_consecutive_violations_override=4,
+        accel_hard_multiple_override=6.5,
+        speed_max_consecutive_violations_override=5,
+        speed_hard_multiple_override=8.5,
+    )
+
+    assert captured["max_tcp_accel_mps2_override"] == 1.23
+    assert captured["accel_gap_cycles_override"] == 7
+    assert captured["speed_lowpass_alpha_override"] == 0.33
+    assert captured["accel_max_consecutive_violations_override"] == 4
+    assert captured["accel_hard_multiple_override"] == 6.5
+    assert captured["speed_max_consecutive_violations_override"] == 5
+    assert captured["speed_hard_multiple_override"] == 8.5
