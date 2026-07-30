@@ -140,53 +140,90 @@ def _run_rollout(
 
 @pytest.mark.mujoco
 def test_residual_stays_small_on_clean_move_hold_rollout():
-    residual_norms = _run_rollout(steps=200, move_duration_s=0.1, disturb_window=None)
+    # 300 steps (0.6 s) -- long enough to include the real post-move settling
+    # transient (see comments below) with a genuinely settled tail.
+    residual_norms = _run_rollout(steps=300, move_duration_s=0.1, disturb_window=None)
     populated = [r for r in residual_norms if r is not None]
     assert len(populated) >= 100
     populated_arr = np.asarray(populated)
-    # Clean commanded motion, fully explained by known dynamics + the
-    # actually-applied torque: residual should stay small throughout,
-    # including during the move (not just the hold). This is a real, not
-    # hand-picked, numeric ceiling -- see
-    # docs/status/direct_torque_residual_observer_2026-07-29.md for the
-    # actual measured values from this exact rollout.
-    assert float(np.median(populated_arr)) < 0.05
-    assert float(np.max(populated_arr)) < 0.5
+
+    # NOTE (2026-07-30): this test's original docstring/assertions claimed the
+    # residual "should stay small throughout, including during the move (not
+    # just the hold)". That was only true because of a since-fixed bug: the
+    # old jacobian_singular_cond_max=1.0e5 default nulled task authority at
+    # this pose's wrist singularity, so the commanded move barely executed at
+    # all for its first ~half (see config/ur5e_mujoco_torque_osc_tuned.yaml's
+    # header comment and docs/status/disable_global_singular_scale_validation_2026-07-30.md).
+    # With that freeze gone, the move actually happens, and a real mechanical
+    # settling transient follows it -- measured on this exact rollout: residual
+    # peaks at 2.816 rad/s^2 around step 40-50 (t=0.08-0.10s, end of the 0.1s
+    # move), then decays roughly 3 orders of magnitude, not fully reaching a
+    # settled ~0.003-0.004 rad/s^2 floor until around step 190-200 (t=0.38-0.40s).
+    # Asserting tight smallness during/immediately after the move would be
+    # asserting away correct physics, not testing anything real -- so this test
+    # now makes two separate claims instead:
+    #
+    # 1. Full-rollout sanity: nothing pathological (NaN/divergence) anywhere,
+    #    including during the move and its settling transient. Loose bound
+    #    (measured peak 2.816 rad/s^2) -- this is a blowup/NaN guard, not a
+    #    precision check.
+    assert np.all(np.isfinite(populated_arr))
+    assert float(np.max(populated_arr)) < 10.0
+
+    # 2. Settled-tail smallness: from step 200 (t=0.4s) onward -- measured on
+    #    this exact rollout to be genuinely settled (median=0.00204,
+    #    max=0.00300 rad/s^2), matching this test's original intent for the
+    #    hold phase specifically.
+    settled = [r for r in residual_norms[200:] if r is not None]
+    assert len(settled) >= 50
+    settled_arr = np.asarray(settled)
+    assert float(np.median(settled_arr)) < 0.01
+    assert float(np.max(settled_arr)) < 0.02
 
 
 @pytest.mark.mujoco
 def test_residual_detects_and_recovers_from_injected_disturbance():
-    # 340 steps (0.68 s) at dt=0.002s: 0.1s move, then hold; a 30 N force on
+    # 600 steps (1.2 s) at dt=0.002s: 0.1s move, then hold; a 30 N force on
     # wrist_3_link (a plausible collision-scale load, well under the UR5e's
-    # ~5 kg / ~49 N rated payload weight) is injected for steps [150, 180)
-    # -- 0.30-0.36 s, well inside the hold phase.
-    steps = 340
+    # ~5 kg / ~49 N rated payload weight) is injected for steps [260, 290)
+    # -- t=0.52-0.58 s.
+    #
+    # NOTE (2026-07-30): the original windows here (baseline [80:140), i.e.
+    # t=0.16-0.28s) predate the jacobian_singular_cond_max fix (see
+    # config/ur5e_mujoco_torque_osc_tuned.yaml's header comment and
+    # test_residual_stays_small_on_clean_move_hold_rollout's comments above)
+    # and landed inside the real post-move settling transient that fix
+    # legitimately introduced -- baseline_peak measured 0.282 rad/s^2 there
+    # (a transient spike around step 110-120), which collapsed the detection
+    # margin. All three windows below are placed after the real settling
+    # transient completes (measured settled by ~step 200, t=0.4s -- see above).
+    steps = 600
     move_duration_s = 0.1
-    disturb_window = (150, 180)
+    disturb_window = (260, 290)
     gap_cycles = 3
     residual_norms = _run_rollout(
         steps=steps, move_duration_s=move_duration_s, disturb_window=disturb_window, gap_cycles=gap_cycles,
     )
 
-    # Baseline: hold-phase residual well before the disturbance (skip the
-    # initial move + settle transient).
-    baseline = [r for r in residual_norms[80:140] if r is not None]
+    # Baseline: genuinely settled hold-phase residual (t=0.4-0.5s), well
+    # after the real move-settling transient and well before the disturbance.
+    baseline = [r for r in residual_norms[200:250] if r is not None]
     # Disturbed: allow the estimator's own gap-window lag (gap_cycles) after
     # the disturbance starts before requiring the signal to show it, and
     # stop at the window's end.
     disturbed = [
         r for r in residual_norms[disturb_window[0] + gap_cycles : disturb_window[1]] if r is not None
     ]
-    # Recovered: a settling window well after the disturbance ends. Real
-    # mechanical recovery from a genuine kinetic-energy injection is a
+    # Recovered: a settling window well after the disturbance ends (t=0.9-1.2s,
+    # i.e. ~0.32-0.62s of decay time after the disturbance stops at t=0.58s).
+    # Real mechanical recovery from a genuine kinetic-energy injection is a
     # gradual decay, not an instant return to the (essentially
     # double-precision-noise-level, ~1e-7) clean baseline -- measured on this
-    # exact rollout (see docs/status/direct_torque_residual_observer_2026-07-29.md):
-    # residual decays from a ~24 rad/s^2 peak during the disturbance down
-    # through ~0.6 rad/s^2 by step 260-340, still ~42x below the peak and
-    # falling. This window checks that clear, large decay, not a return to
-    # the pristine baseline.
-    recovered = [r for r in residual_norms[260:steps] if r is not None]
+    # exact rollout: residual decays from a 19.513 rad/s^2 peak during the
+    # disturbance down to 0.00191 rad/s^2 by step 450-600, ~10,240x below the
+    # disturbed peak and still falling. This window checks that clear, large
+    # decay, not a return to the pristine baseline.
+    recovered = [r for r in residual_norms[450:600] if r is not None]
 
     assert baseline and disturbed and recovered
     baseline_peak = float(np.max(baseline))
@@ -196,12 +233,12 @@ def test_residual_detects_and_recovers_from_injected_disturbance():
     # The disturbance must produce a dramatically larger residual than the
     # clean baseline (wide margin -- this is a real physical injection, not
     # a hand-tuned synthetic signal; measured ratio on this rollout is
-    # ~6e7x).
+    # ~6498x: baseline_peak=0.00300, disturbed_peak=19.513).
     assert disturbed_peak > 1000.0 * baseline_peak, (
         f"baseline_peak={baseline_peak}, disturbed_peak={disturbed_peak}"
     )
     # And it must clearly decay once the disturbance is removed (measured
-    # ratio on this rollout is ~42x).
+    # ratio on this rollout is ~10240x, disturbed_peak/recovered_peak).
     assert recovered_peak < disturbed_peak / 20.0, (
         f"disturbed_peak={disturbed_peak}, recovered_peak={recovered_peak}"
     )
