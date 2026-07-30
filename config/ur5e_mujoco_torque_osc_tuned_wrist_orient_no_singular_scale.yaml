@@ -1,0 +1,109 @@
+# Singular_scale-disabled variant of config/ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml.
+# NEVER edit ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml itself -- this is a new,
+# additive named config per this project's "preserve old configs" rule.
+#
+# Change from ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml: ONLY
+# `controller.jacobian_singular_cond_max: 1.0e18` added (was unset, i.e. the class
+# default 1.0e5, singular_scale enabled). Nothing else differs -- same
+# wrist_orientation_task gains, same kp_rot_wrist/kd_rot_wrist, same base gains.
+#
+# Why: this is the exact same fix already promoted to config/ur5e_mujoco_torque_osc_tuned.yaml
+# (see that file's own header comment for the full mechanism). The wrist_orient config was
+# explicitly NOT touched when that promotion happened (flagged in the promoted config's
+# comment: "NOT YET applied to ... wrist_orient.yaml ... likely has the same freeze bug,
+# unvalidated as of this promotion") because it was independently tuned/validated with
+# singular_scale on and needed its own re-validation first, per this project's discipline of
+# not combining unrelated changes without separately validating each one.
+#
+# 2026-07-30 validation (docs/status/disable_singular_scale_wrist_orient_validation_2026-07-30.md):
+# freeze reproduced in this config too (tau_applied ~0 until t~0.69-0.74s of a 1.5s move,
+# same mechanism, same transport start pose). With this fix, tau_applied is non-zero from
+# near t=0 and the raw CartesianMoveMonitor peak TCP-accel estimate drops sharply, same
+# qualitative signature as the base config's fix. Full 4-category rigor sweep at
+# height_alpha in {0.1, 0.2, 0.3, 0.5} run against
+# config/ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml as the baseline -- see that doc for
+# exact pass/fail counts and the recommendation left for a human decision. This config was
+# NOT promoted to replace ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml as part of this
+# validation pass.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  # Canonical active-origin transport pose for residual-torque transport tuning.
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+    kp_rot_wrist: 0.0
+    kd_rot_wrist: 10.0
+  wrist_orientation_task: true
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
