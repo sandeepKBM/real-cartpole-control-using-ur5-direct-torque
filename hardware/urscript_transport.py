@@ -314,15 +314,27 @@ def run_urscript_x_transport(
                     return
                 # Overrun = supervisor work (read + all checks) past its period
                 # budget. A stalled supervisor read that still returns is the
-                # case this catches; the fixed sleep below never subtracts work,
-                # so this is the only place lateness is acted on.
-                overrun_ns = int(max(0.0, (time.monotonic() - cycle_start) - dt_monitor) * 1e9)
+                # case this catches.
+                cycle_elapsed_s = time.monotonic() - cycle_start
+                overrun_ns = int(max(0.0, cycle_elapsed_s - dt_monitor) * 1e9)
                 deadline_reason = deadline_monitor.record(overrun_ns)
                 if deadline_reason:
                     monitor_fault.append(deadline_reason)
                     _set_stop_register(control, stop_reg, 1)
                     return
-                time.sleep(max(0.0, dt_monitor - 0.001))
+                # 2026-07-30 fix: was a static `dt_monitor - 0.001` guess,
+                # independent of how long this cycle's real work actually
+                # took (see overrun_ns above, which already measures it) --
+                # matches position_transport.py's existing adaptive pattern
+                # instead. The static guess let real per-cycle work above
+                # ~1ms silently stretch the ACTUAL supervisor polling period
+                # past monitor_hz's nominal rate every single cycle, with no
+                # guard catching the drift itself (DeadlineMonitor only
+                # checks one cycle's own work-vs-budget, not the resulting
+                # polling-rate degradation from an uncorrected fixed sleep).
+                sleep_s = dt_monitor - cycle_elapsed_s
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
 
         # Same real-hardware GC finding as direct_torque_transport.py/
         # position_transport.py (2026-07-30): trace_rows grows every
