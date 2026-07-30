@@ -26,8 +26,13 @@ RTDE telemetry -- no synthetic/hand-built data used anywhere in this script) thr
       (see that module's `_scheduled_lambda_regularization`) -- same functional form,
       re-picked breakpoints (see CondJScaledCandidate docstring for why the breakpoints
       are NOT copied verbatim from that module).
+  (candidate C) a growth-RATE-aware threshold on |qd| (QdGrowthRateCandidate, added
+      2026-07-30 as a follow-up after candidates A and B): conditions on the recent
+      per-cycle multiplicative growth trend of |qd| over a short window, not its
+      instantaneous magnitude -- see that class's docstring for the full rationale
+      and docs/status/safety_envelope_backtest_2026-07-30.md SS8 for the results.
 
-Both candidates are implemented by mutating the SAME real `CartesianMoveMonitor.limits`
+All three candidates are implemented by mutating the SAME real `CartesianMoveMonitor.limits`
 object in place before each `check()` call -- `check()` reads `self.limits.max_tcp_*`
 fresh every call, so this drives genuinely novel threshold logic through the monitor's
 real, unmodified internal state machine (position history, EMA smoothing, gap windowing)
@@ -217,6 +222,101 @@ class CondJScaledCandidate:
 
 
 # ---------------------------------------------------------------------------
+# Candidate C: growth-rate-aware threshold (conditions on RATE OF CHANGE of a
+# risk quantity, not its static magnitude).
+# ---------------------------------------------------------------------------
+
+
+class QdGrowthRateCandidate:
+    """Shrinks max_tcp_accel_mps2 / max_tcp_speed_mps smoothly as recent |qd| shows
+    a SUSTAINED multiplicative growth trend over a short window -- not as a function
+    of |qd|'s (or cond(J)'s) instantaneous magnitude, which is exactly what made
+    Candidate B (cond_j_scaled) nuisance-trip at the real, intentionally-used
+    wrist_2=0 transport start pose: cond(J) is high there *always*, whether the run
+    is fine or diverging, so a magnitude-only threshold can't tell the two apart.
+
+    Risk metric: |qd| (joint-velocity Euclidean norm), not cond(J). Chosen
+    deliberately over d(cond(J))/dt for two reasons, both empirical, not just
+    theoretical preference: (1) it is exactly the quantity the real disqualifying
+    divergence (position_20260728_150847) is documented as growing in --
+    "wrist_1/wrist_3 joint velocities grow near-exponentially step over step (~0.31
+    -> ~0.55 -> ~0.84 rad/s, roughly 1.6-1.8x per 8ms step)"
+    (hardware_captures/2026-07-28_.../README.md item 4) -- so it is a direct,
+    leading indicator of the actual failure mode, not a proxy for it; (2) it needs
+    no Jacobian/pinocchio call, so it is available on every real telemetry cycle
+    (position mode's `getActualQd()`) at zero extra compute cost, unlike a
+    per-cycle cond(J) history which would need a full FK/Jacobian solve every
+    cycle just to form the derivative.
+
+    growth_rate() computes the geometric-mean per-cycle multiplicative growth
+    factor over the last `window` cycles: (|qd|_now / |qd|_(t-window)) ** (1/window)
+    - 1, with both endpoints floored at `qd_floor` (matches the real ~1e-4 rad/s
+    stationary noise floor measured in
+    hardware_captures/2026-07-28_.../stationary_noise_capture_154018_stats.json --
+    without a floor, a genuinely-static pose's own noise ratio (e.g. 2e-4/1e-4) can
+    read as "100% growth" and defeat the whole point of this candidate). A flat or
+    shrinking |qd| trend (growth_rate <= r_low) gets the full baseline ceiling --
+    this is what should let the real, static wrist_2=0 transport pose (Candidate
+    B's nuisance-trip case) through untouched. A sustained trend at or above r_high
+    (picked below the ~60-80% per-cycle growth documented in the one real
+    disqualifying case, so it still tightens before that growth reaches the
+    observed cycles) gets the floor ceiling; between the two, smooth linear
+    interpolation in growth-rate space (not log space -- growth_rate is already a
+    ratio-of-ratios quantity, unlike cond(J)'s raw magnitude, so a second log
+    transform isn't motivated by anything measured here).
+    """
+
+    name = "qd_growth_rate"
+
+    def __init__(
+        self,
+        *,
+        window: int = 3,
+        qd_floor: float = 5.0e-3,
+        r_low: float = 0.05,
+        r_high: float = 0.5,
+        floor_fraction: float = 0.2,
+    ) -> None:
+        self.window = int(window)
+        self.qd_floor = float(qd_floor)
+        self.r_low = float(r_low)
+        self.r_high = float(r_high)
+        self.floor_fraction = float(floor_fraction)
+        self._qd_hist: list[float] = []
+
+    def reset(self) -> None:
+        self._qd_hist = []
+
+    def growth_rate(self, qd_norm: float) -> float:
+        """Feeds one new |qd| sample in and returns the current growth-rate
+        estimate. Returns 0.0 (treated as "no growth yet", i.e. full ceiling)
+        until `window` samples of history have accumulated -- a fresh run/pose
+        should not start out artificially tightened before there's any trend to
+        measure."""
+        self._qd_hist.append(float(qd_norm))
+        if len(self._qd_hist) <= self.window:
+            return 0.0
+        del self._qd_hist[: -(self.window + 1)]
+        oldest = max(self._qd_hist[0], self.qd_floor)
+        newest = max(self._qd_hist[-1], self.qd_floor)
+        n = len(self._qd_hist) - 1
+        return float((newest / oldest) ** (1.0 / n) - 1.0)
+
+    def scale(self, growth_rate: float) -> float:
+        r = max(float(growth_rate), 0.0)
+        r_low = max(self.r_low, 0.0)
+        r_high = max(self.r_high, r_low + 1e-9)
+        frac = float(np.clip((r - r_low) / (r_high - r_low), 0.0, 1.0))
+        return 1.0 - frac * (1.0 - self.floor_fraction)
+
+    def thresholds(self, *, qd: np.ndarray, base_accel: float, base_speed: float) -> tuple[float, float, float]:
+        qd_norm = float(np.linalg.norm(np.asarray(qd, dtype=np.float64)))
+        r = self.growth_rate(qd_norm)
+        s = self.scale(r)
+        return base_accel * s, base_speed * s, r
+
+
+# ---------------------------------------------------------------------------
 # Replay engine
 # ---------------------------------------------------------------------------
 
@@ -321,7 +421,8 @@ def replay_baseline(run: RunData, rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def replay_candidate(
-    run: RunData, rows: list[dict[str, Any]], candidate: MoveTimingCbfCandidate | CondJScaledCandidate,
+    run: RunData, rows: list[dict[str, Any]],
+    candidate: MoveTimingCbfCandidate | CondJScaledCandidate | QdGrowthRateCandidate,
     dynamics: PinocchioUR5eDynamics,
 ) -> dict[str, Any]:
     limits = CartesianMoveLimits(
@@ -331,7 +432,13 @@ def replay_candidate(
     monitor = CartesianMoveMonitor(limits)
     row0_pose = np.asarray(rows[0]["tcp_pose"], dtype=np.float64)
     monitor.set_start(row0_pose, move_axis_index=0)
+    if hasattr(candidate, "reset"):
+        # Stateful candidates (e.g. QdGrowthRateCandidate's short-window history)
+        # must start fresh for every independent replay of a run -- the same
+        # instance is reused across runs/final-cycle re-replays in main().
+        candidate.reset()
     cond_trace: list[float] = []
+    risk_trace: list[float] = []
     for i, row in enumerate(rows[1:], start=1):
         t_s = float(row["time_s"])
         if isinstance(candidate, MoveTimingCbfCandidate):
@@ -339,11 +446,16 @@ def replay_candidate(
                 t_s=t_s, move_duration_s=run.move_duration_s,
                 base_accel=run.base_accel, base_speed=run.base_speed,
             )
-        else:
+        elif isinstance(candidate, CondJScaledCandidate):
             accel_thr, speed_thr, cond = candidate.thresholds(
                 q=np.asarray(row["q"], dtype=np.float64), base_accel=run.base_accel, base_speed=run.base_speed,
             )
             cond_trace.append(cond)
+        else:
+            accel_thr, speed_thr, growth_rate = candidate.thresholds(
+                qd=np.asarray(row["qd"], dtype=np.float64), base_accel=run.base_accel, base_speed=run.base_speed,
+            )
+            risk_trace.append(growth_rate)
         monitor.limits.max_tcp_accel_mps2 = accel_thr
         monitor.limits.max_tcp_speed_mps = speed_thr
         decision = monitor.check(
@@ -357,10 +469,12 @@ def replay_candidate(
             return {
                 "tripped": True, "cycle": i, "time_s": t_s, "reason": decision.reason,
                 "max_cond_seen": max(cond_trace) if cond_trace else None,
+                "max_growth_rate_seen": max(risk_trace) if risk_trace else None,
             }
     return {
         "tripped": False, "cycle": None, "time_s": None, "reason": None,
         "max_cond_seen": max(cond_trace) if cond_trace else None,
+        "max_growth_rate_seen": max(risk_trace) if risk_trace else None,
     }
 
 
@@ -419,6 +533,7 @@ def main() -> None:
     dynamics = PinocchioUR5eDynamics()
     cbf = MoveTimingCbfCandidate()
     condj = CondJScaledCandidate(dynamics)
+    qdgrowth = QdGrowthRateCandidate()
 
     print(f"Loaded {len(RUN_DIRS)} real hardware runs from {HARDWARE_TRANSPORT_ROOT}\n")
 
@@ -436,6 +551,7 @@ def main() -> None:
         base_result = replay_baseline(run, rows)
         cbf_result = replay_candidate(run, rows, cbf, dynamics)
         condj_result = replay_candidate(run, rows, condj, dynamics)
+        qdgrowth_result = replay_candidate(run, rows, qdgrowth, dynamics)
 
         # Self-check: every logged row passed baseline in production; if this replay's
         # baseline disagrees, that's a harness bug, not a finding -- surface loudly.
@@ -459,7 +575,9 @@ def main() -> None:
             fb = replay_baseline(run, all_rows)
             final_baseline_recomputed = fb
 
-            for cand_name, cand in (("cbf_move_timing", cbf), ("cond_j_scaled", condj)):
+            for cand_name, cand in (
+                ("cbf_move_timing", cbf), ("cond_j_scaled", condj), ("qd_growth_rate", qdgrowth),
+            ):
                 fc = replay_candidate(run, all_rows, cand, dynamics)
                 final_candidates[cand_name] = fc
 
@@ -476,6 +594,7 @@ def main() -> None:
             "baseline_logged": base_result,
             "cbf_logged": cbf_result,
             "condj_logged": condj_result,
+            "qdgrowth_logged": qdgrowth_result,
             "final_row": final_row,
             "final_baseline": final_baseline_recomputed,
             "final_candidates": final_candidates,
@@ -484,33 +603,39 @@ def main() -> None:
     # ---- Report ----
     n_applicable = 0
     n_cbf_avoided = 0
-    n_cbf_missed = 0
     n_condj_avoided = 0
-    n_condj_missed = 0
+    n_qdgrowth_avoided = 0
     n_self_check_fail = 0
 
     print(f"{'run':45s} {'mode':13s} {'trip@steps':10s} {'kind':7s} {'observed':>9s} {'thr':>6s}  "
-          f"{'cbf_final':10s} {'condj_final':12s} {'cond(J)':>10s}  self_check")
-    print("-" * 160)
+          f"{'cbf_final':10s} {'condj_final':12s} {'qdgrowth_final':14s} {'cond(J)':>10s} {'growth_r':>9s}  self_check")
+    print("-" * 190)
     for r in results:
         if not r["self_check"].startswith("OK"):
             n_self_check_fail += 1
         trip = r["trip"]
         cbf_final_status = "n/a"
         condj_final_status = "n/a"
+        qdgrowth_final_status = "n/a"
         cond_val = "n/a"
+        growth_val = "n/a"
         if trip is not None and r["final_row"] is not None:
             n_applicable += 1
             fb = r["final_baseline"]
             cbf_fc = r["final_candidates"]["cbf_move_timing"]
             condj_fc = r["final_candidates"]["cond_j_scaled"]
+            qdgrowth_fc = r["final_candidates"]["qd_growth_rate"]
             cbf_final_status = "TRIPS" if cbf_fc["tripped"] else "AVOIDED"
             condj_final_status = "TRIPS" if condj_fc["tripped"] else "AVOIDED"
+            qdgrowth_final_status = "TRIPS" if qdgrowth_fc["tripped"] else "AVOIDED"
             cond_val = f"{condj_fc.get('max_cond_seen') or 0.0:.3e}"
+            growth_val = f"{qdgrowth_fc.get('max_growth_rate_seen') or 0.0:.3f}"
             if not cbf_fc["tripped"]:
                 n_cbf_avoided += 1
             if not condj_fc["tripped"]:
                 n_condj_avoided += 1
+            if not qdgrowth_fc["tripped"]:
+                n_qdgrowth_avoided += 1
             # "missed" defined relative to whether baseline's own recomputation on the
             # reconstructed final cycle also trips (cross-check vs. the real documented
             # trip) -- if baseline-recomputed trips but a candidate doesn't, and the
@@ -520,7 +645,8 @@ def main() -> None:
         threshold_str = f"{trip['threshold']:.3f}" if trip else "n/a"
         print(f"{r['run']:45s} {r['mode']:13s} {r['steps']:<10d} "
               f"{kind_str:7s} {observed_str:>9s} {threshold_str:>6s}  "
-              f"{cbf_final_status:10s} {condj_final_status:12s} {cond_val:>10s}  {r['self_check']}")
+              f"{cbf_final_status:10s} {condj_final_status:12s} {qdgrowth_final_status:14s} "
+              f"{cond_val:>10s} {growth_val:>9s}  {r['self_check']}")
 
     print("\n" + "=" * 100)
     print("KNOWN-GENUINE CATCH CHECK: position_20260728_150847 (real wrist_2=0 singularity")
@@ -531,27 +657,51 @@ def main() -> None:
     if singularity is not None:
         cbf_fc = singularity["final_candidates"]["cbf_move_timing"]
         condj_fc = singularity["final_candidates"]["cond_j_scaled"]
+        qdgrowth_fc = singularity["final_candidates"]["qd_growth_rate"]
         print(f"  baseline: TRIPS ({singularity['termination_reason']})")
         print(f"  cbf_move_timing final cycle: {'TRIPS' if cbf_fc['tripped'] else 'AVOIDED -- DISQUALIFYING MISS'}")
         print(f"  cond_j_scaled final cycle:   {'TRIPS' if condj_fc['tripped'] else 'AVOIDED -- DISQUALIFYING MISS'} "
               f"(cond(J) seen up to {condj_fc.get('max_cond_seen'):.3e})")
+        print(f"  qd_growth_rate final cycle:  {'TRIPS' if qdgrowth_fc['tripped'] else 'AVOIDED -- DISQUALIFYING MISS'} "
+              f"(growth rate seen up to {qdgrowth_fc.get('max_growth_rate_seen'):.3f} per cycle)")
         # Also check every logged row (0..steps-1) for early misses in this run --
         # the divergence was real and growing well before the final cycle.
         print(f"  logged-row replay -- baseline: {singularity['baseline_logged']}")
         print(f"  logged-row replay -- cbf:      {singularity['cbf_logged']}")
         print(f"  logged-row replay -- condj:    {singularity['condj_logged']}")
+        print(f"  logged-row replay -- qdgrowth: {singularity['qdgrowth_logged']}")
     else:
         print("  RUN NOT FOUND -- cannot verify.")
+
+    print("\n" + "=" * 100)
+    print("CANDIDATE B NUISANCE-TRIP CHECK, RE-RUN AGAINST CANDIDATE C: does qd_growth_rate")
+    print("also nuisance-trip on the real, benign position-mode runs at the wrist_2=0 pose")
+    print("that Candidate B (cond_j_scaled) tripped on purely from static cond(J), even")
+    print("though real qd/drift/orientation stayed bounded there? Checked directly against")
+    print("real logged telemetry, not reasoned about.")
+    for name in ("position_20260728_145539", "position_20260728_150316"):
+        rr = next((r for r in results if r["run"] == name), None)
+        if rr is None:
+            print(f"  {name}: RUN NOT FOUND")
+            continue
+        condj_l = rr["condj_logged"]
+        qdgrowth_l = rr["qdgrowth_logged"]
+        print(f"  {name} (real trip: {rr['termination_reason']}):")
+        print(f"    condj_logged (Candidate B):    tripped={condj_l['tripped']} "
+              f"cycle={condj_l['cycle']} reason={condj_l['reason']}")
+        print(f"    qdgrowth_logged (Candidate C): tripped={qdgrowth_l['tripped']} "
+              f"cycle={qdgrowth_l['cycle']} reason={qdgrowth_l['reason']}")
 
     print("\n" + "=" * 100)
     print("SUMMARY")
     print(f"  Real hardware trip runs replayed: {len(results)}")
     print(f"  Self-check failures (harness disagrees with real recorded pass history): {n_self_check_fail}")
     print(f"  Runs with an accel/speed CartesianMoveMonitor trip (candidates applicable): {n_applicable}")
-    print(f"  candidate A (cbf_move_timing):  avoided/graduated {n_cbf_avoided}/{n_applicable} real final trips")
-    print(f"  candidate B (cond_j_scaled):    avoided/graduated {n_condj_avoided}/{n_applicable} real final trips")
+    print(f"  candidate A (cbf_move_timing):   avoided/graduated {n_cbf_avoided}/{n_applicable} real final trips")
+    print(f"  candidate B (cond_j_scaled):     avoided/graduated {n_condj_avoided}/{n_applicable} real final trips")
+    print(f"  candidate C (qd_growth_rate):    avoided/graduated {n_qdgrowth_avoided}/{n_applicable} real final trips")
     print(f"  Non-applicable runs (e.g. deadline_overrun -- not a CartesianMoveMonitor")
-    print(f"  accel/speed check, out of scope for these two candidates): {len(results) - n_applicable}")
+    print(f"  accel/speed check, out of scope for these candidates): {len(results) - n_applicable}")
 
     out_path = REPO_ROOT / "experiments" / "safety_envelope_backtest_results.json"
     out_path.write_text(json.dumps(results, indent=2, default=str))

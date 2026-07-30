@@ -24,14 +24,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "final_row": {
       "time_s": 0.002,
@@ -79,14 +89,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 47.28817166270318
+        "max_cond_seen": 47.28817166270318,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.0
       }
     }
   },
@@ -115,14 +135,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "final_row": {
       "time_s": 0.002,
@@ -170,14 +200,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 47.286039281773455
+        "max_cond_seen": 47.286039281773455,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.0
       }
     }
   },
@@ -206,14 +246,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "final_row": {
       "time_s": 0.002,
@@ -261,14 +311,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 47.2869016350347
+        "max_cond_seen": 47.2869016350347,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.0
       }
     }
   },
@@ -297,14 +357,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "final_row": {
       "time_s": 0.002,
@@ -352,14 +422,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 47.28575325387805
+        "max_cond_seen": 47.28575325387805,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.0
       }
     }
   },
@@ -388,14 +468,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "final_row": {
       "time_s": 0.002,
@@ -443,14 +533,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 47.289637975466526
+        "max_cond_seen": 47.289637975466526,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.0
       }
     }
   },
@@ -479,14 +579,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": 109.67836835950146
+      "max_cond_seen": 109.67836835950146,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 0.0
     },
     "final_row": {
       "time_s": 0.01,
@@ -534,14 +644,24 @@
         "cycle": 5,
         "time_s": 0.01,
         "reason": "TCP acceleration 1.0014 m/s^2 > 0.8 m/s^2",
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": true,
         "cycle": 5,
         "time_s": 0.01,
         "reason": "TCP acceleration 1.0014 m/s^2 > 0.8 m/s^2",
-        "max_cond_seen": 109.67836835950146
+        "max_cond_seen": 109.67836835950146,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": true,
+        "cycle": 5,
+        "time_s": 0.01,
+        "reason": "TCP acceleration 1.0014 m/s^2 > 0.8 m/s^2",
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.0
       }
     }
   },
@@ -570,14 +690,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "final_row": {
       "time_s": 0.002,
@@ -625,14 +755,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 109.6758479304073
+        "max_cond_seen": 109.6758479304073,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.0
       }
     }
   },
@@ -661,14 +801,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": 124.77792987392763
+      "max_cond_seen": 124.77792987392763,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 0.10763347164099124
     },
     "final_row": {
       "time_s": 0.7560000000000006,
@@ -716,14 +866,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 125.16309370831101
+        "max_cond_seen": 125.16309370831101,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.10763347164099124
       }
     }
   },
@@ -752,14 +912,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": 141.77544444800415
+      "max_cond_seen": 141.77544444800415,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 0.16771565861884263
     },
     "final_row": {
       "time_s": 1.392000000000001,
@@ -807,14 +977,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 142.199611942785
+        "max_cond_seen": 142.199611942785,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.16771565861884263
       }
     }
   },
@@ -843,14 +1023,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": 141.19996507841512
+      "max_cond_seen": 141.19996507841512,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 0.21545110441690052
     },
     "final_row": {
       "time_s": 2.4139999999999557,
@@ -898,14 +1088,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 141.48013483080297
+        "max_cond_seen": 141.48013483080297,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.21545110441690052
       }
     }
   },
@@ -934,14 +1134,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": 127.9695665916326
+      "max_cond_seen": 127.9695665916326,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 0.16761100709062005
     },
     "final_row": {
       "time_s": 1.484000000000001,
@@ -989,14 +1199,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 128.17185384069117
+        "max_cond_seen": 128.17185384069117,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.16761100709062005
       }
     }
   },
@@ -1025,14 +1245,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": 110.36808212780006
+      "max_cond_seen": 110.36808212780006,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 0.19188219064161527
     },
     "final_row": {
       "time_s": 1.272000000000001,
@@ -1080,14 +1310,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 110.36808212780006
+        "max_cond_seen": 110.36808212780006,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.19188219064161527
       }
     }
   },
@@ -1116,14 +1356,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": 134.66799529539287
+      "max_cond_seen": 134.66799529539287,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 0.15703329667307564
     },
     "final_row": {
       "time_s": 1.5620000000000012,
@@ -1171,14 +1421,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 134.9634199711643
+        "max_cond_seen": 134.9634199711643,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.15703329667307564
       }
     }
   },
@@ -1207,14 +1467,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": 110.40866480093064
+      "max_cond_seen": 110.40866480093064,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 0.16101246258768231
     },
     "final_row": {
       "time_s": 1.392000000000001,
@@ -1262,14 +1532,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 110.40866480093064
+        "max_cond_seen": 110.40866480093064,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.16101246258768231
       }
     }
   },
@@ -1298,14 +1578,24 @@
       "cycle": 773,
       "time_s": 1.5460000000000012,
       "reason": "TCP speed 0.0505 m/s > 0.05 m/s",
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": true,
       "cycle": 773,
       "time_s": 1.5460000000000012,
       "reason": "TCP speed 0.0505 m/s > 0.05 m/s",
-      "max_cond_seen": 134.5612039449985
+      "max_cond_seen": 134.5612039449985,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": true,
+      "cycle": 773,
+      "time_s": 1.5460000000000012,
+      "reason": "TCP speed 0.0505 m/s > 0.05 m/s",
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 0.0869798759457463
     },
     "final_row": null,
     "final_baseline": null,
@@ -1332,14 +1622,24 @@
       "cycle": 964,
       "time_s": 1.9280000000000015,
       "reason": "TCP speed 0.0502 m/s > 0.05 m/s",
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": true,
       "cycle": 964,
       "time_s": 1.9280000000000015,
       "reason": "TCP speed 0.0502 m/s > 0.05 m/s",
-      "max_cond_seen": 110.45814611922937
+      "max_cond_seen": 110.45814611922937,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": true,
+      "cycle": 964,
+      "time_s": 1.9280000000000015,
+      "reason": "TCP speed 0.0502 m/s > 0.05 m/s",
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 0.18741973862342665
     },
     "final_row": null,
     "final_baseline": null,
@@ -1370,14 +1670,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "final_row": {
       "time_s": 0.008,
@@ -1425,14 +1735,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 230781.99376097968
+        "max_cond_seen": 230781.99376097968,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.0
       }
     }
   },
@@ -1461,14 +1781,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": true,
       "cycle": 2,
       "time_s": 0.016,
       "reason": "TCP acceleration 0.3770 m/s^2 > 0.09999999999999998 m/s^2",
-      "max_cond_seen": 5881784.7027456025
+      "max_cond_seen": 5881784.7027456025,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 0.6617848086137934
     },
     "final_row": {
       "time_s": 0.048,
@@ -1516,14 +1846,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": true,
         "cycle": 2,
         "time_s": 0.016,
         "reason": "TCP acceleration 0.3770 m/s^2 > 0.09999999999999998 m/s^2",
-        "max_cond_seen": 5881784.7027456025
+        "max_cond_seen": 5881784.7027456025,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": true,
+        "cycle": 6,
+        "time_s": 0.048,
+        "reason": "TCP acceleration 0.1064 m/s^2 > 0.09999999999999998 m/s^2",
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.6617848086137934
       }
     }
   },
@@ -1552,14 +1892,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": true,
       "cycle": 2,
       "time_s": 0.016,
       "reason": "TCP acceleration 0.2815 m/s^2 > 0.09999999999999998 m/s^2",
-      "max_cond_seen": 5881346.016222468
+      "max_cond_seen": 5881346.016222468,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": true,
+      "cycle": 9,
+      "time_s": 0.07200000000000001,
+      "reason": "TCP acceleration 0.1381 m/s^2 > 0.09999999999999998 m/s^2",
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 0.9001972481454446
     },
     "final_row": {
       "time_s": 0.10400000000000004,
@@ -1607,14 +1957,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": true,
         "cycle": 2,
         "time_s": 0.016,
         "reason": "TCP acceleration 0.2815 m/s^2 > 0.09999999999999998 m/s^2",
-        "max_cond_seen": 5881346.016222468
+        "max_cond_seen": 5881346.016222468,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": true,
+        "cycle": 9,
+        "time_s": 0.07200000000000001,
+        "reason": "TCP acceleration 0.1381 m/s^2 > 0.09999999999999998 m/s^2",
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.9001972481454446
       }
     }
   },
@@ -1643,14 +2003,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": false,
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": 997169.5686594442
+      "max_cond_seen": 997169.5686594442,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 0.7799664831615158
     },
     "final_row": {
       "time_s": 0.056,
@@ -1698,14 +2068,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": false,
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": 997169.5686594442
+        "max_cond_seen": 997169.5686594442,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 0.7799664831615158
       }
     }
   },
@@ -1734,14 +2114,24 @@
       "cycle": null,
       "time_s": null,
       "reason": null,
-      "max_cond_seen": null
+      "max_cond_seen": null,
+      "max_growth_rate_seen": null
     },
     "condj_logged": {
       "tripped": true,
       "cycle": 2,
       "time_s": 0.016,
       "reason": "TCP acceleration 0.5183 m/s^2 > 0.23999999999999994 m/s^2",
-      "max_cond_seen": 577617.7751281587
+      "max_cond_seen": 577617.7751281587,
+      "max_growth_rate_seen": null
+    },
+    "qdgrowth_logged": {
+      "tripped": true,
+      "cycle": 6,
+      "time_s": 0.048,
+      "reason": "TCP acceleration 0.7903 m/s^2 > 0.23999999999999994 m/s^2",
+      "max_cond_seen": null,
+      "max_growth_rate_seen": 3.442080574293964
     },
     "final_row": {
       "time_s": 0.07200000000000001,
@@ -1789,14 +2179,24 @@
         "cycle": null,
         "time_s": null,
         "reason": null,
-        "max_cond_seen": null
+        "max_cond_seen": null,
+        "max_growth_rate_seen": null
       },
       "cond_j_scaled": {
         "tripped": true,
         "cycle": 2,
         "time_s": 0.016,
         "reason": "TCP acceleration 0.5183 m/s^2 > 0.23999999999999994 m/s^2",
-        "max_cond_seen": 577617.7751281587
+        "max_cond_seen": 577617.7751281587,
+        "max_growth_rate_seen": null
+      },
+      "qd_growth_rate": {
+        "tripped": true,
+        "cycle": 6,
+        "time_s": 0.048,
+        "reason": "TCP acceleration 0.7903 m/s^2 > 0.23999999999999994 m/s^2",
+        "max_cond_seen": null,
+        "max_growth_rate_seen": 3.442080574293964
       }
     }
   }

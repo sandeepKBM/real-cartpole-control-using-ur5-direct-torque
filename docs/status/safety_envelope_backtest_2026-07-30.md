@@ -155,7 +155,7 @@ pose without a near-immediate trip -- a concrete instance of the *other* half of
 counter-argument's worry: not a "hole" looser than either endpoint, but a wall tighter than
 either endpoint at a real, legitimate, frequently-visited operating point.
 
-## 6. Verdict
+## 6. Verdict (Candidates A/B; superseded in part by SS8 below -- see there for Candidate C)
 
 **Mixed, and net negative for both concrete designs tested -- do not build either as
 specified.** The falsifiable test the proposal accepted in advance was: zero misses on
@@ -203,3 +203,88 @@ deliberate decision rather than a silent patch:
   this analysis as inconclusive rather than forced through. Worth a closer look with the
   actual CLI invocation history if it's recoverable from session logs, but not blocking for
   this verdict.
+
+## 8. Follow-up (same day): Candidate C -- growth-rate-aware threshold
+
+SS6's recommended next step was tested directly: a candidate that conditions on the RATE OF
+CHANGE of a risk quantity, not its instantaneous magnitude, to see whether that specifically
+fixes Candidate B's over-tight-at-a-static-singular-pose failure mode (SS5) without
+reintroducing Candidate A's disqualifying miss (SS3). Implemented as `QdGrowthRateCandidate`
+in the same `experiments/safety_envelope_backtest.py`, same real 21-run dataset, same
+disqualifying-check discipline, extended rather than rewritten.
+
+**Design.** Risk metric: `|qd|` (joint-velocity Euclidean norm) -- not `cond(J)`. Chosen over
+`d(cond(J))/dt` for two concrete, empirical reasons: (1) `|qd|` is *exactly* the quantity
+documented as growing in the one real disqualifying case -- "wrist_1/wrist_3 joint
+velocities grow near-exponentially step over step (~0.31 -> ~0.55 -> ~0.84 rad/s, roughly
+1.6-1.8x per 8ms step)" (`hardware_captures/2026-07-28_.../README.md` item 4) -- so it is a
+direct leading indicator of the real failure mode, not a proxy for one; (2) it needs no
+Jacobian/pinocchio call, so it's available on every real cycle (`getActualQd()`) at zero
+extra compute, unlike a per-cycle `cond(J)` history. `growth_rate()` computes the
+geometric-mean per-cycle multiplicative growth factor over a 3-cycle window, both endpoints
+floored at 5e-3 rad/s (well above the real ~1e-4 rad/s stationary noise floor measured in
+`stationary_noise_capture_154018_stats.json`, so flat noise never reads as "growth"). Flat or
+shrinking `|qd|` (growth_rate <= 0.05/cycle) gets the full baseline ceiling; sustained growth
+at or above 0.5/cycle (picked below the ~0.6-0.8/cycle documented in the real disqualifying
+case, so it tightens before matching that growth) gets the 20% floor; linear interpolation
+in growth-rate space between the two.
+
+**Disqualifying check, run first, same as before.** `position_20260728_150847`: baseline
+TRIPS; **Candidate C also TRIPS** on the reconstructed final cycle (growth rate measured up
+to 3.442/cycle -- far past `r_high`). **No disqualifying miss.** Candidate C also trips
+*within the logged rows* at cycle 6 (t=0.048s) of this run -- i.e. it independently
+red-flags the real divergence before the run even reaches its undocumented final cycle,
+using only the growth trend, not a lucky static threshold.
+
+**Does it fix Candidate B's specific failure mode?** Checked directly against real logged
+telemetry for the two runs that exposed it:
+
+| Run | Real trip | Candidate B (`cond_j_scaled`) on logged rows | Candidate C (`qd_growth_rate`) on logged rows |
+|---|---|---|---|
+| `position_20260728_145539` (README: confirmed benign, `qd_max`=0.018 rad/s, drift/orientation negligible) | `TCP acceleration 0.9042 > 0.5` | **nuisance-trips at cycle 2** (`0.3770 > 0.10`) | **never trips** -- correctly rides through on the growth-rate metric |
+| `position_20260728_150316` (no README writeup; `qd_max`=0.082 rad/s, higher than the confirmed-benign case, well below the confirmed-divergent 0.84 rad/s -- genuinely ambiguous) | `TCP acceleration 1.0749 > 0.5` | trips at cycle 2 (`0.2815 > 0.10`) | trips at cycle 9 (`0.1381 > 0.10`) |
+
+On the one run with unambiguous ground truth (`145539`, independently documented as benign
+before this backtest existed), **Candidate C correctly does not nuisance-trip where
+Candidate B does** -- direct evidence the growth-rate reformulation targets the intended
+failure mode, not just a retuned constant. On the one ambiguous run (`150316`, no prior
+documentation either way), both candidates still trip; Candidate C's trip is later (cycle 9
+vs. cycle 2) and, unlike Candidate B's, is driven by an actual measured trend rather than a
+pose-static value -- consistent with genuine caution on a case this doc cannot itself
+classify as safe.
+
+**Aggregate numbers (19 applicable runs, same set as SS4):**
+
+| Candidate | Real trips avoided/graduated | Disqualifying misses |
+|---|---|---|
+| A: cbf_move_timing | 18 / 19 | 1 -- DISQUALIFIED |
+| B: cond_j_scaled | 15 / 19 | 0 |
+| C: qd_growth_rate | 15 / 19 | 0 |
+
+Candidate C ties Candidate B's raw count -- it does not "win" on the aggregate number, and
+this doc is not claiming it does. The improvement is qualitative, not quantitative: on the
+7 single-cycle noise-artifact runs (SS4) both C and B (and A) already agreed and avoided all
+7 -- that subset was never the interesting one. On the 12 real-motion runs, C's behavior is
+now *causally tied* to the real risk signal (it rode through the one case independently
+confirmed safe, and still caught the one case confirmed dangerous, using the same
+underlying mechanism), where B's was coincidental (B tripped at cycle 2 in literally every
+position-mode run regardless of outcome, because it only ever looks at the static pose).
+That is the property SS6 asked the next design to have, and it is the property measured
+here, directly, against real telemetry -- not inferred.
+
+**Updated verdict.** Candidate A remains disqualified (SS3, unchanged). Candidate B remains
+not recommended as specified (SS5, unchanged). **Candidate C clears the disqualifying bar,
+does not reproduce Candidate B's over-tight-at-a-static-pose failure mode on the one case
+with clear ground truth, and is the first of the three designs tested whose per-run
+behavior is defensible on a mechanistic basis rather than by threshold-tuning luck.** This
+is still a single day's backtest against 21 runs from one real session, all at one specific
+transport pose family -- not a green light to wire this into `hardware/safety.py` untested
+on hardware. Recommended before any live-motion use: (1) validate against a second, distinct
+real-hardware capture session (different pose, different day) to check the 3-cycle window
+and 0.05/0.5 growth-rate breakpoints generalize rather than being fit to this one night's
+data; (2) resolve `position_20260728_150316`'s ambiguity with real ground truth (was it
+actually fine, or an early/slower version of the same divergence?) rather than leaving both
+candidates' agreement on it uninterpreted; (3) get a considered answer on the
+`|qd|`-vs-`d(cond(J))/dt` design choice from someone who can reason about the wrist-
+singularity dynamics directly, since this doc picked `|qd|` for practical/empirical reasons,
+not because the alternative was tested and lost.
