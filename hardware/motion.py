@@ -19,6 +19,7 @@ the reasoning behind keeping this one position-only.)
 
 from __future__ import annotations
 
+import gc
 import time
 from dataclasses import dataclass
 from math import sqrt
@@ -223,145 +224,158 @@ def move_cartesian_bounded(
     deadline_monitor = DeadlineMonitor(safety_limits.max_deadline_ms)
     stale_monitor = StaleStateMonitor(max_frozen_cycles=max_stale_state_cycles)
 
-    move_start = time.monotonic()
-    for i, waypoint in enumerate(waypoints):
-        cycle_start = time.monotonic()
-        cycle_start_ns = time.monotonic_ns()
-        try:
-            link.servo_l(
-                waypoint,
-                speed=0.25,
-                acceleration=1.2,
-                time_s=servo_time_s,
-                lookahead_time=lookahead_time_s,
-                gain=gain,
-            )
-            state = link.read_state()
-        except RTDEStateError as exc:
-            reason = f"state read failed during move: {exc}"
-            link.safe_stop(reason)
-            estop.trip(reason)
-            return _write_artifacts(
-                MoveResult(ok=False, reason=reason, waypoints_sent=i, stopped_early=True, final_tcp_pose=None)
-            )
-
-        stale_reason = stale_monitor.record(state.robot_timestamp_s, state.host_stamp_ns)
-        orientation_error_rad = float(np.linalg.norm(state.tcp_pose[3:] - start_pose[3:]))
-        axis_error_m = float(waypoint[axis_index] - state.tcp_pose[axis_index])
-        shoulder_pan_delta_rad = float(state.q[0] - start_q[0])
-        off_axis_drift_m = {}
-        for axis_name, idx in zip(("x", "y", "z"), range(3)):
-            if idx != axis_index:
-                off_axis_drift_m[axis_name] = float(state.tcp_pose[idx] - start_pose[idx])
-        trace_rows.append(
-            {
-                "step": int(i),
-                "t_s": float(time.monotonic() - move_start),
-                "target_t_s": float((i + 1) / rate_hz),
-                "cycle_start_ns": int(cycle_start_ns),
-                "robot_timestamp_s": state.robot_timestamp_s,
-                "host_stamp_ns": state.host_stamp_ns,
-                "q": state.q.tolist(),
-                "qd": state.qd.tolist(),
-                "tcp_pose": state.tcp_pose.tolist(),
-                "start_tcp_pose": start_pose.tolist(),
-                "target_tcp_pose": waypoint.tolist(),
-                "axis_index": int(axis_index),
-                "axis_error_m": axis_error_m,
-                "shoulder_pan_delta_rad": shoulder_pan_delta_rad,
-                "off_axis_drift_m": off_axis_drift_m,
-                "orientation_error_rad": orientation_error_rad,
-                "axis_target_moving": bool(i < len(waypoints) - 1),
-            }
-        )
-        if stale_reason:
-            link.safe_stop(stale_reason)
-            estop.trip(stale_reason)
-            return _write_artifacts(
-                MoveResult(
-                    ok=False,
-                    reason=stale_reason,
-                    waypoints_sent=i + 1,
-                    stopped_early=True,
-                    final_tcp_pose=state.tcp_pose,
+    # Real hardware finding (2026-07-30, see direct_torque_transport.py's
+    # identical comment): trace_rows grows every cycle and stays alive for
+    # the whole move, so the cyclic GC's periodic re-scan of all live
+    # tracked containers gets more expensive as the move goes on. gc.enable()
+    # in the finally below covers every exit path -- normal completion,
+    # every early return, and any unexpected exception -- not just the ones
+    # that happen to route through _write_artifacts().
+    gc.disable()
+    try:
+        move_start = time.monotonic()
+        for i, waypoint in enumerate(waypoints):
+            cycle_start = time.monotonic()
+            cycle_start_ns = time.monotonic_ns()
+            try:
+                link.servo_l(
+                    waypoint,
+                    speed=0.25,
+                    acceleration=1.2,
+                    time_s=servo_time_s,
+                    lookahead_time=lookahead_time_s,
+                    gain=gain,
                 )
-            )
-
-        if max_shoulder_pan_delta_rad is not None and abs(shoulder_pan_delta_rad) > float(max_shoulder_pan_delta_rad):
-            reason = (
-                f"|shoulder_pan_delta| = {abs(shoulder_pan_delta_rad):.4f} rad "
-                f"> {float(max_shoulder_pan_delta_rad)} rad"
-            )
-            link.safe_stop(reason)
-            estop.trip(reason)
-            return _write_artifacts(
-                MoveResult(
-                    ok=False,
-                    reason=reason,
-                    waypoints_sent=i + 1,
-                    stopped_early=True,
-                    final_tcp_pose=state.tcp_pose,
+                state = link.read_state()
+            except RTDEStateError as exc:
+                reason = f"state read failed during move: {exc}"
+                link.safe_stop(reason)
+                estop.trip(reason)
+                return _write_artifacts(
+                    MoveResult(ok=False, reason=reason, waypoints_sent=i, stopped_early=True, final_tcp_pose=None)
                 )
-            )
 
-        decision = monitor.check(
-            q=state.q,
-            qd=state.qd,
-            tcp_pose=state.tcp_pose,
-            target_tcp_pose=waypoint,
-            orientation_error_rad=orientation_error_rad,
-            axis_target_moving=(i < len(waypoints) - 1),
-            dt_s=dt_s,
-        )
-        if not decision.ok:
-            link.safe_stop(decision.reason)
-            estop.trip(decision.reason)
-            return _write_artifacts(
-                MoveResult(
-                    ok=False,
-                    reason=decision.reason,
-                    waypoints_sent=i + 1,
-                    stopped_early=True,
-                    final_tcp_pose=state.tcp_pose,
+            stale_reason = stale_monitor.record(state.robot_timestamp_s, state.host_stamp_ns)
+            orientation_error_rad = float(np.linalg.norm(state.tcp_pose[3:] - start_pose[3:]))
+            axis_error_m = float(waypoint[axis_index] - state.tcp_pose[axis_index])
+            shoulder_pan_delta_rad = float(state.q[0] - start_q[0])
+            off_axis_drift_m = {}
+            for axis_name, idx in zip(("x", "y", "z"), range(3)):
+                if idx != axis_index:
+                    off_axis_drift_m[axis_name] = float(state.tcp_pose[idx] - start_pose[idx])
+            trace_rows.append(
+                {
+                    "step": int(i),
+                    "t_s": float(time.monotonic() - move_start),
+                    "target_t_s": float((i + 1) / rate_hz),
+                    "cycle_start_ns": int(cycle_start_ns),
+                    "robot_timestamp_s": state.robot_timestamp_s,
+                    "host_stamp_ns": state.host_stamp_ns,
+                    "q": state.q.tolist(),
+                    "qd": state.qd.tolist(),
+                    "tcp_pose": state.tcp_pose.tolist(),
+                    "start_tcp_pose": start_pose.tolist(),
+                    "target_tcp_pose": waypoint.tolist(),
+                    "axis_index": int(axis_index),
+                    "axis_error_m": axis_error_m,
+                    "shoulder_pan_delta_rad": shoulder_pan_delta_rad,
+                    "off_axis_drift_m": off_axis_drift_m,
+                    "orientation_error_rad": orientation_error_rad,
+                    "axis_target_moving": bool(i < len(waypoints) - 1),
+                }
+            )
+            if stale_reason:
+                link.safe_stop(stale_reason)
+                estop.trip(stale_reason)
+                return _write_artifacts(
+                    MoveResult(
+                        ok=False,
+                        reason=stale_reason,
+                        waypoints_sent=i + 1,
+                        stopped_early=True,
+                        final_tcp_pose=state.tcp_pose,
+                    )
                 )
-            )
 
-        if not is_robot_safety_normal(state.safety_status):
-            reason = f"robot_safety_status_abnormal: {state.safety_status}"
-            link.safe_stop(reason)
-            estop.trip(reason)
-            return _write_artifacts(
-                MoveResult(
-                    ok=False,
-                    reason=reason,
-                    waypoints_sent=i + 1,
-                    stopped_early=True,
-                    final_tcp_pose=state.tcp_pose,
+            if max_shoulder_pan_delta_rad is not None and abs(shoulder_pan_delta_rad) > float(
+                max_shoulder_pan_delta_rad
+            ):
+                reason = (
+                    f"|shoulder_pan_delta| = {abs(shoulder_pan_delta_rad):.4f} rad "
+                    f"> {float(max_shoulder_pan_delta_rad)} rad"
                 )
-            )
-
-        elapsed_s = time.monotonic() - cycle_start
-        # Overrun = how far this cycle's work ran past its period budget. The
-        # sleep below already absorbs any overrun silently (max(0, ...)), so
-        # this is the only place lateness is acted on.
-        overrun_ns = int(max(0.0, elapsed_s - dt_s) * 1e9)
-        deadline_reason = deadline_monitor.record(overrun_ns)
-        if deadline_reason:
-            link.safe_stop(deadline_reason)
-            estop.trip(deadline_reason)
-            return _write_artifacts(
-                MoveResult(
-                    ok=False,
-                    reason=deadline_reason,
-                    waypoints_sent=i + 1,
-                    stopped_early=True,
-                    final_tcp_pose=state.tcp_pose,
+                link.safe_stop(reason)
+                estop.trip(reason)
+                return _write_artifacts(
+                    MoveResult(
+                        ok=False,
+                        reason=reason,
+                        waypoints_sent=i + 1,
+                        stopped_early=True,
+                        final_tcp_pose=state.tcp_pose,
+                    )
                 )
-            )
 
-        sleep_s = dt_s - elapsed_s
-        if sleep_s > 0:
-            time.sleep(sleep_s)
+            decision = monitor.check(
+                q=state.q,
+                qd=state.qd,
+                tcp_pose=state.tcp_pose,
+                target_tcp_pose=waypoint,
+                orientation_error_rad=orientation_error_rad,
+                axis_target_moving=(i < len(waypoints) - 1),
+                dt_s=dt_s,
+            )
+            if not decision.ok:
+                link.safe_stop(decision.reason)
+                estop.trip(decision.reason)
+                return _write_artifacts(
+                    MoveResult(
+                        ok=False,
+                        reason=decision.reason,
+                        waypoints_sent=i + 1,
+                        stopped_early=True,
+                        final_tcp_pose=state.tcp_pose,
+                    )
+                )
+
+            if not is_robot_safety_normal(state.safety_status):
+                reason = f"robot_safety_status_abnormal: {state.safety_status}"
+                link.safe_stop(reason)
+                estop.trip(reason)
+                return _write_artifacts(
+                    MoveResult(
+                        ok=False,
+                        reason=reason,
+                        waypoints_sent=i + 1,
+                        stopped_early=True,
+                        final_tcp_pose=state.tcp_pose,
+                    )
+                )
+
+            elapsed_s = time.monotonic() - cycle_start
+            # Overrun = how far this cycle's work ran past its period budget. The
+            # sleep below already absorbs any overrun silently (max(0, ...)), so
+            # this is the only place lateness is acted on.
+            overrun_ns = int(max(0.0, elapsed_s - dt_s) * 1e9)
+            deadline_reason = deadline_monitor.record(overrun_ns)
+            if deadline_reason:
+                link.safe_stop(deadline_reason)
+                estop.trip(deadline_reason)
+                return _write_artifacts(
+                    MoveResult(
+                        ok=False,
+                        reason=deadline_reason,
+                        waypoints_sent=i + 1,
+                        stopped_early=True,
+                        final_tcp_pose=state.tcp_pose,
+                    )
+                )
+
+            sleep_s = dt_s - elapsed_s
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+    finally:
+        gc.enable()
 
     link.servo_stop()
     final_state = link.read_state()

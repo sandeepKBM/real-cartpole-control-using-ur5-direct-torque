@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import time
 from dataclasses import dataclass, replace
@@ -235,6 +236,20 @@ def run_x_transport_direct_torque(
     deadline_monitor = DeadlineMonitor(effective_deadline_ms)
     stale_monitor = StaleStateMonitor()
 
+    # Real hardware finding (2026-07-30): this loop's own trace_rows/
+    # PhaseLatencyRecorder/TimingTracker.samples grow every cycle and are
+    # deliberately kept alive for the whole run, so they're not garbage --
+    # but Python's cyclic GC still periodically re-scans every live tracked
+    # container, and that scan's cost grows with how many of those
+    # containers have accumulated. Combined with real per-cycle garbage
+    # (Pinocchio's coriolis() returns a fresh array every call, plus
+    # compose_robot_state's temporary dict), this produced a real, observed
+    # slowdown starting a few hundred cycles into a run. None of this loop's
+    # objects form reference cycles, so refcounting alone still frees true
+    # garbage immediately -- disabling the cyclic collector for this
+    # bounded-duration loop only turns off the increasingly-expensive
+    # periodic re-scan, it does not leak memory within one run.
+    gc.disable()
     try:
         while t_s < duration_s - 1e-12:
             if estop.tripped:
@@ -458,6 +473,7 @@ def run_x_transport_direct_torque(
         termination_reason = f"rtde_state_error: {exc}"
         estop.trip(termination_reason)
     finally:
+        gc.enable()
         try:
             link.direct_torque(np.zeros(6), friction_comp=True)
         except Exception:

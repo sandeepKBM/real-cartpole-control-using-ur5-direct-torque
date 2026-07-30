@@ -94,6 +94,7 @@ def test_transport_records_timing_and_deadline_loop(tmp_path: Path) -> None:
         "read_state",
         "get_jacobian",
         "get_mass_matrix",
+        "local_dynamics",
         "build_state",
         "controller",
         "safety",

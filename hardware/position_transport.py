@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import time
 from dataclasses import dataclass
@@ -183,6 +184,13 @@ def run_x_transport_position(
     deadline_monitor = DeadlineMonitor(safety_limits.max_deadline_ms)
     stale_monitor = StaleStateMonitor()
 
+    # Same real-hardware finding as direct_torque_transport.py (2026-07-30):
+    # trace_rows grows every cycle and stays alive for the whole run, so the
+    # cyclic GC's periodic re-scan of all live tracked containers gets more
+    # expensive as the run goes on. No reference cycles are created here, so
+    # disabling the cyclic collector for this bounded loop only removes the
+    # increasingly-costly periodic re-scan, not real garbage collection.
+    gc.disable()
     try:
         while t_s < duration_s - 1e-12:
             estop.raise_if_tripped()
@@ -286,6 +294,7 @@ def run_x_transport_position(
             if sleep_s > 0:
                 time.sleep(sleep_s)
     finally:
+        gc.enable()
         link.servo_stop()
         link.safe_stop("transport_exit")
 

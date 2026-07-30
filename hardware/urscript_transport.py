@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import threading
 import time
@@ -292,6 +293,13 @@ def run_urscript_x_transport(
                     return
                 time.sleep(max(0.0, dt_monitor - 0.001))
 
+        # Same real-hardware GC finding as direct_torque_transport.py/
+        # position_transport.py (2026-07-30): trace_rows grows every
+        # supervisor cycle and stays alive for the whole run, so disable the
+        # cyclic collector's periodic re-scan while the supervisor thread is
+        # live. gc is process-global (not per-thread), so this also covers
+        # the main thread while it waits on supervisor.join() below.
+        gc.disable()
         supervisor = threading.Thread(target=_supervisor, name="urscript-supervisor", daemon=True)
         supervisor.start()
 
@@ -318,6 +326,7 @@ def run_urscript_x_transport(
     except Exception as exc:
         termination_reason = f"transport_error: {exc}"
     finally:
+        gc.enable()
         stop_monitor.set()
         try:
             _set_stop_register(control, int(params.stop_input_int_reg), 1)
