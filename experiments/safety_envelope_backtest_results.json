@@ -1,0 +1,1803 @@
+[
+  {
+    "run": "direct_torque_20260728_151331",
+    "mode": "direct_torque",
+    "steps": 1,
+    "termination_reason": "TCP acceleration 13.9027 m/s^2 > 0.5 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 13.9027,
+      "threshold": 0.5
+    },
+    "self_check": "OK",
+    "filtering_calibrated": false,
+    "accel_gap_cycles": 1,
+    "speed_lowpass_alpha": 1.0,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "final_row": {
+      "time_s": 0.002,
+      "q": [
+        -0.7853949705706995,
+        -0.8353719872287293,
+        -1.199949860572815,
+        -0.9854026440053677,
+        0.09999468919812353,
+        1.9194326443539466e-05
+      ],
+      "qd": [
+        0.0,
+        0.0,
+        -0.0,
+        -0.00011132250801892951,
+        0.000134096437250264,
+        6.0420057707233354e-05
+      ],
+      "tcp_pose": [
+        -0.3155147475160791,
+        -0.17196350823779474,
+        0.9325501179971505,
+        -0.7709029471122832,
+        -1.8013346110735713,
+        1.913389194473296
+      ],
+      "orientation_error_norm": 0.0,
+      "ee_pos": [
+        -0.3155147475160791,
+        -0.17196350823779474,
+        0.9325501179971505
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 47.28817166270318
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_151512",
+    "mode": "direct_torque",
+    "steps": 1,
+    "termination_reason": "TCP acceleration 2.7322 m/s^2 > 0.5 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 2.7322,
+      "threshold": 0.5
+    },
+    "self_check": "OK",
+    "filtering_calibrated": false,
+    "accel_gap_cycles": 1,
+    "speed_lowpass_alpha": 1.0,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "final_row": {
+      "time_s": 0.002,
+      "q": [
+        -0.7853606382953089,
+        -0.835404710178711,
+        -1.199944916570239,
+        -0.9854175704930058,
+        0.09999442100524902,
+        -8.885060445606996e-06
+      ],
+      "qd": [
+        0.0,
+        0.0,
+        -9.099843737203628e-05,
+        8.463052654406056e-05,
+        -0.0,
+        -0.0
+      ],
+      "tcp_pose": [
+        -0.3154915733578152,
+        -0.17199162241297566,
+        0.9325542097670738,
+        -0.7708045447888755,
+        -1.8013677534835018,
+        1.9133631429968339
+      ],
+      "orientation_error_norm": 0.0,
+      "ee_pos": [
+        -0.3154915733578152,
+        -0.17199162241297566,
+        0.9325542097670738
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 47.286039281773455
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_152908",
+    "mode": "direct_torque",
+    "steps": 1,
+    "termination_reason": "TCP acceleration 0.5829 m/s^2 > 0.5 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 0.5829,
+      "threshold": 0.5
+    },
+    "self_check": "OK",
+    "filtering_calibrated": false,
+    "accel_gap_cycles": 1,
+    "speed_lowpass_alpha": 1.0,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "final_row": {
+      "time_s": 0.002,
+      "q": [
+        -0.7853520552264612,
+        -0.8354079884341736,
+        -1.1999569323515171,
+        -0.9854058784297486,
+        0.09999442100524902,
+        1.0475998351466842e-05
+      ],
+      "qd": [
+        0.0,
+        0.0,
+        -0.0001384245988447219,
+        0.0,
+        -0.0,
+        0.0
+      ],
+      "tcp_pose": [
+        -0.31548528562533557,
+        -0.17199912232603717,
+        0.9325524482344615,
+        -0.7708147775696397,
+        -1.8013733763383415,
+        1.9133785245584605
+      ],
+      "orientation_error_norm": 2.9597241114532106e-05,
+      "ee_pos": [
+        -0.31548528562533557,
+        -0.17199912232603717,
+        0.9325524482344615
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 47.2869016350347
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_153128",
+    "mode": "direct_torque",
+    "steps": 1,
+    "termination_reason": "TCP acceleration 0.6243 m/s^2 > 0.5 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 0.6243,
+      "threshold": 0.5
+    },
+    "self_check": "OK",
+    "filtering_calibrated": false,
+    "accel_gap_cycles": 1,
+    "speed_lowpass_alpha": 1.0,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "final_row": {
+      "time_s": 0.002,
+      "q": [
+        -0.7853601614581507,
+        -0.8353961271098633,
+        -1.1999417468876055,
+        -0.9853711885264893,
+        0.10001356899738312,
+        6.9141387939453125e-06
+      ],
+      "qd": [
+        0.0,
+        0.0,
+        -0.00023469181905966252,
+        -1.404801710485629e-41,
+        8.32917794210028e-41,
+        -0.0
+      ],
+      "tcp_pose": [
+        -0.3154973740239374,
+        -0.17198531199672296,
+        0.9325548263595886,
+        -0.7708637986934189,
+        -1.8013689953087022,
+        1.9134283192097352
+      ],
+      "orientation_error_norm": 0.0,
+      "ee_pos": [
+        -0.3154973740239374,
+        -0.17198531199672296,
+        0.9325548263595886
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 47.28575325387805
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_153225",
+    "mode": "direct_torque",
+    "steps": 1,
+    "termination_reason": "TCP acceleration 2.2856 m/s^2 > 0.8 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 2.2856,
+      "threshold": 0.8
+    },
+    "self_check": "OK",
+    "filtering_calibrated": false,
+    "accel_gap_cycles": 1,
+    "speed_lowpass_alpha": 1.0,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "final_row": {
+      "time_s": 0.002,
+      "q": [
+        -0.7854068914996546,
+        -0.8353924316218873,
+        -1.1999294548344623,
+        -0.9853937190822144,
+        0.0999981015920639,
+        -1.2222920553028871e-05
+      ],
+      "qd": [
+        1.4065091128016068e-32,
+        0.0,
+        -0.00016833901463542134,
+        -0.0,
+        4.574765496478658e-34,
+        -0.0
+      ],
+      "tcp_pose": [
+        -0.3155122921297524,
+        -0.17196416579290405,
+        0.9325561060204463,
+        -0.7708854107752497,
+        -1.8013285200849747,
+        1.9133708500907372
+      ],
+      "orientation_error_norm": 5.551115123125783e-17,
+      "ee_pos": [
+        -0.3155122921297524,
+        -0.17196416579290405,
+        0.9325561060204463
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 47.289637975466526
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_154559",
+    "mode": "direct_torque",
+    "steps": 5,
+    "termination_reason": "TCP acceleration 1.0660 m/s^2 > 0.8 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 1.066,
+      "threshold": 0.8
+    },
+    "self_check": "OK",
+    "filtering_calibrated": false,
+    "accel_gap_cycles": 1,
+    "speed_lowpass_alpha": 1.0,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": 109.67836835950146
+    },
+    "final_row": {
+      "time_s": 0.01,
+      "q": [
+        -0.7853797191692828,
+        -1.4236537363782227,
+        -0.24006012742733582,
+        -1.4537038272418494,
+        0.1000063344836235,
+        -2.366701234990387e-05
+      ],
+      "qd": [
+        -3.693822918648948e-06,
+        -0.0004462700744625181,
+        -0.0005024920683354139,
+        -6.3949096329452004e-06,
+        -0.0,
+        -0.0
+      ],
+      "tcp_pose": [
+        -0.250520622131842,
+        -0.23836562753693766,
+        1.075474564544103,
+        -0.6773857504911813,
+        -1.8171861120080124,
+        1.841375059519702
+      ],
+      "orientation_error_norm": 5.68704544059772e-06,
+      "ee_pos": [
+        -0.250520622131842,
+        -0.23836562753693766,
+        1.075474564544103
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": true,
+      "cycle": 5,
+      "time_s": 0.01,
+      "reason": "TCP acceleration 1.0014 m/s^2 > 0.8 m/s^2"
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": true,
+        "cycle": 5,
+        "time_s": 0.01,
+        "reason": "TCP acceleration 1.0014 m/s^2 > 0.8 m/s^2",
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": true,
+        "cycle": 5,
+        "time_s": 0.01,
+        "reason": "TCP acceleration 1.0014 m/s^2 > 0.8 m/s^2",
+        "max_cond_seen": 109.67836835950146
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_154811",
+    "mode": "direct_torque",
+    "steps": 1,
+    "termination_reason": "TCP acceleration 2.2993 m/s^2 > 0.8 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 2.2993,
+      "threshold": 0.8
+    },
+    "self_check": "OK",
+    "filtering_calibrated": false,
+    "accel_gap_cycles": 1,
+    "speed_lowpass_alpha": 1.0,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "final_row": {
+      "time_s": 0.002,
+      "q": [
+        -0.7853639761554163,
+        -1.4236768631824488,
+        -0.24002811312675476,
+        -1.4536802452412048,
+        0.09999441355466843,
+        3.254175453548669e-06
+      ],
+      "qd": [
+        0.0,
+        -8.874323248164728e-05,
+        7.884901989303704e-17,
+        -0.00011397180060157552,
+        0.0,
+        -5.443153308078604e-38
+      ],
+      "tcp_pose": [
+        -0.25051672410179643,
+        -0.23837008021251516,
+        1.0754768334007618,
+        -0.6774411651346418,
+        -1.8171846099603948,
+        1.8414166763459434
+      ],
+      "orientation_error_norm": 4.0678335693532826e-05,
+      "ee_pos": [
+        -0.25051672410179643,
+        -0.23837008021251516,
+        1.0754768334007618
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 109.6758479304073
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_161401",
+    "mode": "direct_torque",
+    "steps": 378,
+    "termination_reason": "TCP speed 0.0514 m/s > 0.05 m/s",
+    "trip": {
+      "kind": "speed",
+      "observed": 0.0514,
+      "threshold": 0.05
+    },
+    "self_check": "OK [calibrated gap=3 alpha=0.05]",
+    "filtering_calibrated": true,
+    "accel_gap_cycles": 3,
+    "speed_lowpass_alpha": 0.05,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": 124.77792987392763
+    },
+    "final_row": {
+      "time_s": 0.7560000000000006,
+      "q": [
+        -0.7853949705706995,
+        -1.4275594881227989,
+        -0.24026007580739678,
+        -1.4536753457835694,
+        0.09999808669090271,
+        -1.985231508427887e-05
+      ],
+      "qd": [
+        0.0,
+        -0.0429709255695343,
+        -0.0004451870045159012,
+        0.0,
+        -0.0,
+        -0.0
+      ],
+      "tcp_pose": [
+        -0.24793757703313085,
+        -0.2409484340912119,
+        1.0754919735085153,
+        -0.6734592761330601,
+        -1.8176461781598798,
+        1.8385150900496188
+      ],
+      "orientation_error_norm": 0.004045856567418778,
+      "ee_pos": [
+        -0.24793757703313085,
+        -0.2409484340912119,
+        1.0754919735085153
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 125.16309370831101
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_161546",
+    "mode": "direct_torque",
+    "steps": 696,
+    "termination_reason": "TCP speed 0.0600 m/s > 0.05 m/s",
+    "trip": {
+      "kind": "speed",
+      "observed": 0.06,
+      "threshold": 0.05
+    },
+    "self_check": "OK [calibrated gap=2 alpha=0.05]",
+    "filtering_calibrated": true,
+    "accel_gap_cycles": 2,
+    "speed_lowpass_alpha": 0.05,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": 141.77544444800415
+    },
+    "final_row": {
+      "time_s": 1.392000000000001,
+      "q": [
+        -0.7853706518756312,
+        -1.430875696097948,
+        -0.24027489780793257,
+        -1.4536753457835694,
+        0.09999807924032211,
+        -8.885060445606996e-06
+      ],
+      "qd": [
+        0.0,
+        -0.03620542585849762,
+        -8.523170981789008e-05,
+        0.0,
+        -0.0,
+        0.0
+      ],
+      "tcp_pose": [
+        -0.24578642338270368,
+        -0.243099610796681,
+        1.075502757810221,
+        -0.6701449287442933,
+        -1.8180553310499972,
+        1.836149873792027
+      ],
+      "orientation_error_norm": 0.007252331419921123,
+      "ee_pos": [
+        -0.24578642338270368,
+        -0.243099610796681,
+        1.075502757810221
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 142.199611942785
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_161723",
+    "mode": "direct_torque",
+    "steps": 1207,
+    "termination_reason": "TCP speed 0.0538 m/s > 0.05 m/s",
+    "trip": {
+      "kind": "speed",
+      "observed": 0.0538,
+      "threshold": 0.05
+    },
+    "self_check": "OK [calibrated gap=2 alpha=0.05]",
+    "filtering_calibrated": true,
+    "accel_gap_cycles": 2,
+    "speed_lowpass_alpha": 0.05,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": 141.19996507841512
+    },
+    "final_row": {
+      "time_s": 2.4139999999999557,
+      "q": [
+        -0.7853558699237269,
+        -1.430759162263461,
+        -0.2402676211323269,
+        -1.4536442768624802,
+        0.09998226910829544,
+        -1.732503072560121e-06
+      ],
+      "qd": [
+        0.0,
+        -0.024154460057616234,
+        -4.55243352917023e-05,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "tcp_pose": [
+        -0.2458653324228066,
+        -0.24302119158011218,
+        1.075503240428349,
+        -0.6702822784309238,
+        -1.8180394215161073,
+        1.8362470434206266
+      ],
+      "orientation_error_norm": 0.007146143834772025,
+      "ee_pos": [
+        -0.2458653324228066,
+        -0.24302119158011218,
+        1.075503240428349
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 141.48013483080297
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_162133",
+    "mode": "direct_torque",
+    "steps": 742,
+    "termination_reason": "TCP acceleration 0.8448 m/s^2 > 0.8 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 0.8448,
+      "threshold": 0.8
+    },
+    "self_check": "OK [calibrated gap=2 alpha=0.05]",
+    "filtering_calibrated": true,
+    "accel_gap_cycles": 2,
+    "speed_lowpass_alpha": 0.05,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": 127.9695665916326
+    },
+    "final_row": {
+      "time_s": 1.484000000000001,
+      "q": [
+        -0.7853553930865687,
+        -1.4282089054896314,
+        -0.24027134163494338,
+        -1.453678959315159,
+        0.09997870773077011,
+        -8.885060445606996e-06
+      ],
+      "qd": [
+        0.0,
+        -0.0214585792273283,
+        -0.00012508688087109476,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "tcp_pose": [
+        -0.24750789032102308,
+        -0.2413789039061217,
+        1.0754938693736047,
+        -0.6727548380980735,
+        -1.817743252712613,
+        1.8380296182828446
+      ],
+      "orientation_error_norm": 0.00460568221173897,
+      "ee_pos": [
+        -0.24750789032102308,
+        -0.2413789039061217,
+        1.0754938693736047
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 128.17185384069117
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_162140",
+    "mode": "direct_torque",
+    "steps": 636,
+    "termination_reason": "TCP acceleration 0.8497 m/s^2 > 0.8 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 0.8497,
+      "threshold": 0.8
+    },
+    "self_check": "OK [calibrated gap=1 alpha=0.05]",
+    "filtering_calibrated": true,
+    "accel_gap_cycles": 1,
+    "speed_lowpass_alpha": 0.05,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": 110.36808212780006
+    },
+    "final_row": {
+      "time_s": 1.272000000000001,
+      "q": [
+        -0.7853367964373987,
+        -1.422586965556704,
+        -0.24004350803593116,
+        -1.4536430475166817,
+        0.09998572617769241,
+        -1.255665914356996e-06
+      ],
+      "qd": [
+        0.0,
+        0.012165908701717854,
+        6.605039379792288e-05,
+        1.38549445303287e-24,
+        -0.0,
+        0.0
+      ],
+      "tcp_pose": [
+        -0.25121227728565226,
+        -0.2376751604293285,
+        1.075466384825587,
+        -0.678497407052702,
+        -1.8170663119711203,
+        1.8422004859524028
+      ],
+      "orientation_error_norm": 0.001191036738879433,
+      "ee_pos": [
+        -0.25121227728565226,
+        -0.2376751604293285,
+        1.075466384825587
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 110.36808212780006
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_162146",
+    "mode": "direct_torque",
+    "steps": 781,
+    "termination_reason": "TCP speed 0.0514 m/s > 0.05 m/s",
+    "trip": {
+      "kind": "speed",
+      "observed": 0.0514,
+      "threshold": 0.05
+    },
+    "self_check": "OK [calibrated gap=2 alpha=0.05]",
+    "filtering_calibrated": true,
+    "accel_gap_cycles": 2,
+    "speed_lowpass_alpha": 0.05,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": 134.66799529539287
+    },
+    "final_row": {
+      "time_s": 1.5620000000000012,
+      "q": [
+        -0.7853744665728968,
+        -1.4295906818671902,
+        -0.24024364352226257,
+        -1.4536595058492203,
+        0.09998226165771484,
+        1.041889117914252e-05
+      ],
+      "qd": [
+        0.0,
+        -0.028174852952361107,
+        -9.777041589984331e-22,
+        0.0,
+        -0.0,
+        0.0
+      ],
+      "tcp_pose": [
+        -0.24663121723482095,
+        -0.24225533032877666,
+        1.0755012419667362,
+        -0.6714807406135745,
+        -1.8178882115305277,
+        1.8370889307205092
+      ],
+      "orientation_error_norm": 0.006111058878896844,
+      "ee_pos": [
+        -0.24663121723482095,
+        -0.24225533032877666,
+        1.0755012419667362
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 134.9634199711643
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_162153",
+    "mode": "direct_torque",
+    "steps": 696,
+    "termination_reason": "TCP speed 0.0507 m/s > 0.05 m/s",
+    "trip": {
+      "kind": "speed",
+      "observed": 0.0507,
+      "threshold": 0.05
+    },
+    "self_check": "OK [calibrated gap=2 alpha=0.05]",
+    "filtering_calibrated": true,
+    "accel_gap_cycles": 2,
+    "speed_lowpass_alpha": 0.05,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": 110.40866480093064
+    },
+    "final_row": {
+      "time_s": 1.392000000000001,
+      "q": [
+        -0.7853558699237269,
+        -1.4205034957988938,
+        -0.24004364013671875,
+        -1.4536395829967041,
+        0.09998225420713425,
+        1.0359287443861831e-05
+      ],
+      "qd": [
+        0.0,
+        0.020177433267235756,
+        -0.0,
+        0.0,
+        -0.0,
+        0.0
+      ],
+      "tcp_pose": [
+        -0.2525620929591761,
+        -0.2363253183578387,
+        1.0754440553586289,
+        -0.680577131100354,
+        -1.8168010311741831,
+        1.843669349989915
+      ],
+      "orientation_error_norm": 0.0032713766697150468,
+      "ee_pos": [
+        -0.2525620929591761,
+        -0.2363253183578387,
+        1.0754440553586289
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 110.40866480093064
+      }
+    }
+  },
+  {
+    "run": "direct_torque_20260728_162159",
+    "mode": "direct_torque",
+    "steps": 833,
+    "termination_reason": "TCP speed 0.0515 m/s > 0.05 m/s",
+    "trip": {
+      "kind": "speed",
+      "observed": 0.0515,
+      "threshold": 0.05
+    },
+    "self_check": "MISMATCH: baseline replay trips at logged cycle 773 (TCP speed 0.0505 m/s > 0.05 m/s) but ALL logged rows passed in the real run [calibrated gap=128 alpha=0.05]",
+    "filtering_calibrated": true,
+    "accel_gap_cycles": 128,
+    "speed_lowpass_alpha": 0.05,
+    "baseline_logged": {
+      "tripped": true,
+      "cycle": 773,
+      "time_s": 1.5460000000000012,
+      "reason": "TCP speed 0.0505 m/s > 0.05 m/s"
+    },
+    "cbf_logged": {
+      "tripped": true,
+      "cycle": 773,
+      "time_s": 1.5460000000000012,
+      "reason": "TCP speed 0.0505 m/s > 0.05 m/s",
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": true,
+      "cycle": 773,
+      "time_s": 1.5460000000000012,
+      "reason": "TCP speed 0.0505 m/s > 0.05 m/s",
+      "max_cond_seen": 134.5612039449985
+    },
+    "final_row": null,
+    "final_baseline": null,
+    "final_candidates": {}
+  },
+  {
+    "run": "direct_torque_20260728_162206",
+    "mode": "direct_torque",
+    "steps": 1334,
+    "termination_reason": "deadline_overrun: single cycle late by 15.30 ms > 5x max_deadline_ms (3 ms)",
+    "trip": null,
+    "self_check": "MISMATCH: baseline replay trips at logged cycle 964 (TCP speed 0.0502 m/s > 0.05 m/s) but ALL logged rows passed in the real run [calibrated gap=128 alpha=0.05]",
+    "filtering_calibrated": true,
+    "accel_gap_cycles": 128,
+    "speed_lowpass_alpha": 0.05,
+    "baseline_logged": {
+      "tripped": true,
+      "cycle": 964,
+      "time_s": 1.9280000000000015,
+      "reason": "TCP speed 0.0502 m/s > 0.05 m/s"
+    },
+    "cbf_logged": {
+      "tripped": true,
+      "cycle": 964,
+      "time_s": 1.9280000000000015,
+      "reason": "TCP speed 0.0502 m/s > 0.05 m/s",
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": true,
+      "cycle": 964,
+      "time_s": 1.9280000000000015,
+      "reason": "TCP speed 0.0502 m/s > 0.05 m/s",
+      "max_cond_seen": 110.45814611922937
+    },
+    "final_row": null,
+    "final_baseline": null,
+    "final_candidates": {}
+  },
+  {
+    "run": "position_20260728_145240",
+    "mode": "position",
+    "steps": 1,
+    "termination_reason": "TCP acceleration 0.7158 m/s^2 > 0.5 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 0.7158,
+      "threshold": 0.5
+    },
+    "self_check": "OK",
+    "filtering_calibrated": false,
+    "accel_gap_cycles": 1,
+    "speed_lowpass_alpha": 1.0,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "final_row": {
+      "time_s": 0.008,
+      "q": [
+        -0.7853878180133265,
+        -0.8353997033885499,
+        -1.1999382089890422,
+        -0.9853902620128174,
+        -1.985231508427887e-05,
+        -5.070363179981996e-06
+      ],
+      "qd": [
+        0.0,
+        0.0,
+        -9.32727925828658e-05,
+        0.0,
+        0.0,
+        3.075971061582721e-25
+      ],
+      "tcp_pose": [
+        -0.33116409743971353,
+        -0.15775233124794108,
+        0.9299922224620697,
+        -0.8508202209031915,
+        -1.7413707361165762,
+        1.8408735974877433
+      ],
+      "orientation_error_norm": 0.0,
+      "ee_pos": [
+        -0.33116409743971353,
+        -0.15775233124794108,
+        0.9299922224620697
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 230781.99376097968
+      }
+    }
+  },
+  {
+    "run": "position_20260728_145539",
+    "mode": "position",
+    "steps": 6,
+    "termination_reason": "TCP acceleration 0.9042 m/s^2 > 0.5 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 0.9042,
+      "threshold": 0.5
+    },
+    "self_check": "OK",
+    "filtering_calibrated": false,
+    "accel_gap_cycles": 1,
+    "speed_lowpass_alpha": 1.0,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": true,
+      "cycle": 2,
+      "time_s": 0.016,
+      "reason": "TCP acceleration 0.3770 m/s^2 > 0.09999999999999998 m/s^2",
+      "max_cond_seen": 5881784.7027456025
+    },
+    "final_row": {
+      "time_s": 0.048,
+      "q": [
+        -0.785372559224264,
+        -0.8353996733563563,
+        -1.1999648809432983,
+        -0.9855757411918421,
+        3.0123876058496535e-05,
+        0.0001494639376469422
+      ],
+      "qd": [
+        0.0,
+        3.7540241919487016e-06,
+        -0.0,
+        -0.018260063603520393,
+        0.0,
+        0.01389454398304224
+      ],
+      "tcp_pose": [
+        -0.33113270370812686,
+        -0.15778638374786003,
+        0.9299914197505408,
+        -0.8507462822991272,
+        -1.741415054993829,
+        1.8409051296112275
+      ],
+      "orientation_error_norm": 5.525550815554685e-05,
+      "ee_pos": [
+        -0.33113270370812686,
+        -0.15778638374786003,
+        0.9299914197505408
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": true,
+        "cycle": 2,
+        "time_s": 0.016,
+        "reason": "TCP acceleration 0.3770 m/s^2 > 0.09999999999999998 m/s^2",
+        "max_cond_seen": 5881784.7027456025
+      }
+    }
+  },
+  {
+    "run": "position_20260728_150316",
+    "mode": "position",
+    "steps": 13,
+    "termination_reason": "TCP acceleration 1.0749 m/s^2 > 0.5 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 1.0749,
+      "threshold": 0.5
+    },
+    "self_check": "OK",
+    "filtering_calibrated": false,
+    "accel_gap_cycles": 1,
+    "speed_lowpass_alpha": 1.0,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": true,
+      "cycle": 2,
+      "time_s": 0.016,
+      "reason": "TCP acceleration 0.2815 m/s^2 > 0.09999999999999998 m/s^2",
+      "max_cond_seen": 5881346.016222468
+    },
+    "final_row": {
+      "time_s": 0.10400000000000004,
+      "q": [
+        -0.7853568235980433,
+        -0.8349743617675085,
+        -1.1999972534403205,
+        -0.9877540915063401,
+        1.4889955309627112e-05,
+        0.0019491658816114068
+      ],
+      "qd": [
+        0.0,
+        0.015735985711216927,
+        0.0008261175826191902,
+        -0.08155761659145355,
+        -1.665584546419861e-24,
+        0.06867320090532303
+      ],
+      "tcp_pose": [
+        -0.33120019586879496,
+        -0.1577220805955824,
+        0.9299599778990973,
+        -0.8506962690765879,
+        -1.7414235541351133,
+        1.8408712970921435
+      ],
+      "orientation_error_norm": 7.576648441207655e-05,
+      "ee_pos": [
+        -0.33120019586879496,
+        -0.1577220805955824,
+        0.9299599778990973
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": true,
+        "cycle": 2,
+        "time_s": 0.016,
+        "reason": "TCP acceleration 0.2815 m/s^2 > 0.09999999999999998 m/s^2",
+        "max_cond_seen": 5881346.016222468
+      }
+    }
+  },
+  {
+    "run": "position_20260728_150508",
+    "mode": "position",
+    "steps": 7,
+    "termination_reason": "TCP acceleration 1.3456 m/s^2 > 1.2 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 1.3456,
+      "threshold": 1.2
+    },
+    "self_check": "OK",
+    "filtering_calibrated": false,
+    "accel_gap_cycles": 1,
+    "speed_lowpass_alpha": 1.0,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": 997169.5686594442
+    },
+    "final_row": {
+      "time_s": 0.056,
+      "q": [
+        -0.7853997389422815,
+        -0.8353336795377363,
+        -1.1999865053752437,
+        -0.9857930422476311,
+        -1.603761781865387e-05,
+        0.00039755499199964106
+      ],
+      "qd": [
+        0.0,
+        0.0032983452547341585,
+        0.0016778873978182673,
+        -0.014815710484981537,
+        -5.666805978482295e-25,
+        0.014962746761739254
+      ],
+      "tcp_pose": [
+        -0.331157515398968,
+        -0.15775686247601794,
+        0.9299813248926881,
+        -0.8508009326486304,
+        -1.7413672161914984,
+        1.8408535540118836
+      ],
+      "orientation_error_norm": 0.00011682153391689412,
+      "ee_pos": [
+        -0.331157515398968,
+        -0.15775686247601794,
+        0.9299813248926881
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": 997169.5686594442
+      }
+    }
+  },
+  {
+    "run": "position_20260728_150847",
+    "mode": "position",
+    "steps": 9,
+    "termination_reason": "TCP acceleration 1.3545 m/s^2 > 1.2 m/s^2",
+    "trip": {
+      "kind": "accel",
+      "observed": 1.3545,
+      "threshold": 1.2
+    },
+    "self_check": "OK",
+    "filtering_calibrated": false,
+    "accel_gap_cycles": 1,
+    "speed_lowpass_alpha": 1.0,
+    "baseline_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "cbf_logged": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null,
+      "max_cond_seen": null
+    },
+    "condj_logged": {
+      "tripped": true,
+      "cycle": 2,
+      "time_s": 0.016,
+      "reason": "TCP acceleration 0.5183 m/s^2 > 0.23999999999999994 m/s^2",
+      "max_cond_seen": 577617.7751281587
+    },
+    "final_row": {
+      "time_s": 0.07200000000000001,
+      "q": [
+        -0.785409832973973,
+        -0.8384140688231965,
+        -1.1983791787624358,
+        -0.9698188880733033,
+        3.268194716656581e-05,
+        -0.014825794850484669
+      ],
+      "qd": [
+        -0.0021558236330747604,
+        -0.15548363327980042,
+        0.07819882035255432,
+        0.8438997268676758,
+        -0.0016700654523447156,
+        -0.7752366065979004
+      ],
+      "tcp_pose": [
+        -0.3311107667204177,
+        -0.15780030185282584,
+        0.9304176447680952,
+        -0.8501236643885968,
+        -1.7414828239407847,
+        1.840509906478288
+      ],
+      "orientation_error_norm": 0.0007505103375310814,
+      "ee_pos": [
+        -0.3311107667204177,
+        -0.15780030185282584,
+        0.9304176447680952
+      ],
+      "_reconstructed": true
+    },
+    "final_baseline": {
+      "tripped": false,
+      "cycle": null,
+      "time_s": null,
+      "reason": null
+    },
+    "final_candidates": {
+      "cbf_move_timing": {
+        "tripped": false,
+        "cycle": null,
+        "time_s": null,
+        "reason": null,
+        "max_cond_seen": null
+      },
+      "cond_j_scaled": {
+        "tripped": true,
+        "cycle": 2,
+        "time_s": 0.016,
+        "reason": "TCP acceleration 0.5183 m/s^2 > 0.23999999999999994 m/s^2",
+        "max_cond_seen": 577617.7751281587
+      }
+    }
+  }
+]
