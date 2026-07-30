@@ -1,0 +1,129 @@
+# SUPERSEDED as the default 2026-07-30 by config/ur5e_mujoco_torque_osc_tuned.yaml (which
+# additionally sets jacobian_singular_cond_max: 1.0e18, disabling a global singular_scale
+# term found to freeze the controller for roughly the first half of every move at the
+# transport start pose's wrist singularity -- see that file's header and
+# docs/status/disable_global_singular_scale_validation_2026-07-30.md for the real evidence,
+# 304 runs, zero regressions, +12 passes recovered). Preserved here unmodified, still fully
+# usable via --config, for anyone who specifically needs the old singular_scale-enabled
+# behavior reproduced.
+#
+# Tuned operational-space (P3) config — gain retune of config/ur5e_mujoco_torque_osc.yaml.
+# Tuned 2026-07-03 (osc_gain_retune rounds 1-7 + rot-instability isolation, seed 0 —
+# the sim has no noise source anywhere in the pipeline, so seed has zero effect and was
+# not swept). ~250 evaluation runs; results below are exhaustive, not cherry-picked.
+#
+# Final validated envelope (0 safety-guard trips in every point below):
+#   - canonical grid (dx 0.01-0.04m x hold 1/2s, move 1.0s, scale 1.0): 8/8 valid,
+#     worst orientation 0.040 rad, worst hold x error < 0.1 mm.
+#   - long holds (dx 0.03/0.06m, hold 4/10/20/30s): 8/8 valid, worst orientation 0.067 rad
+#     even at 30s (previously guard-tripped at ~27s before the kp_rot fix below).
+#   - large displacements (dx up to 0.20m, hold 1/2s): 16/16 valid, worst orientation
+#     0.205 rad. dx=0.25m breaks via Z-drift (workspace/reach limit, not a controller bug).
+#   - torque-limit-scale robustness (0.10-1.0, dx 0.03/0.06m): 14/14 valid.
+#   - off-grid (dx 0.02/0.05m x move 0.5/1.0s x hold 4s x scale 0.75/1.0): 6/8 valid; the
+#     two misses (move=0.5s only) are a closed-loop bandwidth limit (13.8 Nm commanded vs
+#     150 Nm limit — not saturation, just too fast a move for this bandwidth); sub-0.5s
+#     moves fail the same way. Not fixable without raising kp_x, which would erode the
+#     stability margin at the wrist singularity — out of scope for a 1s+-move transport task.
+#   Untuned OSC on the canonical grid: 1/8 valid, 2 guard trips, |qd| up to 1.7 rad/s.
+#
+# Under task_space_inertia_shaping the gains are task-ACCELERATION gains (wrench = Lambda @ PD),
+# not stiffnesses — do not copy them into non-OSC configs.
+# Why these values: the transport start pose [0, -pi/2, 0, -pi/2, 0, 0] is at the UR wrist
+# singularity (wrist_2 = 0). Two findings drive the gain set:
+#   1. Orientation drifts along a direction the task Jacobian cannot actuate — only the
+#      joint-space posture anchor (kp/kd_posture 25/6, passed by the nullspace projector
+#      exactly in task-singular directions) and kd_joint damping act there; lambda_
+#      regularization 0.1 lets enough posture through, kp_x 400 gives the task authority
+#      to out-pull the anchor (fixes small-dx settling lag). kd_joint was swept 2.0-4.0
+#      and made no measurable difference once (2) below was fixed — 4.0 kept, no free lunch
+#      there, just no reason to change a validated value.
+#   2. The task rotation PD is UNSTABLE at this pose: through the eps-regularized Lambda it
+#      feeds back positively along the near-singular direction regardless of magnitude,
+#      only slower as kp_rot shrinks (kp_rot=30 trips the guard at ~3.5s hold, kp_rot=5 at
+#      ~27s, kp_rot=0 never — confirmed clean out to a 30s hold). So kp_rot=0: zero task
+#      rotational stiffness, kd_rot=10 for damping only. posture_reanchor_on_settle
+#      re-anchors q_rest at hold start so the joint-space posture anchor holds orientation
+#      instead of the (unstable) task-space term.
+#
+# NOTE: tools/ur5e_move_hold_transport.py overrides config gains with its BASELINE_GAINS;
+# to evaluate THIS gain set through that driver pass:
+#   --gain-overrides-json '{"kp_x": 400.0, "kd_x": 40.0, "kp_rot": 0.0, "kd_rot": 10.0, "kp_posture": 25.0, "kd_posture": 6.0, "kd_joint": 4.0}'
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  # Canonical active-origin transport pose for residual-torque transport tuning.
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

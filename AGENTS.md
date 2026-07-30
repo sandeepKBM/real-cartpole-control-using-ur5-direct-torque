@@ -88,7 +88,9 @@ an MP4 or a bare exit code as success evidence — read the run record.
   - P3 evidence (8-point move-hold grid, untuned gains): OSC 6/8 vs baseline 5/8; the
     dx=0.02/hold=2 orientation failure fixed (0.350→0.031 rad); dx≥0.03/hold=2 still fails —
     gain retuning for the acceleration-gain semantics is the known next step.
-  - **Tuned OSC gains (landed 2026-07-03, ~250 evaluation runs)**:
+  - **Tuned OSC gains (landed 2026-07-03, ~250 evaluation runs; config additionally promoted
+    2026-07-30 with a `singular_scale` fix, see §4's "Fixed and promoted to default" note —
+    gains below unchanged, only `jacobian_singular_cond_max` differs)**:
     `config/ur5e_mujoco_torque_osc_tuned.yaml` — kp_x 400/kd_x 40, kp_rot 0/kd_rot 10,
     kp_posture 25/kd_posture 6, kd_joint 4, lambda_regularization 0.1,
     `posture_reanchor_on_settle: true`. Validated envelope, 0 guard trips throughout:
@@ -218,17 +220,40 @@ self-referential speed guard replaced with a fixed ceiling.
   has never been benchmarked — a from-scratch eigenvalue solve every control cycle is a real new
   computational cost on the robot's own controller that nothing here proves fits the real-time
   budget.
-- **`controller_core/x_axis_cartesian_impedance.py`'s global `cond(J)`-based `singular_scale`
-  nulls task authority at the transport start pose.** Measured: freezes the controller for
-  ~0.2s at the start of every move (`tau≈1e-11 Nm`), escaping only via numerical-noise
-  perturbation of `wrist_2` off exactly zero — fragile and non-physical. It's redundant with,
-  and defeats, the `lambda_regularization` already in the tuned config, which alone already
-  produces a healthy X force at the singularity. Disabling it moved the speed ceiling for a
-  0.15m move from ~0.4s to ~0.25s with *lower* peak velocity/torque, no regression on
-  long-hold/large-displacement spot checks — but needs a full validation sweep before
-  trusting, and is a controller-math change, not a hardware-lane fix.
 - **RL gain-scheduling's never-move collapse has a credible root cause**, see
   `docs/CURRENT_STATUS.md` — not a hardware item, kept here only as a pointer.
+
+**Fixed and promoted to default, 2026-07-30**: `controller_core/x_axis_cartesian_impedance.py`'s
+global `cond(J)`-based `singular_scale` nulled task authority at the transport start pose,
+freezing the controller (`tau≈1e-13-1e-4 Nm`) for roughly the first HALF of every move (not
+the ~0.2s earlier estimates suggested — measured on a gentle dx=0.02m/1.5s move: first real
+torque at `t=0.784s` of a 1.5s move), only escaping via numerical-noise perturbation of
+`wrist_2` off exactly zero, then cramming the full displacement into whatever time remained —
+producing a genuine (not sensor-noise, not estimator-artifact) TCP acceleration spike 53x the
+nominal min-jerk profile's theoretical peak (2.72 vs 0.05 m/s² on that same move). This was
+the real root cause behind most of the real-hardware TCP-accel guard trips investigated in
+`docs/status/safety_envelope_backtest_2026-07-30.md` earlier the same night — not sensor
+noise, as first assumed. Fix: `jacobian_singular_cond_max: 1.0e18` (vs. the class default
+1.0e5), disabling the term for any physically realizable Jacobian — it was already redundant
+with, and defeating, `lambda_regularization` (already 0.1 in the tuned config), which alone
+produces a healthy X force at the singularity. Full validation
+(`docs/status/disable_global_singular_scale_validation_2026-07-30.md`): 4-category rigor sweep
+(canonical grid, long holds, large displacements, torque-scale robustness) at
+`height_alpha ∈ {0.1, 0.2, 0.3, 0.5}`, 304 runs — 152/152 pass with the fix vs. 140/152 without,
+zero regressions, +12 passes recovered (every prior failure a small-displacement canonical-grid
+case where the freeze ate too much of a short move window). An earlier, informal claim of this
+same validation (referenced only in a commit message) was never backed by a durable artifact;
+this is the first reproducible evidence. **Promoted to the default**:
+`config/ur5e_mujoco_torque_osc_tuned.yaml` now has the fix baked in; the previous default
+(`singular_scale` enabled) is preserved unmodified at
+`config/ur5e_mujoco_torque_osc_tuned_singular_scale_enabled.yaml`. **Not yet applied** to
+`config/ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml` (the most recently developed,
+actively-used config for the `wrist_orientation_task` fix) — it still has the class default
+and likely has the same freeze bug, unvalidated as of this promotion; needs its own validation
+pass before changing, since it was independently tuned with `singular_scale` on.
+`config/ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml` and `..._diagonal_lambda.yaml`
+already had `jacobian_singular_cond_max: 1.0e18` set independently (unrelated prior work),
+unaffected by this promotion.
 
 **Corrected 2026-07-28** (previously listed above as "found, not yet fixed" — both were
 already closed by commit `85498a0`, 2026-07-25, before that bullet list was written; this

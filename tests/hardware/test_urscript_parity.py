@@ -28,6 +28,7 @@ on a real arm -- neither has been tested.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 
 import numpy as np
@@ -459,6 +460,13 @@ def test_singular_scaling_near_singular_matches_python() -> None:
     params = load_params_from_yaml(
         DEFAULT_CONFIG, target_x_delta_m=0.02, move_duration_s=1.0, duration_s=3.0
     )
+    # This test's whole point is to verify singular-scaling parity when it's
+    # actually engaged -- explicit, not implicitly dependent on whatever
+    # jacobian_singular_cond_max DEFAULT_CONFIG happens to currently ship
+    # with (2026-07-30: the project default itself changed to 1.0e18,
+    # disabling singular_scale entirely -- see
+    # config/ur5e_mujoco_torque_osc_tuned.yaml's header for why).
+    params = dataclasses.replace(params, jacobian_singular_cond_max=1.0e5)
     gains = _parse_baked_gains(render_urscript(params))
     s = _sample_state(rng, cond=1.0e7)  # near singular
     s["tcp"] = s["tcp0"] + 0.02 * rng.normal(size=6)
@@ -474,10 +482,8 @@ def test_singular_scaling_near_singular_matches_python() -> None:
         jacobi_sweeps=params.singular_scale_jacobi_sweeps,
     )
 
-    # DEFAULT_CONFIG bakes jacobian_singular_cond_max=1e5 (unset in the yaml,
-    # falls back to the class default -- see hardware/urscript_gen.py and
-    # CartesianImpedanceConfig.jacobian_singular_cond_max). At cond(J)=1e7
-    # both sides must now collapse task authority the same way.
+    # jacobian_singular_cond_max=1e5 forced above. At cond(J)=1e7 both sides
+    # must now collapse task authority the same way.
     out = _run_python(
         _py_config(cond_max=params.jacobian_singular_cond_max, nullspace=False, tau_lim=_HUGE_LIMIT),
         J=s["J"], M=s["M"], q0=s["q0"], q=s["q"], qd=s["qd"],

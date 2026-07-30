@@ -22,11 +22,16 @@ from hardware.safety import UR5eSafetyLimits  # noqa: E402
 
 CONFIG = REPO_ROOT / "config" / "ur5e_mujoco_torque_osc_tuned.yaml"
 # HEIGHT_ALPHA_0_5_Q sits exactly on the wrist_2=0 singularity (all interpolated
-# alpha values do), and the BASE tuned config's singular_scale (cond_max=1e5)
-# collapses task torque to near-zero there regardless of gains -- exactly the
-# bug this session's earlier no_singular_scale config fixed. The kp_x-response
-# test below needs to actually see a gain effect, so it uses that config.
-NO_SINGULAR_SCALE_CONFIG = REPO_ROOT / "config" / "ur5e_mujoco_torque_osc_tuned_no_singular_scale.yaml"
+# alpha values do). Before 2026-07-30, the default tuned config's global
+# singular_scale (cond_max=1e5) collapsed task torque to near-zero there
+# regardless of gains, so the kp_x-response test below needed a separate
+# no_singular_scale config to actually see a gain effect. That config was
+# promoted to be the default (jacobian_singular_cond_max=1.0e18 in
+# ur5e_mujoco_torque_osc_tuned.yaml itself now -- see that file's header,
+# docs/status/disable_global_singular_scale_validation_2026-07-30.md), so
+# CONFIG alone is sufficient now; the old singular_scale-enabled behavior is
+# preserved at config/ur5e_mujoco_torque_osc_tuned_singular_scale_enabled.yaml
+# if ever needed again.
 
 
 class _MockDTLink:
@@ -96,14 +101,14 @@ def test_gain_override_changes_commanded_torque(tmp_path: Path) -> None:
     link_default = _MockDTLink()
     result_default = run_x_transport_direct_torque(
         link_default,  # type: ignore[arg-type]
-        config_path=NO_SINGULAR_SCALE_CONFIG, target_x_delta_m=0.01,
+        config_path=CONFIG, target_x_delta_m=0.01,
         move_duration_s=0.02, duration_s=0.03, output_dir=tmp_path / "default",
         motion_opt_in=True, record_latency=False, dynamics_source="local",
     )
     link_boosted = _MockDTLink()
     result_boosted = run_x_transport_direct_torque(
         link_boosted,  # type: ignore[arg-type]
-        config_path=NO_SINGULAR_SCALE_CONFIG, target_x_delta_m=0.01,
+        config_path=CONFIG, target_x_delta_m=0.01,
         move_duration_s=0.02, duration_s=0.03, output_dir=tmp_path / "boosted",
         motion_opt_in=True, record_latency=False, dynamics_source="local",
         gain_overrides={"kp_x": 4000.0},

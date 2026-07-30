@@ -1,44 +1,53 @@
-# Tuned operational-space (P3) config — gain retune of config/ur5e_mujoco_torque_osc.yaml.
-# Tuned 2026-07-03 (osc_gain_retune rounds 1-7 + rot-instability isolation, seed 0 —
-# the sim has no noise source anywhere in the pipeline, so seed has zero effect and was
-# not swept). ~250 evaluation runs; results below are exhaustive, not cherry-picked.
+# Default tuned operational-space (P3) config. Promoted 2026-07-30 from what was
+# config/ur5e_mujoco_torque_osc_tuned_no_singular_scale.yaml -- jacobian_singular_cond_max
+# raised from the class default (1.0e5) to 1.0e18, which disables the global cond(J)-based
+# singular_scale term in controller_core/x_axis_cartesian_impedance.py for any physically
+# realizable Jacobian (double-precision condition numbers don't reach 1e18 in practice).
+# The PREVIOUS default (singular_scale enabled, 1.0e5) is preserved unmodified at
+# config/ur5e_mujoco_torque_osc_tuned_singular_scale_enabled.yaml.
 #
-# Final validated envelope (0 safety-guard trips in every point below):
-#   - canonical grid (dx 0.01-0.04m x hold 1/2s, move 1.0s, scale 1.0): 8/8 valid,
-#     worst orientation 0.040 rad, worst hold x error < 0.1 mm.
-#   - long holds (dx 0.03/0.06m, hold 4/10/20/30s): 8/8 valid, worst orientation 0.067 rad
-#     even at 30s (previously guard-tripped at ~27s before the kp_rot fix below).
-#   - large displacements (dx up to 0.20m, hold 1/2s): 16/16 valid, worst orientation
-#     0.205 rad. dx=0.25m breaks via Z-drift (workspace/reach limit, not a controller bug).
-#   - torque-limit-scale robustness (0.10-1.0, dx 0.03/0.06m): 14/14 valid.
-#   - off-grid (dx 0.02/0.05m x move 0.5/1.0s x hold 4s x scale 0.75/1.0): 6/8 valid; the
-#     two misses (move=0.5s only) are a closed-loop bandwidth limit (13.8 Nm commanded vs
-#     150 Nm limit — not saturation, just too fast a move for this bandwidth); sub-0.5s
-#     moves fail the same way. Not fixable without raising kp_x, which would erode the
-#     stability margin at the wrist singularity — out of scope for a 1s+-move transport task.
-#   Untuned OSC on the canonical grid: 1/8 valid, 2 guard trips, |qd| up to 1.7 rad/s.
+# Why: singular_scale is a GLOBAL scalar (jacobian_singular_cond_max / cond(J)) that
+# multiplies the ENTIRE 6-DOF wrench whenever cond(J) exceeds the threshold -- including
+# well-conditioned axes. The transport start pose [0,-pi/2,0,-pi/2,0,0] is an exact wrist
+# singularity (measured cond(J)=2.49e17), so with the old 1e5 threshold, singular_scale
+# collapses to ~4e-13 and nulls essentially all task authority, including the X-translation
+# direction (a well-conditioned singular value, sigma=2.16 at this pose). Measured effect
+# with the old default: the end-effector does not move in X at all for roughly the first
+# half of a 1.5s move (tau stays ~1e-13-1e-4 Nm until t=0.784s), only escaping once wrist_2
+# drifts off exactly zero from gravity-comp/integration numerical residuals and cond(J)
+# finally drops below 1e5 -- i.e. the controller relied on floating-point noise to break a
+# marginal equilibrium, then had to complete the whole move in the remaining time, producing
+# a real (not sensor-noise, not estimator-artifact) TCP acceleration spike 53x the nominal
+# min-jerk profile's theoretical peak (2.72 vs 0.05 m/s^2 on a gentle dx=0.02m/1.5s move) --
+# this was the real root cause behind most of the 2026-07-30 real-hardware TCP-accel guard
+# trips investigated in docs/status/safety_envelope_backtest_2026-07-30.md, not sensor noise.
 #
-# Under task_space_inertia_shaping the gains are task-ACCELERATION gains (wrench = Lambda @ PD),
-# not stiffnesses — do not copy them into non-OSC configs.
-# Why these values: the transport start pose [0, -pi/2, 0, -pi/2, 0, 0] is at the UR wrist
-# singularity (wrist_2 = 0). Two findings drive the gain set:
-#   1. Orientation drifts along a direction the task Jacobian cannot actuate — only the
-#      joint-space posture anchor (kp/kd_posture 25/6, passed by the nullspace projector
-#      exactly in task-singular directions) and kd_joint damping act there; lambda_
-#      regularization 0.1 lets enough posture through, kp_x 400 gives the task authority
-#      to out-pull the anchor (fixes small-dx settling lag). kd_joint was swept 2.0-4.0
-#      and made no measurable difference once (2) below was fixed — 4.0 kept, no free lunch
-#      there, just no reason to change a validated value.
-#   2. The task rotation PD is UNSTABLE at this pose: through the eps-regularized Lambda it
-#      feeds back positively along the near-singular direction regardless of magnitude,
-#      only slower as kp_rot shrinks (kp_rot=30 trips the guard at ~3.5s hold, kp_rot=5 at
-#      ~27s, kp_rot=0 never — confirmed clean out to a 30s hold). So kp_rot=0: zero task
-#      rotational stiffness, kd_rot=10 for damping only. posture_reanchor_on_settle
-#      re-anchors q_rest at hold start so the joint-space posture anchor holds orientation
-#      instead of the (unstable) task-space term.
+# This term is also redundant with, and actively defeats, task_space_inertia_shaping's
+# eps-regularized Lambda (lambda_regularization: 0.1, already in this config), which alone
+# already produces a finite, healthy X force at this pose (measured Lambda[0,0]=2.54) --
+# singular_scale then threw that away.
 #
-# NOTE: tools/ur5e_move_hold_transport.py overrides config gains with its BASELINE_GAINS;
-# to evaluate THIS gain set through that driver pass:
+# 2026-07-30 validation (docs/status/disable_global_singular_scale_validation_2026-07-30.md):
+# with this fix, tau_applied is non-zero from t=0.028s (freeze gone), and the raw
+# CartesianMoveMonitor accel-estimate peak drops to 1.14x the theoretical kinematic peak
+# (vs 53x before). Full 4-category rigor sweep (canonical grid, long holds, large
+# displacements, torque-scale robustness) at height_alpha in {0.1, 0.2, 0.3, 0.5}, 304 runs:
+# 152/152 pass with this config vs 140/152 with the old default -- zero regressions, +12
+# passes recovered, every prior failure a small-displacement canonical-grid case where the
+# freeze ate too much of a 1.0s move window. One shared failure (alpha=0.5,
+# torque_scale=0.1) is identical in both configs -- a real torque-budget limit, unrelated to
+# singular_scale. An earlier, informal claim of this validation (referenced in a prior
+# commit message) was never backed by a durable artifact; this is the first reproducible
+# evidence.
+#
+# NOT YET applied to config/ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml (the most
+# recently developed, actively-used config for the wrist_orientation_task fix) -- it still
+# has the class default (1.0e5, singular_scale enabled) and likely has the same freeze bug,
+# unvalidated as of this promotion. Flagged, not silently fixed -- needs its own validation
+# pass before changing, since it was independently tuned/validated with singular_scale on.
+#
+# Gain-override string for tools/ur5e_move_hold_transport.py (BASELINE_GAINS
+# still overrides config gains for that driver -- same override, unrelated to this change):
 #   --gain-overrides-json '{"kp_x": 400.0, "kd_x": 40.0, "kp_rot": 0.0, "kd_rot": 10.0, "kp_posture": 25.0, "kd_posture": 6.0, "kd_joint": 4.0}'
 mujoco:
   scene_xml: "assets/ur5e_torque/scene.xml"
@@ -98,6 +107,7 @@ controller:
   posture_reanchor_on_settle: true
   nullspace_posture: true
   lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
   torque_headroom: 0.9
   task_resample_factor: 0.5
   task_resample_min_scale: 0.0001

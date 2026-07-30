@@ -2,8 +2,15 @@
 plumbing move (x_profile_target, build_initial_state_and_adapter, apply_start_q/
 resolve_start_q/coerce_start_q moved to simulation/ur5e_mujoco_torque.py).
 
-Values below were refreshed after fixing ``expand_mass_matrix`` (correct
-``mj_fullM`` usage across MuJoCo binding versions).
+Values refreshed 2026-07-30: config/ur5e_mujoco_torque_osc_tuned.yaml (used by
+this test) was promoted from the singular_scale-enabled default to the
+singular_scale-disabled one (jacobian_singular_cond_max: 1.0e18 -- see that
+file's header and docs/status/disable_global_singular_scale_validation_2026-07-30.md).
+The OLD golden values below captured a real bug, not correct behavior: with
+singular_scale enabled, the controller was frozen (tau~1e-13-1e-4 Nm) for
+essentially this entire short 0.3s move, so achieved_x_delta_m was ~2.4e-5 m
+against a 0.01 m target -- off by ~400x. The new values reflect the
+move actually completing close to its target.
 """
 
 from __future__ import annotations
@@ -20,22 +27,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED = {
     "termination_reason": "duration_complete",
     "steps": 250,
-    "achieved_x_delta_m": pytest.approx(2.4147800612543547e-05, abs=1e-12),
-    "final_x_error_m": pytest.approx(0.009975852199387457, abs=1e-12),
-    "max_abs_orientation_error_rad": pytest.approx(1.2724684135723752e-05, abs=1e-12),
-    "max_abs_qd_radps": pytest.approx(0.001328891168439839, abs=1e-12),
-    "max_abs_tau_applied_nm": pytest.approx(0.21255900378184536, abs=1e-9),
-    "move_hold_quality_score": pytest.approx(0.1995790397692334, abs=1e-9),
+    "achieved_x_delta_m": pytest.approx(0.010118103975688159, abs=1e-12),
+    "final_x_error_m": pytest.approx(-0.00011810397568815835, abs=1e-12),
+    "max_abs_orientation_error_rad": pytest.approx(0.010748992082004229, abs=1e-12),
+    "max_abs_qd_radps": pytest.approx(0.056309901527987885, abs=1e-12),
+    "max_abs_tau_applied_nm": pytest.approx(2.9572777532474124, abs=1e-9),
+    "move_hold_quality_score": pytest.approx(0.6120449191460254, abs=1e-9),
 }
 EXPECTED_FINAL_Q = [
-    2.5126774343635992e-06,
-    -1.5708086481437646,
-    -2.5510174184623293e-05,
-    -1.5707951336467978,
-    -1.7053370374942624e-06,
-    2.245310874135949e-05,
+    0.0012684573093999323,
+    -1.579297649925123,
+    -0.004283204566751049,
+    -1.5702074940577369,
+    -0.00022665150852423045,
+    0.0021185709980759745,
 ]
-EXPECTED_FINAL_EE_POS = [2.414780061231773e-05, -0.23399999993991763, 1.0799999996263487]
+EXPECTED_FINAL_EE_POS = [0.010118103975687933, -0.23398735129287185, 1.079945447324358]
 
 
 def test_controller_rollout_matches_pre_refactor_golden_values(tmp_path: Path) -> None:
