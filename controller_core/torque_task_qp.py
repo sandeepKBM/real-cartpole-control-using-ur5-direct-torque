@@ -265,6 +265,9 @@ class TorqueTaskQPController:
             # (controller_core/x_axis_cartesian_impedance.py's
             # ``wrist_orientation_task`` flag) -- always zero here.
             tau_orient_wrist=np.zeros(6, dtype=np.float64),
+            # Same: this controller does not implement friction feedforward
+            # (x_axis_cartesian_impedance.py's ``friction_feedforward`` flag).
+            tau_friction_ff=np.zeros(6, dtype=np.float64),
             tau_gravity=gravity,
             tau_saturated=saturated.astype(np.float64),
             jacobian_cond=cond,

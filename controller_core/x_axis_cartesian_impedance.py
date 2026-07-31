@@ -161,6 +161,47 @@ class CartesianImpedanceConfig:
     wrist_orientation_task: bool = False
     kp_rot_wrist: float = 0.0
     kd_rot_wrist: float = 0.0
+    # Model-based joint-friction feedforward (default off = historical
+    # behavior). Added 2026-07-31 to address a real sim-to-real gap: the real
+    # UR5e only achieved ~55-72% of a small commanded X displacement with
+    # steady-state hold-phase torque that never decayed toward zero -- a
+    # friction/stiction signature the (until tonight, frictionless) sim never
+    # showed. A same-night sim smoke test confirmed pure proportional gain
+    # cannot close this: even with real joint friction added to the MuJoCo
+    # model, closed-loop kp_x alone still recovered ~99% of target
+    # displacement in sim, far short of the real shortfall -- a disturbance
+    # like friction needs either feedforward cancellation or integral action
+    # to fully zero out at steady state, not more gain. This term is the
+    # feedforward half:
+    #
+    #   tau_friction_ff = friction_ff_coulomb_nm * tanh(qd / friction_ff_qd_deadband)
+    #                     + friction_ff_viscous * qd
+    #
+    # tanh(qd/eps) is used instead of a hard sign(qd) deliberately: a sign()
+    # discontinuity right at qd~=0 -- exactly the hold-phase regime this is
+    # meant to fix -- would chatter/oscillate instead of settle. Defaults
+    # mirror assets/ur5e_torque/ur5e_torque.xml's own frictionloss/damping
+    # values (size3 joints 5.0 Nm / 0.4, size1 joints 1.0 Nm / 0.15) as a
+    # starting point, independently tunable since the real robot's true
+    # friction need not match the sim model exactly. Summed into the same
+    # joint-space bias (tau_damping + tau_posture + ... + gravity) as
+    # tau_orient_wrist, so it flows through the existing geometric-
+    # backtracking and hard-clip logic identically -- no bypass.
+    friction_feedforward: bool = False
+    friction_ff_coulomb_nm: np.ndarray = field(
+        default_factory=lambda: np.array([5.0, 5.0, 5.0, 1.0, 1.0, 1.0], dtype=np.float64)
+    )
+    friction_ff_viscous: np.ndarray = field(
+        default_factory=lambda: np.array([0.4, 0.4, 0.4, 0.15, 0.15, 0.15], dtype=np.float64)
+    )
+    # Default 0.05, NOT a smaller value: a same-night sim smoke test found
+    # deadband=0.01 produces a genuine closed-loop limit cycle (typical
+    # hold-phase |qd| sits ~0.005-0.02 rad/s, right in the tanh term's steep
+    # transition region at that setting, acting like a large local negative-
+    # damping gain). 0.05 settles cleanly instead -- see
+    # config/ur5e_mujoco_torque_osc_tuned_friction_ff.yaml's header for the
+    # measured before/after numbers.
+    friction_ff_qd_deadband: float = 0.05
 
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianImpedanceConfig":
@@ -208,6 +249,24 @@ class CartesianImpedanceConfig:
             wrist_orientation_task=bool(ctrl.get("wrist_orientation_task", False)),
             kp_rot_wrist=float(gains.get("kp_rot_wrist", 0.0)),
             kd_rot_wrist=float(gains.get("kd_rot_wrist", 0.0)),
+            friction_feedforward=bool(ctrl.get("friction_feedforward", False)),
+            friction_ff_coulomb_nm=(
+                np.array(
+                    [float(ctrl["friction_ff_coulomb_nm"][name]) for name in JOINT_NAME_ORDER],
+                    dtype=np.float64,
+                )
+                if "friction_ff_coulomb_nm" in ctrl
+                else np.array([5.0, 5.0, 5.0, 1.0, 1.0, 1.0], dtype=np.float64)
+            ),
+            friction_ff_viscous=(
+                np.array(
+                    [float(ctrl["friction_ff_viscous"][name]) for name in JOINT_NAME_ORDER],
+                    dtype=np.float64,
+                )
+                if "friction_ff_viscous" in ctrl
+                else np.array([0.4, 0.4, 0.4, 0.15, 0.15, 0.15], dtype=np.float64)
+            ),
+            friction_ff_qd_deadband=float(ctrl.get("friction_ff_qd_deadband", 0.05)),
         )
 
 
@@ -221,6 +280,7 @@ class CartesianImpedanceOutput:
     tau_damping: np.ndarray
     tau_posture: np.ndarray
     tau_orient_wrist: np.ndarray
+    tau_friction_ff: np.ndarray
     tau_gravity: np.ndarray
     tau_saturated: np.ndarray
     jacobian_cond: float
@@ -242,6 +302,7 @@ class CartesianImpedanceOutput:
     mass_matrix_provided: bool = False
     posture_reanchored: bool = False
     wrist_orientation_task_active: bool = False
+    friction_feedforward_active: bool = False
 
 
 class XAxisCartesianImpedanceController:
@@ -503,11 +564,19 @@ class XAxisCartesianImpedanceController:
             m_wrist = self.cfg.kp_rot_wrist * e_rot - self.cfg.kd_rot_wrist * omega
             tau_orient_wrist = (J_rot.T @ m_wrist) * WRIST_ORIENTATION_MASK
 
+        use_friction_feedforward = bool(self.cfg.friction_feedforward)
+        tau_friction_ff = np.zeros(6, dtype=np.float64)
+        if use_friction_feedforward:
+            coulomb = np.asarray(self.cfg.friction_ff_coulomb_nm, dtype=np.float64).reshape(6)
+            viscous = np.asarray(self.cfg.friction_ff_viscous, dtype=np.float64).reshape(6)
+            deadband = max(float(self.cfg.friction_ff_qd_deadband), 1e-9)
+            tau_friction_ff = coulomb * np.tanh(qd / deadband) + viscous * qd
+
         g = np.zeros(6, dtype=np.float64)
         if "gravity_torque" in st and st["gravity_torque"] is not None:
             g = np.asarray(st["gravity_torque"], dtype=np.float64).reshape(6)
 
-        tau_bias = tau_damping + tau_posture + tau_orient_wrist + g
+        tau_bias = tau_damping + tau_posture + tau_orient_wrist + tau_friction_ff + g
         tau_limit = np.asarray(self.cfg.tau_max_nm, dtype=np.float64).reshape(6)
         tau_headroom = np.clip(float(self.cfg.torque_headroom), 0.0, 1.0)
         tau_limit_headroom = tau_limit * max(tau_headroom, 0.0)
@@ -524,6 +593,7 @@ class XAxisCartesianImpedanceController:
         tau_damping = task_backtrack_scale * tau_damping
         tau_posture = task_backtrack_scale * tau_posture
         tau_orient_wrist = task_backtrack_scale * tau_orient_wrist
+        tau_friction_ff = task_backtrack_scale * tau_friction_ff
         g = task_backtrack_scale * g
         tau = tau_preclip
 
@@ -540,6 +610,7 @@ class XAxisCartesianImpedanceController:
             tau_damping=tau_damping,
             tau_posture=tau_posture,
             tau_orient_wrist=tau_orient_wrist,
+            tau_friction_ff=tau_friction_ff,
             tau_gravity=g,
             tau_saturated=saturated.astype(np.float64),
             jacobian_cond=cond,
@@ -561,4 +632,5 @@ class XAxisCartesianImpedanceController:
             mass_matrix_provided=bool(mass_matrix_provided),
             posture_reanchored=bool(self._posture_reanchored),
             wrist_orientation_task_active=use_wrist_orientation_task,
+            friction_feedforward_active=use_friction_feedforward,
         )
