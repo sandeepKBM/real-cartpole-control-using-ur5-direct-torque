@@ -639,6 +639,20 @@ def write_trace_plot(trace_rows: Sequence[dict[str, Any]], output_path: str | Pa
 # ---------------------------------------------------------------------------
 
 
+def accel_duration_displacement(profile: str, target_accel_mps2: float, move_duration_s: float) -> float:
+    """Closed-form total displacement for the accel/duration-driven profiles
+    below, for callers that need to know the resulting delta upfront (e.g.
+    to log/score it as `target_x_delta_m` alongside the existing
+    dx-driven profiles, even though dx is an OUTPUT here, not an input)."""
+    a = float(target_accel_mps2)
+    t = max(float(move_duration_s), 1.0e-9)
+    if profile == "accel_duration_triangular":
+        return a * t * t / 4.0
+    if profile == "accel_duration_scurve":
+        return a * t * t / (2.0 * np.pi)
+    raise ValueError(f"Unsupported accel/duration profile: {profile!r}")
+
+
 def x_profile_target(
     profile: str,
     x0: float,
@@ -646,6 +660,7 @@ def x_profile_target(
     t_s: float,
     duration_s: float,
     move_duration_s: float | None = None,
+    target_accel_mps2: float | None = None,
 ) -> tuple[float, float]:
     duration_s = max(float(duration_s), 1.0e-9)
     a = float(np.clip(float(t_s) / duration_s, 0.0, 1.0))
@@ -671,6 +686,49 @@ def x_profile_target(
             x_vel = float(target_x_delta * ds_da / move_duration_s if 0.0 <= t_s < move_duration_s else 0.0)
             return float(x0 + target_x_delta * s), x_vel
         return float(x0 + target_x_delta), 0.0
+    if profile in ("accel_duration_triangular", "accel_duration_scurve"):
+        # "High-level controller" entry point: caller supplies a peak
+        # acceleration and a duration instead of a displacement -- the
+        # low-level OSC controller is driven by the resulting x_target/
+        # x_target_vel trajectory exactly as with the dx-driven profiles
+        # above. Displacement is an OUTPUT (see accel_duration_displacement),
+        # not an input; both variants start and end at rest (v=0 at t=0 and
+        # t=move_duration_s), matching min_jerk_move_hold's move-then-hold
+        # shape and calling convention (move_duration_s = the accel-active
+        # window, duration_s = total run including the post-move hold).
+        if target_accel_mps2 is None:
+            raise ValueError(f"{profile} requires target_accel_mps2")
+        if move_duration_s is None:
+            raise ValueError(f"{profile} requires move_duration_s")
+        move_duration_s = max(float(move_duration_s), 1.0e-9)
+        if move_duration_s > duration_s:
+            raise ValueError(f"move_duration_s must not exceed duration_s for {profile}")
+        accel = float(target_accel_mps2)
+        total_delta = accel_duration_displacement(profile, accel, move_duration_s)
+        if t_s > move_duration_s:
+            return float(x0 + total_delta), 0.0
+        t_clamped = float(np.clip(t_s, 0.0, move_duration_s))
+        if profile == "accel_duration_triangular":
+            half_t = move_duration_s / 2.0
+            if t_clamped <= half_t:
+                x_rel = 0.5 * accel * t_clamped * t_clamped
+                x_vel = accel * t_clamped
+            else:
+                tau = t_clamped - half_t
+                x_rel = accel * move_duration_s**2 / 8.0 + accel * half_t * tau - 0.5 * accel * tau * tau
+                x_vel = accel * half_t - accel * tau
+            return float(x0 + x_rel), float(x_vel)
+        # accel_duration_scurve: a(t) = accel * sin(2*pi*t/T) -- jerk-continuous
+        # (no instantaneous acceleration jumps, unlike the triangular variant
+        # above), still parameterized by only (accel, duration). Chosen
+        # specifically to avoid the real TCP-acceleration-spike failure mode a
+        # bang-bang accel profile risks reproducing (see AGENTS.md's 2026-07-31
+        # -45deg/friction entries for real examples of that failure signature).
+        omega = 2.0 * np.pi / move_duration_s
+        coeff = accel * move_duration_s / (2.0 * np.pi)
+        x_rel = coeff * (t_clamped - (move_duration_s / (2.0 * np.pi)) * np.sin(omega * t_clamped))
+        x_vel = accel * (1.0 - np.cos(omega * t_clamped))
+        return float(x0 + x_rel), float(x_vel)
     raise ValueError(f"Unsupported trajectory profile: {profile!r}")
 
 

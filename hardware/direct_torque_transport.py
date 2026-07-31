@@ -19,7 +19,7 @@ from controller_core.x_axis_cartesian_impedance import (
     CartesianImpedanceConfig,
     XAxisCartesianImpedanceController,
 )
-from simulation.ur5e_mujoco_torque import x_profile_target
+from simulation.ur5e_mujoco_torque import accel_duration_displacement, x_profile_target
 from transport_metrics import compute_valid_move_hold_metrics, summarize_move_hold_trace
 
 from .direct_torque_link import UR5eDirectTorqueLink
@@ -72,6 +72,8 @@ def run_x_transport_direct_torque(
     duration_s: float,
     output_dir: Path | None = None,
     motion_opt_in: bool,
+    trajectory_profile: str = "min_jerk_move_hold",
+    target_accel_mps2: float | None = None,
     record_latency: bool = True,
     dynamics_source: str = "rtde",
     coriolis_feedforward: bool = False,
@@ -130,6 +132,17 @@ def run_x_transport_direct_torque(
         raise ValueError("move_duration_s and duration_s must be positive")
     if move_duration_s > duration_s:
         raise ValueError("move_duration_s must not exceed duration_s")
+    if trajectory_profile in ("accel_duration_triangular", "accel_duration_scurve"):
+        if target_accel_mps2 is None:
+            raise ValueError(f"trajectory_profile={trajectory_profile!r} requires target_accel_mps2")
+        # target_x_delta_m becomes a derived/reported quantity, not an input,
+        # for these profiles -- computed once upfront via the same closed-
+        # form used inside x_profile_target(), so every downstream consumer
+        # (tolerances, scoring, summary.json) sees a normal target_x_delta_m
+        # exactly as with the dx-driven profiles, unaware anything differs.
+        target_x_delta_m = accel_duration_displacement(trajectory_profile, target_accel_mps2, move_duration_s)
+    elif target_accel_mps2 is not None:
+        raise ValueError(f"target_accel_mps2 is only meaningful for accel/duration profiles, not {trajectory_profile!r}")
 
     controller = XAxisCartesianImpedanceController(impedance_cfg)
     if gain_overrides:
@@ -332,12 +345,13 @@ def run_x_transport_direct_torque(
                 break
 
             target_x, target_x_vel = x_profile_target(
-                "min_jerk_move_hold",
+                trajectory_profile,
                 x0,
                 float(target_x_delta_m),
                 t_s,
                 duration_s,
                 move_duration_s=move_duration_s,
+                target_accel_mps2=target_accel_mps2,
             )
 
             t_jac = monotonic_ns()
@@ -628,6 +642,8 @@ def run_x_transport_direct_torque(
         "gain_overrides": dict(gain_overrides) if gain_overrides else {},
         "target_x_delta": float(target_x_delta_m),
         "target_x_delta_m": float(target_x_delta_m),
+        "trajectory_profile": trajectory_profile,
+        "target_accel_mps2": None if target_accel_mps2 is None else float(target_accel_mps2),
         "move_duration_s": move_duration_s,
         "hold_duration_s": hold_duration_s,
         "duration_s": duration_s,

@@ -35,6 +35,7 @@ from simulation.ur5e_mujoco_torque import (  # noqa: E402
     build_initial_state_and_adapter,
     build_mujoco_state,
     compute_joint_limit_proximity,
+    accel_duration_displacement,
     compute_reward_terms,
     load_model,
     resolve_start_q,
@@ -61,6 +62,11 @@ MODE_CHOICES = (
 )
 
 _HOLD_MODES = {"gravity-comp-hold", "gravity-comp-hold-long", "impedance-hold", "residual-impedance-hold"}
+# Profiles needing move_duration_s (same as min_jerk_move_hold) and, for the
+# accel_duration_* pair, --target-accel instead of --target-x-delta -- see
+# simulation/ur5e_mujoco_torque.py::x_profile_target's docstring comments.
+_MOVE_DURATION_PROFILES = {"min_jerk_move_hold", "accel_duration_triangular", "accel_duration_scurve"}
+_ACCEL_DURATION_PROFILES = {"accel_duration_triangular", "accel_duration_scurve"}
 _GRAVITY_COMP_MODES = {"gravity-comp-hold", "gravity-comp-hold-long", "impedance-hold", "residual-impedance-hold", "x-transport-minjerk"}
 
 
@@ -104,15 +110,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--transport-axis-index", type=int, default=0)
     p.add_argument(
         "--trajectory-profile",
-        choices=("step", "ramp", "min_jerk", "min_jerk_move_hold"),
+        choices=("step", "ramp", "min_jerk", "min_jerk_move_hold", "accel_duration_triangular", "accel_duration_scurve"),
         default=None,
-        help="Time profile for the world-X target during controller-rollout experiments.",
+        help=(
+            "Time profile for the world-X target during controller-rollout experiments. "
+            "accel_duration_triangular/accel_duration_scurve take --target-accel (peak m/s^2) "
+            "instead of --target-x-delta -- displacement becomes an OUTPUT, computed from "
+            "accel and --move-duration."
+        ),
     )
     p.add_argument(
         "--move-duration",
         type=float,
         default=None,
-        help="Move duration in seconds for min_jerk_move_hold trajectories.",
+        help="Move duration in seconds for min_jerk_move_hold / accel_duration_* trajectories.",
+    )
+    p.add_argument(
+        "--target-accel",
+        type=float,
+        default=None,
+        help="Peak acceleration in m/s^2, required when --trajectory-profile is accel_duration_*.",
     )
     p.add_argument(
         "--gravity-mode",
@@ -625,9 +642,9 @@ def run() -> int:
         "failure_reason": "",
     }
 
-    if trajectory_profile == "min_jerk_move_hold":
+    if trajectory_profile in _MOVE_DURATION_PROFILES:
         if move_duration_s is None:
-            summary["failure_reason"] = "move_duration_required_for_min_jerk_move_hold"
+            summary["failure_reason"] = f"move_duration_required_for_{trajectory_profile}"
             summary_path = run_dir / "summary.json"
             summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
             print(json.dumps(summary, indent=2))
@@ -640,6 +657,12 @@ def run() -> int:
             summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
             print(json.dumps(summary, indent=2))
             return 2
+    if trajectory_profile in _ACCEL_DURATION_PROFILES and args.target_accel is None:
+        summary["failure_reason"] = f"target_accel_required_for_{trajectory_profile}"
+        summary_path = run_dir / "summary.json"
+        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        print(json.dumps(summary, indent=2))
+        return 2
 
     try:
         model, data, site_id, joint_ids, actuator_ids = load_model(scene_xml)
@@ -701,12 +724,22 @@ def run() -> int:
             controller_kind=controller_kind,
         )
 
-    target_x_delta = 0.0 if args.mode in _HOLD_MODES else float(args.target_x_delta)
+    if args.mode in _HOLD_MODES:
+        target_x_delta = 0.0
+    elif trajectory_profile in _ACCEL_DURATION_PROFILES:
+        # Displacement is an OUTPUT for these profiles, not an input --
+        # computed once upfront via the same closed form x_profile_target()
+        # uses internally, so downstream scoring/logging (which all expect
+        # target_x_delta as a known quantity) is unaffected.
+        target_x_delta = accel_duration_displacement(trajectory_profile, float(args.target_accel), float(move_duration_s))
+        summary["target_accel_mps2"] = float(args.target_accel)
+    else:
+        target_x_delta = float(args.target_x_delta)
     summary["target_x_delta"] = float(target_x_delta)
     summary["duration_s"] = float(args.duration)
     summary["total_duration_s"] = float(args.duration)
     summary["transport_axis_index"] = int(args.transport_axis_index)
-    if trajectory_profile == "min_jerk_move_hold":
+    if trajectory_profile in _MOVE_DURATION_PROFILES:
         summary["hold_duration_s"] = float(args.duration) - float(move_duration_s if move_duration_s is not None else 0.0)
     state0, adapter = build_initial_state_and_adapter(
         model,
@@ -755,7 +788,8 @@ def run() -> int:
                 float(target_x_delta),
                 float(data.time),
                 float(args.duration),
-                move_duration_s=move_duration_s if trajectory_profile == "min_jerk_move_hold" else None,
+                move_duration_s=move_duration_s if trajectory_profile in _MOVE_DURATION_PROFILES else None,
+                target_accel_mps2=float(args.target_accel) if trajectory_profile in _ACCEL_DURATION_PROFILES else None,
             )
             target_ee_pos = np.array([target_x_now, state0.ee_pos[1], state0.ee_pos[2]], dtype=np.float64)
             target_ee_vel = np.array([target_x_vel_now, 0.0, 0.0], dtype=np.float64)
@@ -1153,7 +1187,7 @@ def run() -> int:
             }
         )
         summary.update(summarize_residual_torque_trace(trace_rows, torque_limit_nm=adapter.torque_limit_nm))
-        if trajectory_profile == "min_jerk_move_hold":
+        if trajectory_profile in _MOVE_DURATION_PROFILES:
             summary.update(
                 summarize_move_hold_trace(
                     trace_rows,

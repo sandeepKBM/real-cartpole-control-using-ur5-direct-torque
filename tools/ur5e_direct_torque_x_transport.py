@@ -100,6 +100,27 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     p.add_argument("--control-mode", choices=("position", "direct_torque", "urscript"), default="position")
     p.add_argument("--target-x-delta", type=float, default=0.02)
+    p.add_argument(
+        "--trajectory-profile",
+        choices=("min_jerk_move_hold", "accel_duration_triangular", "accel_duration_scurve"),
+        default="min_jerk_move_hold",
+        help=(
+            "min_jerk_move_hold (default): --target-x-delta is the commanded displacement. "
+            "accel_duration_triangular / accel_duration_scurve (direct_torque only): --target-accel "
+            "is the commanded peak acceleration instead, --target-x-delta is ignored (displacement "
+            "becomes an OUTPUT, computed as accel*move_duration^2/4 (triangular) or "
+            "accel*move_duration^2/(2*pi) (scurve)). triangular switches acceleration instantly "
+            "+a -> -a at the midpoint (real jerk discontinuity); scurve ramps acceleration smoothly "
+            "via a(t)=accel*sin(2*pi*t/move_duration) -- start with scurve if you're specifically "
+            "trying to avoid a TCP-acceleration/speed guard trip."
+        ),
+    )
+    p.add_argument(
+        "--target-accel",
+        type=float,
+        default=None,
+        help="Peak acceleration in m/s^2, required when --trajectory-profile is accel-driven.",
+    )
     p.add_argument("--move-duration", type=float, default=1.0)
     p.add_argument("--duration", type=float, default=3.0)
     p.add_argument("--output-dir", type=Path, default=None)
@@ -415,6 +436,8 @@ def main() -> int:
                 "speed_max_consecutive_violations"
             ),
             speed_hard_multiple_override=move_limit_overrides.get("speed_hard_multiple"),
+            trajectory_profile=str(args.trajectory_profile),
+            target_accel_mps2=None if args.target_accel is None else float(args.target_accel),
         )
     except (RTDELinkError, ValueError) as exc:
         print(f"RTDE/start-pose failed: {exc}", file=sys.stderr)

@@ -82,10 +82,19 @@ def run_x_transport(
     speed_hard_multiple_override: float | None = None,
     enable_residual_observer: bool = True,
     residual_observer_async: bool = False,
+    trajectory_profile: str = "min_jerk_move_hold",
+    target_accel_mps2: float | None = None,
 ) -> XTransportResult:
     mode = normalize_control_mode(control_mode)
     if start_q_rad is not None:
         start_q_rad = _validate_start_q_rad(start_q_rad)
+    if trajectory_profile != "min_jerk_move_hold" and mode != "direct_torque":
+        # accel/duration profiles are wired for the direct_torque OSC loop
+        # only tonight -- position/urscript have their own separate
+        # trajectory-generation paths not touched here.
+        raise ValueError(
+            f"trajectory_profile={trajectory_profile!r} is only supported for control_mode='direct_torque'"
+        )
 
     if mode == "urscript":
         raw: UrscriptTransportResult = run_urscript_x_transport(
@@ -198,6 +207,8 @@ def run_x_transport(
         speed_max_consecutive_violations_override=speed_max_consecutive_violations_override,
         speed_hard_multiple_override=speed_hard_multiple_override,
         enable_residual_observer=enable_residual_observer,
+        trajectory_profile=trajectory_profile,
+        target_accel_mps2=target_accel_mps2,
         residual_observer_async=residual_observer_async,
     )
     return XTransportResult(
