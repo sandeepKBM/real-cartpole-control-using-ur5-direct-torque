@@ -203,6 +203,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip top-level plots. Child experiment runs are always executed with --no-plot.",
     )
+    p.add_argument(
+        "--start-q-rad",
+        nargs=6,
+        type=float,
+        default=None,
+        metavar=("Q1", "Q2", "Q3", "Q4", "Q5", "Q6"),
+        help="Optional six-joint start pose in radians. Mirrors "
+        "tools/ur5e_move_hold_transport.py's flag of the same name. Omitting it "
+        "reproduces today's exact default-start-pose behavior.",
+    )
     return p.parse_args()
 
 
@@ -266,6 +276,8 @@ def _run_child_experiment(
         cmd.extend(["--controller-kind", controller_kind])
     if args.scene is not None:
         cmd.extend(["--scene", str(args.scene)])
+    if getattr(args, "start_q_rad", None) is not None:
+        cmd.extend(["--start-q-rad", *[str(float(v)) for v in args.start_q_rad]])
     if args.no_plot:
         cmd.append("--no-plot")
 
