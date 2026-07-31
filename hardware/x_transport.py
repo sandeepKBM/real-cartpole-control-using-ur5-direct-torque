@@ -81,6 +81,7 @@ def run_x_transport(
     speed_max_consecutive_violations_override: int | None = None,
     speed_hard_multiple_override: float | None = None,
     enable_residual_observer: bool = True,
+    residual_observer_async: bool = False,
 ) -> XTransportResult:
     mode = normalize_control_mode(control_mode)
     if start_q_rad is not None:
@@ -197,6 +198,7 @@ def run_x_transport(
         speed_max_consecutive_violations_override=speed_max_consecutive_violations_override,
         speed_hard_multiple_override=speed_hard_multiple_override,
         enable_residual_observer=enable_residual_observer,
+        residual_observer_async=residual_observer_async,
     )
     return XTransportResult(
         ok=raw_dt.ok,

@@ -27,6 +27,11 @@ from .joint_accel_estimator import JointAccelEstimator
 from .latency import PhaseLatencyRecorder
 from .link import RTDEStateError
 from .local_dynamics import LocalPinocchioDynamics, LocalPinocchioFastDynamics, normalize_dynamics_source
+from .residual_observer_worker import (
+    ResidualAsyncSummary,
+    ResidualObserverWorkerHandle,
+    start_residual_observer_worker,
+)
 from .safety import (
     CartesianMoveLimits,
     CartesianMoveMonitor,
@@ -81,6 +86,7 @@ def run_x_transport_direct_torque(
     enable_residual_observer: bool = True,
     residual_qdd_gap_cycles: int = 1,
     residual_qdd_lowpass_alpha: float = 1.0,
+    residual_observer_async: bool = False,
 ) -> DirectTorqueTransportResult:
     if not motion_opt_in:
         raise ValueError("motion_opt_in must be True for a live direct-torque transport")
@@ -181,6 +187,36 @@ def run_x_transport_direct_torque(
     controller.reset_from_state(init_robot_state)
     if residual_accel_estimator is not None:
         residual_accel_estimator.reset(state0.qd)
+
+    # Opt-in async residual observer (2026-07-31, see
+    # docs/status/direct_torque_residual_observer_async_2026-07-31.md and
+    # hardware/residual_observer_worker.py's module docstring). Default
+    # (residual_observer_async=False) leaves the inline synchronous path
+    # below completely untouched -- residual_worker stays None and the loop
+    # takes the exact same branch it always has.
+    #
+    # residual_dynamics/residual_accel_estimator above are still constructed
+    # (or not, on init failure) exactly as before -- that pre-connect probe
+    # is what preserves this feature's existing "fail fast on a bad
+    # gap_cycles/lowpass_alpha value, and gracefully degrade to disabled on
+    # any other init failure, before ever touching the robot" contract for
+    # BOTH modes. In async mode those two objects are simply never used for
+    # per-cycle computation (the worker builds its own copies, since Pinocchio
+    # C++ state can't cross a process boundary) -- only their successful
+    # construction here is reused, as the signal that it's safe to start the
+    # worker.
+    residual_worker: ResidualObserverWorkerHandle | None = None
+    residual_async_summary: ResidualAsyncSummary | None = None
+    residual_async_active = bool(
+        residual_observer_async and residual_dynamics is not None and residual_accel_estimator is not None
+    )
+    if residual_async_active:
+        residual_worker = start_residual_observer_worker(
+            qd0=state0.qd,
+            gap_cycles=residual_qdd_gap_cycles,
+            lowpass_alpha=residual_qdd_lowpass_alpha,
+        )
+
     safety.reset()
     safety.set_initial_position(
         np.asarray(state0.tcp_pose[:3], dtype=np.float64),
@@ -440,8 +476,32 @@ def run_x_transport_direct_torque(
             # docs/status/residual_observer_dynamics_optimization_2026-07-30.md
             # and dynamics_residual.py::predict_joint_acceleration's docstring
             # for the same derivation.
+            # Async mode (2026-07-31, see
+            # docs/status/direct_torque_residual_observer_async_2026-07-31.md):
+            # replace the inline compute with a strictly non-blocking enqueue
+            # to the worker process started before this loop began. qdd_pred/
+            # qdd_measured/qdd_residual are NOT available this cycle either
+            # way -- they are filled in later by merging the worker's results
+            # back into trace_rows by step index, after the loop exits (see
+            # the merge block below). This keeps the sync path (below,
+            # residual_observer_async=False) exactly as it was before this
+            # change -- same objects, same formula, same trace_rows fields
+            # populated inline, same phases.record placement.
             qdd_pred = qdd_measured = qdd_residual = None
-            if residual_dynamics is not None and residual_accel_estimator is not None:
+            if residual_worker is not None:
+                t_residual = monotonic_ns()
+                real_dt_s = dt_s if interval_ns is None else max(dt_s, interval_ns / 1e9)
+                residual_worker.submit(
+                    step=steps,
+                    q=link_state.q,
+                    qd=link_state.qd,
+                    tau=tau,
+                    mass_matrix=mass_matrix,
+                    real_dt_s=real_dt_s,
+                )
+                if phases is not None:
+                    phases.record("residual_observer_ns", monotonic_ns() - t_residual)
+            elif residual_dynamics is not None and residual_accel_estimator is not None:
                 t_residual = monotonic_ns()
                 coriolis_term = residual_dynamics.coriolis(link_state.q, link_state.qd)
                 qdd_pred = predict_joint_acceleration(mass_matrix, tau, coriolis_term)
@@ -513,6 +573,49 @@ def run_x_transport_direct_torque(
         except Exception:
             pass
         link.safe_stop("transport_exit")
+        # Worker lifecycle: this MUST run under every exit path (normal
+        # completion, estop break, or an exception propagating out of the
+        # try block above) so no zombie process can survive a run. Merging
+        # results into trace_rows happens separately, below, outside this
+        # timed/critical finally block -- see that block's comment for why.
+        if residual_worker is not None:
+            residual_async_summary = residual_worker.shutdown_and_collect()
+
+    # Merge async residual-observer results back into trace_rows by step
+    # index, outside the timed per-cycle section (see the finally block above
+    # for why process shutdown itself happens there instead -- that part
+    # must run under every exit path, this merge is pure post-hoc
+    # bookkeeping and only meaningful on a normal/RTDEStateError exit, since
+    # any other exception aborts this function before trace_rows/summary are
+    # ever returned to a caller). trace_rows is appended once per loop
+    # iteration in step order starting at 0, so `step` is exactly the list
+    # index. Steps with no result (dropped request, dropped result, or still
+    # in flight when the worker was torn down) keep the qdd_*=None
+    # placeholders already written when the row was appended -- same
+    # "diagnostic data not yet available" convention the sync path already
+    # uses for the gap-window-filling case.
+    residual_async_merged_count = 0
+    if residual_async_summary is not None:
+        if residual_async_summary.worker_init_error:
+            print(
+                f"[direct_torque_transport] WARNING: async residual observer worker failed to "
+                f"initialize ({residual_async_summary.worker_init_error}). This is a "
+                f"diagnostic-only feature -- the run proceeded without residual data rather "
+                f"than block real hardware operation over a missing/broken diagnostic "
+                f"dependency.",
+                flush=True,
+            )
+        for step, payload in residual_async_summary.results.items():
+            if "error" in payload:
+                continue  # worker-side compute error for this cycle; leave qdd_*=None
+            if not (0 <= step < len(trace_rows)):
+                continue
+            row = trace_rows[step]
+            row["qdd_pred"] = payload.get("qdd_pred")
+            row["qdd_measured"] = payload.get("qdd_measured")
+            row["qdd_residual"] = payload.get("qdd_residual")
+            row["qdd_residual_norm"] = payload.get("qdd_residual_norm")
+            residual_async_merged_count += 1
 
     final_state = last_link_state
     achieved_x_delta_m = float(final_state.tcp_pose[0] - x0)
@@ -546,6 +649,21 @@ def run_x_transport_direct_torque(
     }
     if phases is not None:
         summary["latency_phases"] = phases.summary()
+    if residual_async_summary is not None:
+        # Diagnostic-only lifecycle/coverage bookkeeping for the async
+        # residual observer -- see
+        # docs/status/direct_torque_residual_observer_async_2026-07-31.md.
+        summary["residual_observer_async"] = {
+            "enabled": True,
+            "steps": steps,
+            "dropped_request_count": residual_async_summary.dropped_request_count,
+            "dropped_result_count": residual_async_summary.dropped_result_count,
+            "merged_step_count": residual_async_merged_count,
+            "unmerged_step_count": steps - residual_async_merged_count,
+            "worker_init_error": residual_async_summary.worker_init_error,
+            "worker_exitcode": residual_async_summary.exitcode,
+            "worker_terminated_forcefully": residual_async_summary.terminated_forcefully,
+        }
     summary.update(
         summarize_move_hold_trace(
             trace_rows,

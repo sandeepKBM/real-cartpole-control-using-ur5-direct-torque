@@ -293,6 +293,26 @@ def parse_args() -> argparse.Namespace:
             "dependency entirely, e.g. on a host where it's known to be broken."
         ),
     )
+    p.add_argument(
+        "--residual-observer-async",
+        action="store_true",
+        help=(
+            "direct_torque only. Opt-in: run the diagnostic-only residual "
+            "observer's dynamics computation in a separate worker process "
+            "instead of inline in the 500 Hz loop, so its cost (and "
+            "especially its tail-latency spikes) leaves the loop's timing "
+            "budget entirely. Default off (identical inline synchronous "
+            "behavior). Real hardware measured this phase at ~0.15ms mean "
+            "with real occasional spikes large enough to trip the deadline "
+            "monitor; async mode moved the mean well under that, at the "
+            "cost of a real (typically sub-cycle to a few-cycle) delay "
+            "before diagnostic values are available, and the last few "
+            "in-flight cycles of a run keep qdd_*=None (never computed in "
+            "time) -- see "
+            "docs/status/direct_torque_residual_observer_async_2026-07-31.md. "
+            "Ignored if --disable-residual-observer is also passed."
+        ),
+    )
     return p.parse_args()
 
 
@@ -385,6 +405,7 @@ def main() -> int:
             max_tcp_accel_mps2_override=move_limit_overrides.get("max_tcp_accel_mps2"),
             accel_gap_cycles_override=move_limit_overrides.get("accel_gap_cycles"),
             enable_residual_observer=not bool(args.disable_residual_observer),
+            residual_observer_async=bool(args.residual_observer_async),
             speed_lowpass_alpha_override=move_limit_overrides.get("speed_lowpass_alpha"),
             accel_max_consecutive_violations_override=move_limit_overrides.get(
                 "accel_max_consecutive_violations"
