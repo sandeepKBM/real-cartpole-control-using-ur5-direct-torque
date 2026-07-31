@@ -28,6 +28,16 @@ class PhaseLatencyRecorder:
     sleep_ns: list[int] = field(default_factory=list)
     total_work_ns: list[int] = field(default_factory=list)
     lateness_ns: list[int] = field(default_factory=list)
+    # Diagnostic-only (2026-07-31, see
+    # docs/status/direct_torque_loop_tail_latency_investigation_2026-07-31.md).
+    # tracker.add_sample()/trace_rows.append() run AFTER the per-cycle
+    # sleep() call, so their real cost was previously invisible in this
+    # summary and leaked entirely into the NEXT cycle's measured lateness.
+    # Purely additive: wraps the existing calls in place, does not move or
+    # change them, and is deliberately excluded from dominant_phase's
+    # candidate set below so it cannot change that field's existing output.
+    tracker_sample_ns: list[int] = field(default_factory=list)
+    trace_append_ns: list[int] = field(default_factory=list)
 
     def record(self, name: str, duration_ns: int) -> None:
         bucket = getattr(self, name)
@@ -49,6 +59,8 @@ class PhaseLatencyRecorder:
             "sleep": self.sleep_ns,
             "total_work": self.total_work_ns,
             "lateness": self.lateness_ns,
+            "tracker_sample": self.tracker_sample_ns,
+            "trace_append": self.trace_append_ns,
         }
         out: dict[str, Any] = {"phase_count": len(self.total_work_ns)}
         for name, values in phases.items():

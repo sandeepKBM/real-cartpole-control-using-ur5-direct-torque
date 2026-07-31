@@ -398,6 +398,14 @@ def run_x_transport_direct_torque(
             if phases is not None:
                 phases.record("sleep_ns", sleep_ns)
 
+            # Diagnostic-only timing (2026-07-31, see
+            # docs/status/direct_torque_loop_tail_latency_investigation_2026-07-31.md):
+            # this call runs after time.sleep() above, so its real cost was
+            # previously invisible to latency_phases and leaked entirely into
+            # the NEXT cycle's measured lateness_ns instead. Purely additive
+            # -- wraps the existing call in place, does not move it or change
+            # what it does.
+            t_tracker = monotonic_ns()
             tracker.add_sample(
                 cycle_index=steps,
                 start_ns=cycle_start_ns,
@@ -406,6 +414,8 @@ def run_x_transport_direct_torque(
                 sleep_ns=sleep_ns,
                 interval_ns=interval_ns,
             )
+            if phases is not None:
+                phases.record("tracker_sample_ns", monotonic_ns() - t_tracker)
             prev_cycle_start_ns = cycle_start_ns
 
             # Diagnostic-only dynamics residual observer (see the setup
@@ -442,6 +452,12 @@ def run_x_transport_direct_torque(
                 if phases is not None:
                     phases.record("residual_observer_ns", monotonic_ns() - t_residual)
 
+            # Diagnostic-only timing (2026-07-31, see
+            # docs/status/direct_torque_loop_tail_latency_investigation_2026-07-31.md):
+            # same rationale as the tracker.add_sample() timer above -- this
+            # runs after sleep(), so its cost was previously invisible and
+            # leaked into the next cycle's lateness_ns. Purely additive.
+            t_trace_append = monotonic_ns()
             trace_rows.append(
                 {
                     "time_s": t_s,
@@ -483,6 +499,8 @@ def run_x_transport_direct_torque(
                     "lateness_ms": lateness_ns / 1e6,
                 }
             )
+            if phases is not None:
+                phases.record("trace_append_ns", monotonic_ns() - t_trace_append)
             steps += 1
             t_s += dt_s
     except RTDEStateError as exc:
