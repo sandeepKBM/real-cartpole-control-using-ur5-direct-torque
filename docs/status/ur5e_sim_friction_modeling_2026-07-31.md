@@ -137,6 +137,51 @@ qualitative conclusion (friction meaningfully degrades the validated envelope un
 unchanged gains) is unlikely to reverse at other poses, but that is not separately confirmed
 here.
 
+### 3.1 Addendum (same day, after the above landed): the regression is largely fixable, and not by gain retuning
+
+A separate, concurrent effort (not part of this task; see sec 6) independently found and fixed
+this exact regression via an opt-in controller-side `friction_feedforward` term (commit
+`5eb9778`, `config/ur5e_mujoco_torque_osc_tuned_friction_ff.yaml` -- gains identical to
+`config/ur5e_mujoco_torque_osc_tuned.yaml`, only the feedforward term added) rather than
+retuning gains. Their own validation, run at `height_alpha in {0.2, 0.3}`
+(`docs/status/friction_ff_alpha_0.2_0.3_sweep_2026-07-31.md`), found baseline (no feedforward)
+passing only 22/38 and 21/38 there -- closely matching this document's 19/38 at
+`height_alpha=0.5`, i.e. an independent confirmation of the same regression at different poses
+-- and feedforward closing that to 38/38 and 35/38 (96% combined, never worse than baseline in
+any single cell).
+
+That validation did not cover `height_alpha=0.5` (the pose this document's sec 3 regression was
+measured at), so it was run here to close the loop, using the same `tools/
+ur5e_pose_sweep_transport.py` methodology, `config/ur5e_mujoco_torque_osc_tuned_friction_ff.yaml`
+(read-only input, not modified) against the friction-enabled model, `seed=0`:
+
+| category | no feedforward (sec 3) | **with friction_ff** | frictionless (original baseline) |
+|---|---|---|---|
+| canonical_grid | 3/8 | **7/8** | 8/8 |
+| long_holds | 4/8 | **8/8** | 8/8 |
+| large_displacements | 6/8 | **6/8** (unchanged) | 8/8 |
+| torque_scale_robustness | 6/14 | **12/14** | 12/14 |
+| **total** | **19/38 (50.0%)** | **33/38 (86.8%)** | 36/38 (94.7%) |
+
+**Confirms the finding generalizes**: friction_feedforward recovers most of the regression at
+this pose too (50.0% -> 86.8%, most of the way back to the original 94.7% frictionless
+baseline), consistent with the 0.2/0.3 result. `torque_scale_robustness` and `long_holds` are
+fully recovered to their frictionless pass counts. `large_displacements` is the one category
+that did **not** improve here (still 6/8, both failures at `dx=0.2m`, either hold duration) --
+diagnosed: both fail via an actual safety-guard trip (`termination_reason: "||orientation
+error|| > 0.25 rad"`, `max_abs_orientation_error_rad=0.250`, i.e. the 0.25 rad safety ceiling in
+this config), not a tracking-tolerance miss like the other categories' failures. `dx=0.2m` at
+this pose was already the documented edge of the frictionless envelope (AGENTS.md sec 3: "large
+displacements (dx up to 0.20 m) 16/16... dx=0.25 m breaks via Z-drift -- a genuine
+workspace/reach limit"), so this may be friction_ff's own added torque interacting with an
+already-marginal case rather than a new, independent problem -- not further diagnosed here
+(out of scope for this document; flagged for whoever continues the friction_ff validation work,
+alongside their own sec 6-referenced Part D real-hardware step).
+
+No file was modified to produce this addendum beyond this document -- `config/
+ur5e_mujoco_torque_osc_tuned_friction_ff.yaml` and `controller_core/x_axis_cartesian_
+impedance.py` are read-only inputs here, owned by the concurrent effort in sec 6.
+
 ## 4. A second, distinct effect: friction makes a pre-existing bug permanent, not just slower
 
 Independent of sec 3's tracking-accuracy regression (which happens even with the fully-fixed
@@ -206,8 +251,13 @@ pass rate" finding may already be relevant input to that separate effort.
   decaying hold-phase torque; measurably worse tracking) without being tuned to match the exact
   55-72% figure, as instructed.
 - **Friction alone, with gains unchanged, roughly halves the previously-validated
-  `height_alpha=0.5` envelope's pass rate (36/38 -> 19/38).** This needs a deliberate human
-  decision (retune vs. accept vs. add controller-side compensation) -- not made here.
+  `height_alpha=0.5` envelope's pass rate (36/38 -> 19/38).** This needed a deliberate human
+  decision (retune vs. accept vs. add controller-side compensation) -- not made in this task.
+  **Update (sec 3.1): a concurrent effort resolved it via controller-side friction feedforward,
+  not gain retuning** -- 19/38 -> 33/38 (86.8%) at this same pose, closely matching their
+  independently-run 96% at `height_alpha` 0.2/0.3. One residual gap found: `large_displacements`
+  at `dx=0.2m` still fails via an actual orientation-safety-guard trip, unchanged from sec 3 --
+  flagged for that effort's continued validation, not fixed here.
 - A second, distinct effect was found and is not a decision this task makes either: friction
   converts an already-documented, already-flagged transient freeze bug (un-migrated
   `jacobian_singular_cond_max`) into a permanent one, for any config that hasn't had that fix.
