@@ -1,8 +1,17 @@
-# Real-hardware auto-tuning plan (not yet implemented)
+# Real-hardware auto-tuning plan
 
-**Status:** design only. No code in this repo implements any of this yet.
+**Status:** M1 (single-trial hardware harness) and M2 (sim gate) already existed as
+general-purpose tools before this plan was written to describe them
+(`tools/ur5e_direct_torque_x_transport.py --gain-overrides-json ...` and
+`tools/ur5e_move_hold_transport.py`, respectively). M3's remaining gap -- batching
+several BO-proposed candidates together and automatically sim-gating each one before a
+human sees the batch -- is now closed by `tools/ur5e_auto_tune_gains.py` (2026-07-31),
+built on top of `tools/ur5e_suggest_gains.py`'s existing stateless single-candidate BO
+core. **M0 (real-hardware execution) has still never happened for any of this** -- every
+piece below is validated only in sim/mocks; see M0 for the hard prerequisite that gates
+ever running M3's approved batches for real.
 **Scope:** longer-term project, not tied to a specific lab date.
-**Last updated:** 2026-07-29
+**Last updated:** 2026-07-31
 
 This is the plan for automatically calibrating the OSC controller's gains against the
 real UR5e once it's available, instead of hand-tuning by eye the way the MuJoCo-side
@@ -169,23 +178,26 @@ actually moved the real arm once, in each mode, with a human present:
 
 ### M1 — Single-trial hardware harness
 
-A CLI/function that runs exactly one fixed-gain, fixed-`dx` episode on the real robot
-through the existing `hardware/direct_torque_transport.py` loop, overriding gains via the
-same `controller.set_gains()` mechanism the sim RL env already uses (see
-`XAxisCartesianImpedanceController.set_gains()` — no new controller code needed), logs a
-run record via `observability/run_logger.py::RunLogger` (already the standard for every
-sweep entrypoint), and returns one scalar score. No search yet: the only goal is proving
-one trial round-trips correctly using gains already known good from sim, matching M0's
-numbers.
+**Essentially already exists**, found 2026-07-31: `tools/ur5e_direct_torque_x_transport.py
+--gain-overrides-json '{...}' --i-understand-this-moves-the-robot` already runs exactly
+one fixed-gain, fixed-`dx` episode on the real robot through the `direct_torque` control
+mode, applies gain overrides via the same `controller.set_gains()` mechanism the sim RL
+env already uses, and writes a `summary.json` with `valid_move_and_hold`,
+`move_hold_quality_score`, and safety pass/fail — everything M3 needs to score a real
+trial. No RunLogger integration was needed to close this milestone; the original framing
+above (a bespoke new CLI/function) turned out to be unnecessary. What's still missing is
+M0 itself: none of this has ever executed against real hardware.
 
 ### M2 — Sim gate
 
-Reuses `tools/ur5e_move_hold_transport.py` as-is: before any candidate gain vector is
-queued for a real trial, it runs there first. Only sim-passing candidates ever reach the
-real robot. This is the single biggest risk-reducer in the plan and needs no new code,
-just a wrapper that calls the existing tool and checks its `valid_move_and_hold` result.
+**Already existed** as `tools/ur5e_move_hold_transport.py`, exactly as originally
+proposed: a candidate gain vector runs there first, and only sim-passing candidates are
+meant to ever reach the real robot. `tools/ur5e_auto_tune_gains.py` (M3, below) now calls
+it automatically via subprocess for every proposed candidate, closing the "someone has to
+manually run this and eyeball it" gap — no changes to `ur5e_move_hold_transport.py`
+itself were needed.
 
-### M3 — Bayesian optimization driver (new code)
+### M3 — Bayesian optimization driver
 
 - Search space: small perturbations (~±20-30%) around the M0-validated gains, likely
   restricted to the subset most exposed to unmodeled real-world effects --
@@ -201,6 +213,33 @@ just a wrapper that calls the existing tool and checks its `valid_move_and_hold`
 - Objective: tracking error (RMS or final `x_error`) plus orientation/drift margin from
   the run record, with any safety-monitor abort treated as a hard reject for that
   candidate, not folded into the score.
+
+**Built, 2026-07-31**: the single-candidate half of this (`tools/ur5e_suggest_gains.py`)
+already existed -- it rebuilds a stateless Optuna TPE study from every past trial's
+`summary.json` under `--trials-dir`, scores each with `score_trial()` (a completed trial
+always outranks an aborted one, matching the "hard reject" rule above), and suggests one
+candidate. `tools/ur5e_auto_tune_gains.py` is the new script that closes the rest of this
+milestone: it imports `_load_trial_summaries`/`score_trial`/`build_study`/
+`_parse_search_space` directly from `ur5e_suggest_gains.py` (no logic duplicated), calls
+`study.ask()` `--batch-size` times (default 4) with no intervening `study.tell()` to
+propose several candidates from the same TPE state, sim-gates every one of them
+automatically by subprocessing `tools/ur5e_move_hold_transport.py` at
+`--sim-target-x-deltas` (validated to fall inside the proven-safe [0.10, 0.20] m range;
+default `[0.10, 0.15, 0.20]`), and prints only the sim-passing candidates as a numbered
+batch. Printing the ready-to-copy real-hardware commands additionally requires a typed
+`CONFIRM` (skippable only via `--yes`, for scripted/test use) -- on top of, not instead
+of, the typed `MOVE` confirmation the printed `ur5e_direct_torque_x_transport.py` command
+still requires when a human actually runs it. The script never executes anything on real
+hardware itself and never imports any `hardware.*` module (asserted via a static AST
+check in `tests/hardware/test_auto_tune_gains.py`, not just assumed). Batch diversity was
+verified empirically, not assumed: six sequential `ask()`-without-`tell()` calls produced
+six numerically distinct candidates both cold-start (no prior trials) and warm-start (15
+prior trials, past Optuna TPE's default 10-trial startup phase) against this repo's
+installed Optuna 4.1.0 -- each call re-samples from the sampler's own advancing RNG state
+rather than memoizing a result, so it does not degenerate. What's still open: M0 has never
+run, so no real trial has ever fed this loop's `--trials-dir`, and the "run only what you
+approve" step remains entirely manual by design (this script prints commands; it never
+runs them).
 
 ### M4 — Land the result
 
@@ -223,7 +262,8 @@ per the repo's "preserve old configs" convention (`AGENTS.md` §7).
 
 ## What's buildable before ever touching the real robot
 
-M1 (harness structure, testable against `tests/hardware/`'s existing mocked-RTDE
-pattern), M2 (already exists), and M3 (BO driver, testable end-to-end against MuJoCo
-alone, no real robot involved) can all be built and validated in sim/mocks now. Only M0
-and the "run approved candidates" step of M3 need the physical arm.
+M1 (harness structure -- turned out to already exist), M2 (already existed), and M3 (BO
+driver, `tools/ur5e_auto_tune_gains.py`, now built and tested end-to-end against MuJoCo
+alone, no real robot involved) have all been built and validated in sim/mocks now. Only
+M0 and the "run approved candidates" step of M3 need the physical arm -- neither has
+happened yet.
