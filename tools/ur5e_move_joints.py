@@ -25,7 +25,7 @@ from hardware.dashboard import power_on_and_release, query_remote_control  # noq
 from hardware.direct_torque_link import UR5eDirectTorqueLink  # noqa: E402
 from hardware.joint_motion import move_joints_to_pose, verify_joint_pose  # noqa: E402
 from hardware.link import RTDELinkError  # noqa: E402
-from hardware.poses import HEIGHT_ALPHA_0_5_Q, q_for_height_alpha  # noqa: E402
+from hardware.poses import HEIGHT_ALPHA_0_5_CLEARANCE_Q, q_for_height_alpha  # noqa: E402
 from hardware.safety import EStopLatch  # noqa: E402
 
 POSE_NAMES = ("height_alpha_0_5", "active_origin")
@@ -39,7 +39,11 @@ def _resolve_pose(name: str, height_alpha: float | None, shoulder_pan_override_r
 
         q = ACTIVE_ORIGIN_Q.tolist()
     elif name == "height_alpha_0_5":
-        q = HEIGHT_ALPHA_0_5_Q.tolist()
+        # Defaults to the real-lab wall-clearance rotation (shoulder_pan =
+        # -45deg), visually confirmed 2026-07-31 for this exact pose in this
+        # exact room. Override back to 0.0 via --shoulder-pan-override-rad if
+        # the setup ever changes -- explicit override always wins below.
+        q = HEIGHT_ALPHA_0_5_CLEARANCE_Q.tolist()
     else:
         raise ValueError(f"unknown pose {name!r}")
     if shoulder_pan_override_rad is not None:

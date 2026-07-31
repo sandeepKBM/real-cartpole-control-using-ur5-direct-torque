@@ -16,7 +16,7 @@ import yaml
 from controller_core.safety import ImpedanceSafetyConfig, ImpedanceSafetyMonitor
 
 from .link import RTDELinkError, RTDEStateError, UR5eState, _load_rtde_classes
-from .poses import HEIGHT_ALPHA_0_5_Q
+from .poses import HEIGHT_ALPHA_0_5_CLEARANCE_Q
 from .safety import (
     CartesianMoveLimits,
     CartesianMoveMonitor,
@@ -161,7 +161,7 @@ def run_urscript_x_transport(
     try:
         if not skip_joint_move:
             target_q = np.asarray(
-                HEIGHT_ALPHA_0_5_Q if joint_target_q is None else joint_target_q,
+                HEIGHT_ALPHA_0_5_CLEARANCE_Q if joint_target_q is None else joint_target_q,
                 dtype=np.float64,
             ).reshape(6)
             try:

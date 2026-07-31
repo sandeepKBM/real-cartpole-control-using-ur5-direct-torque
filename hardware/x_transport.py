@@ -155,10 +155,10 @@ def run_x_transport(
     link.connect(with_control=motion_opt_in)
     if not skip_joint_move:
         from .joint_motion import move_joints_to_pose, verify_joint_pose
-        from .poses import HEIGHT_ALPHA_0_5_Q
+        from .poses import HEIGHT_ALPHA_0_5_CLEARANCE_Q
         from .safety import EStopLatch
 
-        target_q_rad = HEIGHT_ALPHA_0_5_Q if start_q_rad is None else start_q_rad
+        target_q_rad = HEIGHT_ALPHA_0_5_CLEARANCE_Q if start_q_rad is None else start_q_rad
         estop = EStopLatch()
         jres = move_joints_to_pose(
             link,
@@ -210,11 +210,13 @@ def run_x_transport(
 def _joint_move_ur5e_link(
     link: UR5eLink, *, motion_opt_in: bool, target_q_rad: np.ndarray | None = None
 ) -> None:
-    from .poses import HEIGHT_ALPHA_0_5_Q
+    from .poses import HEIGHT_ALPHA_0_5_CLEARANCE_Q
 
     if not motion_opt_in:
         raise ValueError("motion_opt_in required")
-    target_q = HEIGHT_ALPHA_0_5_Q if target_q_rad is None else np.asarray(target_q_rad, dtype=np.float64).reshape(6)
+    target_q = (
+        HEIGHT_ALPHA_0_5_CLEARANCE_Q if target_q_rad is None else np.asarray(target_q_rad, dtype=np.float64).reshape(6)
+    )
     link.connect(with_control=True)
     link.move_j(target_q, speed_rad_s=0.5, acceleration_rad_s2=0.5)
     deadline = time.monotonic() + 30.0

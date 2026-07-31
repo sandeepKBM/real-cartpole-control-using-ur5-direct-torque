@@ -3,7 +3,9 @@ objects only, never opens a real socket.
 
 Covers the new --start-q-rad support: pre-move validation (_validate_start_q_rad)
 and that a caller-supplied pose actually reaches move_j instead of the
-hardcoded HEIGHT_ALPHA_0_5_Q default.
+hardcoded default (HEIGHT_ALPHA_0_5_CLEARANCE_Q, since 2026-07-31 -- see
+hardware/poses.py for why the default now includes the real-lab base
+rotation).
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from hardware.poses import HEIGHT_ALPHA_0_5_Q  # noqa: E402
+from hardware.poses import HEIGHT_ALPHA_0_5_CLEARANCE_Q  # noqa: E402
 from hardware.x_transport import _joint_move_ur5e_link, _validate_start_q_rad, run_x_transport  # noqa: E402
 from hardware.link import UR5eLink  # noqa: E402
 
@@ -124,7 +126,7 @@ def test_joint_move_defaults_to_height_alpha_0_5():
     link, control = _make_link_with_movej()
     _joint_move_ur5e_link(link, motion_opt_in=True)
     assert len(control.move_j_calls) == 1
-    np.testing.assert_allclose(control.move_j_calls[0], HEIGHT_ALPHA_0_5_Q, atol=1e-9)
+    np.testing.assert_allclose(control.move_j_calls[0], HEIGHT_ALPHA_0_5_CLEARANCE_Q, atol=1e-9)
 
 
 def test_joint_move_uses_caller_supplied_target():
@@ -133,7 +135,7 @@ def test_joint_move_uses_caller_supplied_target():
     assert len(control.move_j_calls) == 1
     np.testing.assert_allclose(control.move_j_calls[0], ALPHA_0_1_Q, atol=1e-9)
     # sanity: not the default pose
-    assert not np.allclose(control.move_j_calls[0], HEIGHT_ALPHA_0_5_Q, atol=1e-3)
+    assert not np.allclose(control.move_j_calls[0], HEIGHT_ALPHA_0_5_CLEARANCE_Q, atol=1e-3)
 
 
 def test_joint_move_requires_motion_opt_in():
