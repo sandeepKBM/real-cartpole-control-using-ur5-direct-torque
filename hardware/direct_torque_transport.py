@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import json
 import time
+from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,58 @@ class DirectTorqueTransportResult:
     reason: str
     summary: dict[str, Any]
     trace_path: Path | None
+
+
+# Pre-trip diagnostic trend reporting (2026-07-31). Motivated by a real
+# incident diagnosing a real-hardware guard trip: the trend of qd/x_error/
+# tau/orientation error in the ~60 cycles before the trip required manually
+# re-parsing trace.jsonl by hand to see. Capture that trend automatically
+# instead. Kept intentionally cheap and simple -- see
+# run_x_transport_direct_torque's per-cycle loop for where the bounded
+# window is appended (unconditionally, once per cycle, from values already
+# computed this cycle) and where this trend is classified (once, only at
+# trip time).
+PRE_TRIP_TREND_WINDOW_CYCLES = 60
+
+
+def _classify_trend(values: "list[float] | tuple[float, ...]", deadband_frac: float = 0.05) -> str:
+    """Cheap trend heuristic: compare the mean of the first third of the
+    window to the mean of the last third, with a small relative deadband for
+    "stable". Deliberately not linear regression -- this only ever runs once,
+    at trip time, so cost isn't the concern; simplicity/readability is (see
+    the module comment above)."""
+    values = list(values)
+    n = len(values)
+    if n < 2:
+        return "insufficient_data"
+    third = max(1, n // 3)
+    first_mean = float(np.mean(values[:third]))
+    last_mean = float(np.mean(values[-third:]))
+    scale = max(abs(first_mean), abs(last_mean), 1e-9)
+    rel_change = (last_mean - first_mean) / scale
+    if abs(rel_change) < deadband_frac:
+        return "stable"
+    return "rising" if rel_change > 0.0 else "falling"
+
+
+def _build_pre_trip_trend(
+    window: "deque[tuple[float, float, float, float, float]]", termination_reason: str
+) -> dict[str, Any] | None:
+    """Snapshot the rolling per-cycle window into a trend summary -- only
+    when a guard actually tripped (``termination_reason`` isn't
+    ``"duration_complete"``) and there's at least one cycle recorded. Returns
+    None for a clean run, so this is purely additive to summary.json's shape."""
+    if termination_reason == "duration_complete" or len(window) == 0:
+        return None
+    qd_vals, speed_vals, xerr_vals, tau_vals, orient_vals = zip(*window)
+    return {
+        "window_cycles": len(window),
+        "qd_max_radps": {"values": list(qd_vals), "trend": _classify_trend(qd_vals)},
+        "tcp_speed_mps": {"values": list(speed_vals), "trend": _classify_trend(speed_vals)},
+        "x_error_m": {"values": list(xerr_vals), "trend": _classify_trend(xerr_vals)},
+        "tau_controller_l1": {"values": list(tau_vals), "trend": _classify_trend(tau_vals)},
+        "orientation_error_norm_rad": {"values": list(orient_vals), "trend": _classify_trend(orient_vals)},
+    }
 
 
 def _load_impedance_bundle(config_path: Path) -> tuple[CartesianImpedanceConfig, ImpedanceSafetyConfig, float]:
@@ -280,6 +333,19 @@ def run_x_transport_direct_torque(
     next_deadline_ns = monotonic_ns() + tracker.period_ns
     prev_cycle_start_ns: int | None = None
 
+    # Bounded rolling window feeding pre_trip_trend (see the module-level
+    # comment above PRE_TRIP_TREND_WINDOW_CYCLES). Appended once per cycle
+    # below, unconditionally, from values already computed this cycle for
+    # other purposes -- O(1) amortized, no new per-cycle computation beyond a
+    # 3-vector norm/divide for tcp speed (see the loop for why that's derived
+    # from tcp_pose deltas, matching CartesianMoveMonitor.check()'s own
+    # single-cycle speed_mps formula, rather than from ee_lin_vel, a
+    # Jacobian-derived twist and a different real signal).
+    pre_trip_window: deque[tuple[float, float, float, float, float]] = deque(
+        maxlen=PRE_TRIP_TREND_WINDOW_CYCLES
+    )
+    prev_tcp_pos_for_trend = np.asarray(state0.tcp_pose[:3], dtype=np.float64)
+
     # Enforce the previously-unchecked max_deadline_ms, and catch a
     # frozen-but-non-raising RTDE stream, on every cycle (see hardware/safety.py
     # DeadlineMonitor/StaleStateMonitor for the trip-condition reasoning). This
@@ -406,6 +472,23 @@ def run_x_transport_direct_torque(
             tau = tau_controller + tau_coriolis
             if phases is not None:
                 phases.record("controller_ns", monotonic_ns() - t_ctrl)
+
+            # Pre-trip diagnostic window append (see setup comment above) --
+            # placed here, after tau_controller/output are known but BEFORE
+            # any guard check below can break the loop, so a trip-causing
+            # cycle's own values land in the window too, not just the cycles
+            # leading up to it.
+            tcp_pos_now = np.asarray(link_state.tcp_pose[:3], dtype=np.float64)
+            pre_trip_window.append(
+                (
+                    float(np.max(np.abs(link_state.qd))),
+                    float(np.linalg.norm(tcp_pos_now - prev_tcp_pos_for_trend)) / real_dt_s,
+                    float(output.x_error),
+                    float(np.sum(np.abs(tau_controller))),
+                    float(output.orientation_error_norm),
+                )
+            )
+            prev_tcp_pos_for_trend = tcp_pos_now
 
             t_safe = monotonic_ns()
             safety_decision = safety.check(
@@ -645,6 +728,7 @@ def run_x_transport_direct_torque(
     achieved_x_delta_m = float(final_state.tcp_pose[0] - x0)
     hold_duration_s = max(duration_s - move_duration_s, 0.0)
     max_abs_qd = max_abs_qd_from_trace(trace_rows)
+    pre_trip_trend = _build_pre_trip_trend(pre_trip_window, termination_reason)
 
     summary = {
         "backend": "ursim_rtde_direct_torque",
@@ -662,6 +746,7 @@ def run_x_transport_direct_torque(
         "frequency_hz": frequency_hz,
         "steps": steps,
         "termination_reason": termination_reason,
+        "pre_trip_trend": pre_trip_trend,
         "achieved_x_delta_m": achieved_x_delta_m,
         "final_tcp_pose": final_state.tcp_pose.tolist(),
         "initial_ee_pos": state0.tcp_pose[:3].tolist(),
