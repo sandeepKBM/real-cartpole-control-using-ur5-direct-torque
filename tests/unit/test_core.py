@@ -40,6 +40,22 @@ def test_state_validation_happy_path() -> None:
     assert state["jacobian_pos"].shape == (3, 6)
 
 
+def test_as_robot_state_passes_through_dt_s() -> None:
+    """dt_s (the real per-cycle timestep) must survive as_robot_state()'s
+    normalization -- previously silently dropped because it wasn't in the
+    function's explicit optional-key whitelist, even though sim's
+    MujocoUR5eState.as_robot_state() already put it in the raw dict."""
+    raw = _baseline_state()
+    raw["dt_s"] = 0.002
+    state = as_robot_state(raw)
+    assert state["dt_s"] == 0.002
+
+
+def test_as_robot_state_omits_dt_s_when_absent() -> None:
+    state = as_robot_state(_baseline_state())
+    assert "dt_s" not in state
+
+
 def test_controller_returns_positive_fx_when_target_is_ahead() -> None:
     ctrl = XAxisController(XAxisControllerConfig(kp_x=200.0, kd_x=40.0, fx_max_n=50.0))
     state = as_robot_state(_baseline_state(target_x=0.1, x_now=0.0))

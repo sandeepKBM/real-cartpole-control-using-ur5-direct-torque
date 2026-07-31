@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from controller_core.state_types import as_impedance_robot_state  # noqa: E402
 from controller_core.x_axis_cartesian_impedance import (  # noqa: E402
     CartesianImpedanceConfig,
     XAxisCartesianImpedanceController,
@@ -54,6 +56,76 @@ def test_hold_at_goal_zero_wrench_components() -> None:
     out = ctrl.compute(st0)
     assert abs(out.x_error) < 1e-9
     assert np.linalg.norm(out.wrench[:3]) < 1e-6
+
+
+def test_as_impedance_robot_state_passes_through_dt_s() -> None:
+    """as_impedance_robot_state() is the function compute() calls internally
+    (`st = as_impedance_robot_state(state)`) -- this is the layer-2 fix:
+    dt_s must survive that normalization so a future compute() could read
+    it via state.get("dt_s")."""
+    J = np.eye(6)
+    quat = np.array([1.0, 0.0, 0.0, 0.0])
+    raw = _state(0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, quat, 0, 0, 0, np.zeros(6), np.zeros(6), 0.0, J)
+    raw["dt_s"] = 0.002
+    normalized = as_impedance_robot_state(raw)
+    assert normalized["dt_s"] == 0.002
+
+
+def test_as_impedance_robot_state_omits_dt_s_when_absent() -> None:
+    J = np.eye(6)
+    quat = np.array([1.0, 0.0, 0.0, 0.0])
+    raw = _state(0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, quat, 0, 0, 0, np.zeros(6), np.zeros(6), 0.0, J)
+    normalized = as_impedance_robot_state(raw)
+    assert "dt_s" not in normalized
+
+
+def _assert_outputs_identical(a, b) -> None:
+    for field in dataclasses.fields(a):
+        av = getattr(a, field.name)
+        bv = getattr(b, field.name)
+        if isinstance(av, np.ndarray) or isinstance(bv, np.ndarray):
+            np.testing.assert_array_equal(av, bv, err_msg=f"field {field.name!r} differs")
+        else:
+            assert av == bv, f"field {field.name!r} differs: {av!r} != {bv!r}"
+
+
+def test_compute_output_unaffected_by_dt_s_presence() -> None:
+    """Purely additive plumbing: compute() does not read dt_s yet, so its
+    output must be byte-identical whether or not the caller's state dict
+    carries a dt_s key. Regression guard for this state-contract change."""
+    cfg = CartesianImpedanceConfig(
+        kp_x=25.0,
+        kd_x=8.0,
+        kp_y=80.0,
+        kd_y=15.0,
+        kp_z=120.0,
+        kd_z=20.0,
+        kp_rot=20.0,
+        kd_rot=5.0,
+        kp_posture=2.0,
+        kd_posture=0.5,
+        kd_joint=0.8,
+        tau_max_nm=np.array([50.0] * 6),
+    )
+    J = np.eye(6)
+    quat = np.array([1.0, 0.0, 0.0, 0.0])
+    q0 = np.zeros(6)
+
+    ctrl_without = XAxisCartesianImpedanceController(cfg)
+    st0 = _state(0.0, 0.1, 0.0, 0.0, 0.0, 0.5, 0.0, quat, 0, 0, 0, q0, np.zeros(6), 0.1, J)
+    ctrl_without.reset_from_state(st0)
+    st1 = _state(0.01, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, quat, 0, 0, 0, q0, np.zeros(6), 0.05, J)
+    out_without = ctrl_without.compute(st1)
+
+    ctrl_with = XAxisCartesianImpedanceController(cfg)
+    st0_dt = dict(st0)
+    st0_dt["dt_s"] = 0.002
+    ctrl_with.reset_from_state(st0_dt)
+    st1_dt = dict(st1)
+    st1_dt["dt_s"] = 0.002
+    out_with = ctrl_with.compute(st1_dt)
+
+    _assert_outputs_identical(out_without, out_with)
 
 
 def test_x_error_produces_positive_fx() -> None:

@@ -322,6 +322,16 @@ def run_x_transport_direct_torque(
                 break
 
             cycle_start_ns = monotonic_ns()
+            # Real measured per-cycle interval (this cycle's start minus the
+            # previous cycle's start), computed early so it can be threaded
+            # into this cycle's RobotState as dt_s below. Same formula as the
+            # interval_ns/real_dt_s computed further down this same iteration
+            # for tracker.add_sample() and the residual observer -- reusing it
+            # there instead of recomputing (prev_cycle_start_ns is not mutated
+            # until the end of this iteration, so the value is identical
+            # either way).
+            interval_ns = None if prev_cycle_start_ns is None else cycle_start_ns - prev_cycle_start_ns
+            real_dt_s = dt_s if interval_ns is None else max(dt_s, interval_ns / 1e9)
             lateness_ns = max(0, cycle_start_ns - next_deadline_ns)
             if phases is not None:
                 phases.record("lateness_ns", lateness_ns)
@@ -382,6 +392,7 @@ def run_x_transport_direct_torque(
                 time_s=t_s,
                 target_x=target_x,
                 target_x_vel=target_x_vel,
+                dt_s=real_dt_s,
             )
             if phases is not None:
                 phases.record("build_state_ns", monotonic_ns() - t_build)
@@ -439,7 +450,6 @@ def run_x_transport_direct_torque(
             if phases is not None:
                 phases.record("total_work_ns", work_ns)
 
-            interval_ns = None if prev_cycle_start_ns is None else cycle_start_ns - prev_cycle_start_ns
             sleep_ns = 0
             next_deadline_ns += tracker.period_ns
             sleep_ns = max(0, next_deadline_ns - cycle_end_ns)

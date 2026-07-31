@@ -155,6 +155,44 @@ def test_adapter_hold_step_returns_finite_torque() -> None:
     assert len(prox) == 6
 
 
+def test_build_mujoco_state_dt_s_survives_to_impedance_normalization() -> None:
+    """Sim state-building path check (docs/hardware/LUGRE_FRICTION_MODEL_PLAN.md
+    section 3.3 prerequisite): build_mujoco_state()'s MujocoUR5eState already
+    puts dt_s in the raw dict handed to controller.compute() (see
+    as_robot_state() on the dataclass, used directly by
+    MujocoUR5eTorqueAdapter._controller_step()) -- but until the
+    controller_core/state_types.py fix, compute()'s internal
+    as_impedance_robot_state(state) call silently dropped it. Confirm the
+    full path survives now."""
+    from controller_core.state_types import as_impedance_robot_state
+
+    model, data, site_id, joint_ids, _ = load_model(SCENE_PATH)
+    mujoco.mj_forward(model, data)
+    ee_pos = np.asarray(data.site_xpos[site_id], dtype=np.float64).copy()
+    ee_rot = np.asarray(data.site_xmat[site_id], dtype=np.float64).reshape(3, 3).copy()
+    quat = rotmat_to_quat(ee_rot)
+    dt_s = float(model.opt.timestep)
+    state = build_mujoco_state(
+        model,
+        data,
+        site_id=site_id,
+        joint_ids=joint_ids,
+        time_s=float(data.time),
+        dt_s=dt_s,
+        target_x=float(ee_pos[0]),
+        target_ee_pos=ee_pos.copy(),
+        reference_quat=quat.copy(),
+        hold_current_pose=True,
+        transport_axis_index=0,
+        gravity_compensation=True,
+    )
+    robot_state = state.as_robot_state()
+    assert robot_state["dt_s"] == dt_s
+
+    normalized = as_impedance_robot_state(robot_state)
+    assert normalized["dt_s"] == dt_s
+
+
 def test_shape_torque_clips_and_reports_saturation() -> None:
     model, data, site_id, joint_ids, _ = load_model(SCENE_PATH)
     ctrl_cfg = _load_controller_cfg()

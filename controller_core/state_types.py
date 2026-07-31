@@ -59,6 +59,12 @@ class RobotState(TypedDict, total=False):
         holding.
       - ``hold_orthogonal_axes_only`` (bool): optional hint for single-axis
         transport with orthogonal-axis hold.
+      - ``dt_s`` (float): optional real per-cycle timestep (seconds) --
+        sim's actual step size, or the real-hardware measured/nominal
+        control-loop period. Not consumed by ``compute()`` today; plumbed
+        through for future stateful, time-integrated controller terms (e.g.
+        a LuGre friction model) that need the true cycle interval rather
+        than an assumed constant. Absent unless the adapter supplies it.
     """
 
     time: float
@@ -83,6 +89,7 @@ class RobotState(TypedDict, total=False):
     reference_quat: np.ndarray
     hold_all_cartesian_axes: bool
     hold_orthogonal_axes_only: bool
+    dt_s: float
 
 
 ControlMode = Literal["torque", "cartesian_x_force"]
@@ -184,6 +191,8 @@ def as_robot_state(raw: dict[str, Any], num_joints: int = 6) -> RobotState:
         state["hold_all_cartesian_axes"] = bool(raw["hold_all_cartesian_axes"])
     if "hold_orthogonal_axes_only" in raw and raw["hold_orthogonal_axes_only"] is not None:
         state["hold_orthogonal_axes_only"] = bool(raw["hold_orthogonal_axes_only"])
+    if "dt_s" in raw and raw["dt_s"] is not None:
+        state["dt_s"] = float(raw["dt_s"])
 
     return state
 
@@ -239,4 +248,6 @@ def as_impedance_robot_state(raw: dict[str, Any], num_joints: int = 6) -> RobotS
         state["hold_all_cartesian_axes"] = bool(raw["hold_all_cartesian_axes"])
     if "hold_orthogonal_axes_only" in raw and raw["hold_orthogonal_axes_only"] is not None:
         state["hold_orthogonal_axes_only"] = bool(raw["hold_orthogonal_axes_only"])
+    if "dt_s" in raw and raw["dt_s"] is not None:
+        state["dt_s"] = float(raw["dt_s"])
     return state

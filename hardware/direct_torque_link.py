@@ -175,8 +175,16 @@ class UR5eDirectTorqueLink:
         time_s: float,
         target_x: float,
         target_x_vel: float,
-    ) -> dict[str, np.ndarray | float | bool]:
-        """Map RTDE telemetry + pre-fetched dynamics into controller_core RobotState."""
+        dt_s: float | None = None,
+    ) -> dict[str, np.ndarray | float | bool | None]:
+        """Map RTDE telemetry + pre-fetched dynamics into controller_core RobotState.
+
+        ``dt_s`` is the real per-cycle timestep (seconds), when the caller has
+        one cheaply available (e.g. the measured interval between successive
+        control-loop cycles) -- optional and additive; omitted (``None``)
+        callers get byte-identical dicts to before this parameter existed.
+        See ``controller_core/state_types.py``'s ``RobotState.dt_s`` docstring.
+        """
         tcp = np.asarray(link_state.tcp_pose, dtype=np.float64).reshape(6)
         ee_pos = tcp[:3].copy()
         ee_quat = rotvec_to_quat_wxyz(tcp[3:6])
@@ -196,6 +204,7 @@ class UR5eDirectTorqueLink:
             "target_x": float(target_x),
             "target_x_vel": float(target_x_vel),
             "transport_axis_index": 0,
+            "dt_s": float(dt_s) if dt_s is not None else None,
         }
 
     def build_robot_state(
@@ -205,7 +214,8 @@ class UR5eDirectTorqueLink:
         time_s: float,
         target_x: float,
         target_x_vel: float,
-    ) -> dict[str, np.ndarray | float | bool]:
+        dt_s: float | None = None,
+    ) -> dict[str, np.ndarray | float | bool | None]:
         """Map RTDE telemetry into the controller_core RobotState contract."""
         return self.compose_robot_state(
             link_state,
@@ -214,6 +224,7 @@ class UR5eDirectTorqueLink:
             time_s=time_s,
             target_x=target_x,
             target_x_vel=target_x_vel,
+            dt_s=dt_s,
         )
 
     def move_j(
