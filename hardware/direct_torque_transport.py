@@ -87,15 +87,22 @@ def _classify_trend(values: "list[float] | tuple[float, ...]", deadband_frac: fl
 
 
 def _build_pre_trip_trend(
-    window: "deque[tuple[float, float, float, float, float]]", termination_reason: str
+    window: "deque[tuple[float, float, float, float, float, float, float]]", termination_reason: str
 ) -> dict[str, Any] | None:
     """Snapshot the rolling per-cycle window into a trend summary -- only
     when a guard actually tripped (``termination_reason`` isn't
     ``"duration_complete"``) and there's at least one cycle recorded. Returns
-    None for a clean run, so this is purely additive to summary.json's shape."""
+    None for a clean run, so this is purely additive to summary.json's shape.
+
+    y_drift_m/z_drift_m added 2026-07-31 after diagnosing a real -0.15m
+    return-leg trip: the off-axis (Y/Z) components implicated by AGENTS.md's
+    documented directional-ceiling/nullspace-projector-asymmetry finding
+    weren't previously in this window, only x_error/orientation were --
+    manual re-derivation from ee_pos against initial_ee_pos was needed each
+    time to check them."""
     if termination_reason == "duration_complete" or len(window) == 0:
         return None
-    qd_vals, speed_vals, xerr_vals, tau_vals, orient_vals = zip(*window)
+    qd_vals, speed_vals, xerr_vals, tau_vals, orient_vals, ydrift_vals, zdrift_vals = zip(*window)
     return {
         "window_cycles": len(window),
         "qd_max_radps": {"values": list(qd_vals), "trend": _classify_trend(qd_vals)},
@@ -103,6 +110,8 @@ def _build_pre_trip_trend(
         "x_error_m": {"values": list(xerr_vals), "trend": _classify_trend(xerr_vals)},
         "tau_controller_l1": {"values": list(tau_vals), "trend": _classify_trend(tau_vals)},
         "orientation_error_norm_rad": {"values": list(orient_vals), "trend": _classify_trend(orient_vals)},
+        "y_drift_m": {"values": list(ydrift_vals), "trend": _classify_trend(ydrift_vals)},
+        "z_drift_m": {"values": list(zdrift_vals), "trend": _classify_trend(zdrift_vals)},
     }
 
 
@@ -341,10 +350,12 @@ def run_x_transport_direct_torque(
     # from tcp_pose deltas, matching CartesianMoveMonitor.check()'s own
     # single-cycle speed_mps formula, rather than from ee_lin_vel, a
     # Jacobian-derived twist and a different real signal).
-    pre_trip_window: deque[tuple[float, float, float, float, float]] = deque(
+    pre_trip_window: deque[tuple[float, float, float, float, float, float, float]] = deque(
         maxlen=PRE_TRIP_TREND_WINDOW_CYCLES
     )
     prev_tcp_pos_for_trend = np.asarray(state0.tcp_pose[:3], dtype=np.float64)
+    y0_for_trend = float(state0.tcp_pose[1])
+    z0_for_trend = float(state0.tcp_pose[2])
 
     # Enforce the previously-unchecked max_deadline_ms, and catch a
     # frozen-but-non-raising RTDE stream, on every cycle (see hardware/safety.py
@@ -486,6 +497,8 @@ def run_x_transport_direct_torque(
                     float(output.x_error),
                     float(np.sum(np.abs(tau_controller))),
                     float(output.orientation_error_norm),
+                    float(tcp_pos_now[1] - y0_for_trend),
+                    float(tcp_pos_now[2] - z0_for_trend),
                 )
             )
             prev_tcp_pos_for_trend = tcp_pos_now

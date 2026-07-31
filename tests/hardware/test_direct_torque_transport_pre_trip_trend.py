@@ -159,11 +159,19 @@ def test_guard_trip_produces_rising_pre_trip_trend(tmp_path: Path) -> None:
         "x_error_m",
         "tau_controller_l1",
         "orientation_error_norm_rad",
+        "y_drift_m",
+        "z_drift_m",
     ):
         assert key in trend
         assert "values" in trend[key]
         assert "trend" in trend[key]
         assert len(trend[key]["values"]) == trend["window_cycles"]
+
+    # TCP pose was held exactly fixed every cycle (see _MockRisingQdLink),
+    # so Y/Z drift relative to the initial pose is identically zero -- a
+    # real, known "stable" case, same reasoning as tcp_speed_mps below.
+    assert all(v == pytest.approx(0.0, abs=1e-9) for v in trend["y_drift_m"]["values"])
+    assert all(v == pytest.approx(0.0, abs=1e-9) for v in trend["z_drift_m"]["values"])
 
     # Ground truth: qd was fed in strictly increasing every cycle, so its
     # window must be monotonically increasing and classified "rising".
