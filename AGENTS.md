@@ -149,6 +149,67 @@ an MP4 or a bare exit code as success evidence — read the run record.
     real evidence against that), which is a controller-design question, not a retune.
     Practical floor until then: **the safe symmetric range at height_alpha=0.5 is ±0.15 m**,
     not ±0.20 m.
+  - **-45° base-rotation Y-drift coupling, unfixed (2026-07-31)**: `hardware/poses.py::
+    HEIGHT_ALPHA_0_5_CLEARANCE_Q` (`HEIGHT_ALPHA_0_5_Q` with `shoulder_pan` overridden to
+    -0.7853981633974483 rad, i.e. -45°) became the **default** real-hardware start pose for
+    `direct_torque` transport this date, needed for real wall/base clearance in the physical
+    lab (visually confirmed). Real hardware then reproducibly tripped
+    `ImpedanceSafetyMonitor`'s `|Y-Y0| > 0.03 m` guard at dx=0.20m, 4 separate attempts, at
+    almost identical magnitude every time, with the TCP moving in a near-45° diagonal (X and
+    Y displacement nearly equal). Two live gain interventions (kp_y/kd_y +50%,
+    `lambda_diagonal_shaping`) had **zero** effect on the trip point. Independently confirmed
+    in sim the same night (`docs/status/base_rotation_neg45_retune_2026-07-31.md`): frozen-model
+    4-category sweep at this pose scores 18/38 vs 36/38 un-rotated, with essentially every
+    failure tripping the identical guard at the identical ~0.030 m magnitude, plus a clean
+    linear dose-response in the passing canonical-grid runs extrapolating right to the failure
+    onset (sim's onset is ~dx=0.05-0.06m, smaller than the real dx=0.20m trip — a real,
+    unexplained duration/dynamics difference, not investigated further, that doesn't change the
+    qualitative verdict). A full staged BO gain search plus targeted `kd_joint` smoke tests
+    found **no candidate that fixes it** — every one failed identically to baseline, matching
+    both live real-hardware attempts. Likely a structural kinematic/Jacobian effect of the
+    rotated pose (same family as the directional-ceiling finding above), not a gain problem.
+    **Practical floor**: the -45° clearance pose is validated safe only at small displacement
+    (dx≤~0.04m passes cleanly in both sim and real); dx≥0.06m (sim) / dx≥0.20m (real) is a
+    known, reproducible failure with no current fix. Do not assume the -45° pose inherits the
+    un-rotated pose's validated envelope at any displacement.
+  - **Real joint friction added to the sim model (2026-07-31)**: the same lab session found the
+    real UR5e only achieves ~55-72% of a small commanded X displacement with steady-state
+    hold-phase torque that never decays toward zero — a friction/stiction signature the
+    (previously frictionless) sim never reproduced.
+    `assets/ur5e_torque/ur5e_torque.xml` gained real `frictionloss`/`damping` values
+    (`size3` joints — shoulder_pan/lift/elbow — 5.0 Nm / 0.4 Nm·s/rad; `size1` joints — wrists
+    — 1.0 Nm / 0.15 Nm·s/rad; ~3-4% of each joint's rated torque, grounded against this repo's
+    own torque limits since neither the upstream menagerie model — PD position actuators, no
+    friction — nor the literature gave a single authoritative UR5e table). This is a real
+    regression for every config that doesn't compensate for it: the plain
+    `config/ur5e_mujoco_torque_osc_tuned.yaml`'s pass rate at height_alpha=0.5 roughly halved,
+    36/38 → 19/38, gains unchanged (`docs/status/ur5e_sim_friction_modeling_2026-07-31.md`).
+    Secondary effect: friction converts the already-known transient wrist-singularity freeze
+    (see §3's earlier `jacobian_singular_cond_max` history) into a **permanent** freeze on any
+    config still at the class default (1e5) — `config/ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml`
+    and `config/rl_gain_scheduling.yaml` are affected, unfixed as of this note.
+  - **Friction feedforward, opt-in fix (2026-07-31)**:
+    `CartesianImpedanceConfig.friction_feedforward` (default off) adds
+    `tau_friction_ff = coulomb*tanh(qd/deadband) + viscous*qd` into the same joint-space bias
+    as gravity/posture compensation — model-based cancellation, not more gain (pure
+    proportional gain can't fully cancel a friction-like disturbance at steady state).
+    `config/ur5e_mujoco_torque_osc_tuned_friction_ff.yaml`: same gains as the plain tuned
+    config, feedforward on, `friction_ff_qd_deadband: 0.05` (validated — 0.01 causes a real
+    closed-loop limit cycle, hold-phase `|qd|` sits right in the tanh term's steep transition
+    zone at that setting). Sim validation at height_alpha ∈ {0.2, 0.3} (never swept before,
+    `docs/status/friction_ff_alpha_0.2_0.3_sweep_2026-07-31.md`): combined 73/76 (96%) vs
+    baseline 43/76 (57%), never worse than baseline in any cell, steady-state error 2.5-9x
+    lower with 30% *less* commanded torque at long holds — real compensation, not a
+    torque-for-accuracy tradeoff. Integral action (`ki_x`) was considered as a second-layer fix
+    but judged unnecessary given how cleanly feedforward alone closes the gap. Also confirmed
+    at height_alpha=0.5 itself (the pose that originally motivated this fix): 19/38 → 33/38
+    (50.0% → 86.8%), most of the way back to the original frictionless 36/38 baseline. One
+    residual gap, root-caused not just noted: `large_displacements` at dx=0.20m still fails
+    both hold durations, unchanged before/after feedforward — an actual orientation-guard trip
+    (0.25 rad ceiling), not a tracking-tolerance miss, plausibly feedforward's own added torque
+    nudging an already-marginal case (this pose's directional-ceiling envelope, see above) over
+    the edge. **Not yet validated on real hardware** as of this note — that is the next
+    real-lab step.
 
 ## 4. Safety & guardrails (hardware — do not weaken)
 
