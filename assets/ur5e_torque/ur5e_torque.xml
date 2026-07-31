@@ -9,12 +9,30 @@
       <joint axis="0 1 0" range="-6.28319 6.28319" armature="0.1"/>
       <motor gear="1" ctrllimited="true" forcelimited="true"/>
       <default class="size3">
+        <!-- Real-joint Coulomb/static (frictionloss) + viscous (damping) friction,
+             unmodeled prior to 2026-07-31. Sized as ~3-4% of the joint's rated torque
+             (150 Nm for shoulder_pan/shoulder_lift/elbow), consistent with the
+             order-of-magnitude reported for harmonic-drive robot joints in UR5/UR5e
+             friction-identification literature (e.g. dynamic-parameter-identification
+             studies on the UR5 e-series). damping is capped well under the 0.5 Nm*s/rad
+             ceiling enforced by validate_compiled_ur5e_torque_model /
+             tests/mujoco/test_ur5e_mujoco_torque.py so it stays "not suspiciously high"
+             by this repo's own existing invariant. See
+             docs/status/ur5e_sim_friction_modeling_2026-07-31.md for sourcing and
+             validation. frictionloss is the dominant, physically load-bearing term here:
+             it is velocity-independent (persists at qd=0), which is what reproduces the
+             real-hardware hold-phase signature (commanded torque not decaying to zero at
+             steady state); damping alone (~b*qd) cannot, since it vanishes as qd->0. -->
+        <joint frictionloss="5.0" damping="0.4"/>
         <motor ctrlrange="-150 150" forcerange="-150 150"/>
         <default class="size3_limited">
           <joint range="-3.1415 3.1415"/>
         </default>
       </default>
       <default class="size1">
+        <!-- Wrist joints: same friction-modeling rationale as size3, scaled to this
+             class's 28 Nm rated torque. See docs/status/ur5e_sim_friction_modeling_2026-07-31.md. -->
+        <joint frictionloss="1.0" damping="0.15"/>
         <motor ctrlrange="-28 28" forcerange="-28 28"/>
       </default>
       <default class="visual">

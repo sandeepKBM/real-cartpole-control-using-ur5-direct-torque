@@ -163,30 +163,48 @@ def test_residual_stays_small_on_clean_move_hold_rollout():
     # asserting away correct physics, not testing anything real -- so this test
     # now makes two separate claims instead:
     #
+    # NOTE (2026-07-31): assets/ur5e_torque/ur5e_torque.xml gained real joint
+    # friction (frictionloss/damping -- see
+    # docs/status/ur5e_sim_friction_modeling_2026-07-31.md). This residual
+    # observer predicts qdd from PinocchioUR5eDynamics.bias(), which is pure
+    # rigid-body dynamics (gravity + Coriolis) and has no friction term by
+    # design (it mirrors what the real PolyScope/direct_torque path can
+    # actually predict) -- so friction is now a second, permanent, legitimate
+    # residual source on top of the settling transient above, not a bug.
+    # Both bounds below were re-measured on this exact rollout with friction
+    # enabled and rescaled using the *same* margin ratios the 2026-07-30 pass
+    # used over its own measured numbers (~3.5x on the loose guard, ~4.9x on
+    # the settled median, ~6.7x on the settled max), so the checks stay
+    # equally meaningful relative to the new floor rather than being loosened
+    # in an ad hoc way.
+    #
     # 1. Full-rollout sanity: nothing pathological (NaN/divergence) anywhere,
     #    including during the move and its settling transient. Loose bound
-    #    (measured peak 2.816 rad/s^2) -- this is a blowup/NaN guard, not a
-    #    precision check.
+    #    (measured peak with friction: 13.577 rad/s^2, ~3.7x headroom here) --
+    #    this is a blowup/NaN guard, not a precision check.
     assert np.all(np.isfinite(populated_arr))
-    assert float(np.max(populated_arr)) < 10.0
+    assert float(np.max(populated_arr)) < 50.0
 
-    # 2. Settled-tail smallness: from step 200 (t=0.4s) onward -- measured on
-    #    this exact rollout to be genuinely settled (median=0.00204,
-    #    max=0.00300 rad/s^2), matching this test's original intent for the
-    #    hold phase specifically.
+    # 2. Settled-tail smallness: from step 200 (t=0.4s) onward. With friction,
+    #    "settled" no longer means "near the double-precision noise floor" --
+    #    frictionloss/damping create a real, permanent gravity-bias-vs-real-
+    #    dynamics mismatch even at rest, since the frictionless predictor has
+    #    no way to see it. Measured on this exact rollout: median=1.227,
+    #    max=1.318 rad/s^2 (vs the frictionless 2026-07-30 values of
+    #    median=0.00204, max=0.00300 -- roughly a 600x floor increase, i.e.
+    #    the size of the size3-joint frictionloss/damping budget converted
+    #    through the mass matrix, not noise).
     settled = [r for r in residual_norms[200:] if r is not None]
     assert len(settled) >= 50
     settled_arr = np.asarray(settled)
-    assert float(np.median(settled_arr)) < 0.01
-    assert float(np.max(settled_arr)) < 0.02
+    assert float(np.median(settled_arr)) < 6.0
+    assert float(np.max(settled_arr)) < 9.0
 
 
 @pytest.mark.mujoco
 def test_residual_detects_and_recovers_from_injected_disturbance():
-    # 600 steps (1.2 s) at dt=0.002s: 0.1s move, then hold; a 30 N force on
-    # wrist_3_link (a plausible collision-scale load, well under the UR5e's
-    # ~5 kg / ~49 N rated payload weight) is injected for steps [260, 290)
-    # -- t=0.52-0.58 s.
+    # 600 steps (1.2 s) at dt=0.002s: 0.1s move, then hold; a force on
+    # wrist_3_link is injected for steps [260, 290) -- t=0.52-0.58 s.
     #
     # NOTE (2026-07-30): the original windows here (baseline [80:140), i.e.
     # t=0.16-0.28s) predate the jacobian_singular_cond_max fix (see
@@ -197,12 +215,32 @@ def test_residual_detects_and_recovers_from_injected_disturbance():
     # (a transient spike around step 110-120), which collapsed the detection
     # margin. All three windows below are placed after the real settling
     # transient completes (measured settled by ~step 200, t=0.4s -- see above).
+    #
+    # NOTE (2026-07-31): assets/ur5e_torque/ur5e_torque.xml gained real joint
+    # friction (docs/status/ur5e_sim_friction_modeling_2026-07-31.md), which
+    # (see test_residual_stays_small_on_clean_move_hold_rollout's 2026-07-31
+    # note above) raised the settled "clean" baseline residual from ~0.003 to
+    # ~1.3 rad/s^2 -- roughly 600x. The original 30 N disturbance force is no
+    # longer distinguishable from that floor (measured: baseline_peak=1.318,
+    # disturbed_peak=1.610, only a 1.22x bump -- friction noise, not a real
+    # detection signal). Rather than accept a near-meaningless ~1.2x margin
+    # as this test's new bar, the injected force was raised to 60 N -- a
+    # firmer but still plausible bump/snag load (still ~1.2x the UR5e's rated
+    # payload weight of ~49 N, not an implausible collision) -- which restores
+    # a real, clearly-detectable margin (measured below). This is a scenario
+    # change to preserve the test's actual intent (verify the residual
+    # observer detects a real disturbance against the *current* noise floor),
+    # not a threshold bump against the same underpowered signal.
     steps = 600
     move_duration_s = 0.1
     disturb_window = (260, 290)
     gap_cycles = 3
     residual_norms = _run_rollout(
-        steps=steps, move_duration_s=move_duration_s, disturb_window=disturb_window, gap_cycles=gap_cycles,
+        steps=steps,
+        move_duration_s=move_duration_s,
+        disturb_window=disturb_window,
+        disturb_force_n=(0.0, 0.0, -60.0),
+        gap_cycles=gap_cycles,
     )
 
     # Baseline: genuinely settled hold-phase residual (t=0.4-0.5s), well
@@ -217,12 +255,15 @@ def test_residual_detects_and_recovers_from_injected_disturbance():
     # Recovered: a settling window well after the disturbance ends (t=0.9-1.2s,
     # i.e. ~0.32-0.62s of decay time after the disturbance stops at t=0.58s).
     # Real mechanical recovery from a genuine kinetic-energy injection is a
-    # gradual decay, not an instant return to the (essentially
-    # double-precision-noise-level, ~1e-7) clean baseline -- measured on this
-    # exact rollout: residual decays from a 19.513 rad/s^2 peak during the
-    # disturbance down to 0.00191 rad/s^2 by step 450-600, ~10,240x below the
-    # disturbed peak and still falling. This window checks that clear, large
-    # decay, not a return to the pristine baseline.
+    # gradual decay, not an instant return to the clean baseline -- with
+    # friction now also present, "recovered" settles back toward the ~1.3
+    # rad/s^2 friction-noise floor from the note above, not toward zero.
+    # Measured on this exact rollout (60 N, friction-enabled model): residual
+    # decays from a 16.601 rad/s^2 peak during the disturbance down to 1.441
+    # rad/s^2 by step 450-600, ~11.5x below the disturbed peak and back near
+    # the settled floor. This window checks that clear, large decay, not a
+    # return to a near-zero pristine baseline (no longer physically correct
+    # to expect with real friction in the loop).
     recovered = [r for r in residual_norms[450:600] if r is not None]
 
     assert baseline and disturbed and recovered
@@ -231,14 +272,18 @@ def test_residual_detects_and_recovers_from_injected_disturbance():
     recovered_peak = float(np.max(recovered))
 
     # The disturbance must produce a dramatically larger residual than the
-    # clean baseline (wide margin -- this is a real physical injection, not
-    # a hand-tuned synthetic signal; measured ratio on this rollout is
-    # ~6498x: baseline_peak=0.00300, disturbed_peak=19.513).
-    assert disturbed_peak > 1000.0 * baseline_peak, (
+    # clean (friction-noise-floor) baseline -- measured on this exact rollout
+    # (60 N, friction-enabled model): baseline_peak=1.318, disturbed_peak=
+    # 16.601, ratio ~12.6x. Margin set at 10x, comfortably below the measured
+    # ratio while still requiring a real, unambiguous detection (not the
+    # ~1.2x the original 30 N force produced against this same friction
+    # floor -- see the note above).
+    assert disturbed_peak > 10.0 * baseline_peak, (
         f"baseline_peak={baseline_peak}, disturbed_peak={disturbed_peak}"
     )
     # And it must clearly decay once the disturbance is removed (measured
-    # ratio on this rollout is ~10240x, disturbed_peak/recovered_peak).
-    assert recovered_peak < disturbed_peak / 20.0, (
+    # ratio on this rollout is ~11.5x, disturbed_peak/recovered_peak; margin
+    # set at 8x).
+    assert recovered_peak < disturbed_peak / 8.0, (
         f"disturbed_peak={disturbed_peak}, recovered_peak={recovered_peak}"
     )

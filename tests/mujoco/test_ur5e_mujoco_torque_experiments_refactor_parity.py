@@ -2,15 +2,25 @@
 plumbing move (x_profile_target, build_initial_state_and_adapter, apply_start_q/
 resolve_start_q/coerce_start_q moved to simulation/ur5e_mujoco_torque.py).
 
-Values refreshed 2026-07-30: config/ur5e_mujoco_torque_osc_tuned.yaml (used by
-this test) was promoted from the singular_scale-enabled default to the
-singular_scale-disabled one (jacobian_singular_cond_max: 1.0e18 -- see that
-file's header and docs/status/disable_global_singular_scale_validation_2026-07-30.md).
-The OLD golden values below captured a real bug, not correct behavior: with
-singular_scale enabled, the controller was frozen (tau~1e-13-1e-4 Nm) for
-essentially this entire short 0.3s move, so achieved_x_delta_m was ~2.4e-5 m
-against a 0.01 m target -- off by ~400x. The new values reflect the
-move actually completing close to its target.
+Values refreshed 2026-07-31: assets/ur5e_torque/ur5e_torque.xml gained real joint
+friction (frictionloss/damping on the size3/size1 default classes -- see
+docs/status/ur5e_sim_friction_modeling_2026-07-31.md) that did not exist when the
+2026-07-30 values below were captured. This is a real, intentional physics change
+(the model was previously, unrealistically, frictionless), not a bug -- friction
+now measurably slows this short 0.3s move's tracking (achieved_x_delta_m drops
+from ~0.0101 m to ~0.0067 m against the same 0.01 m target; move_hold_quality_score
+drops from ~0.61 to ~0.30), consistent with the qualitative sim-to-real gap this
+friction addition was meant to close. Re-derived by re-running the exact command
+below against the friction-enabled model (--seed 0, deterministic); the run still
+completes cleanly (termination_reason=duration_complete, valid_move_and_hold=True).
+
+Prior note (2026-07-30, still accurate for that transition): config/
+ur5e_mujoco_torque_osc_tuned.yaml was promoted from the singular_scale-enabled
+default to the singular_scale-disabled one (jacobian_singular_cond_max: 1.0e18 --
+see that file's header and
+docs/status/disable_global_singular_scale_validation_2026-07-30.md). The values
+captured before that fix reflected a real bug (controller frozen for most of the
+move), not correct behavior.
 """
 
 from __future__ import annotations
@@ -27,22 +37,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED = {
     "termination_reason": "duration_complete",
     "steps": 250,
-    "achieved_x_delta_m": pytest.approx(0.010118103975688159, abs=1e-12),
-    "final_x_error_m": pytest.approx(-0.00011810397568815835, abs=1e-12),
-    "max_abs_orientation_error_rad": pytest.approx(0.010748992082004229, abs=1e-12),
-    "max_abs_qd_radps": pytest.approx(0.056309901527987885, abs=1e-12),
-    "max_abs_tau_applied_nm": pytest.approx(2.9572777532474124, abs=1e-9),
-    "move_hold_quality_score": pytest.approx(0.6120449191460254, abs=1e-9),
+    "achieved_x_delta_m": pytest.approx(0.006677818892950525, abs=1e-12),
+    "final_x_error_m": pytest.approx(0.0033221811070494756, abs=1e-12),
+    "max_abs_orientation_error_rad": pytest.approx(0.008667602130849907, abs=1e-12),
+    "max_abs_qd_radps": pytest.approx(0.03594456180001037, abs=1e-12),
+    "max_abs_tau_applied_nm": pytest.approx(6.643184104836119, abs=1e-9),
+    "move_hold_quality_score": pytest.approx(0.2966448644866346, abs=1e-9),
 }
 EXPECTED_FINAL_Q = [
-    0.0012684573093999323,
-    -1.579297649925123,
-    -0.004283204566751049,
-    -1.5702074940577369,
-    -0.00022665150852423045,
-    0.0021185709980759745,
+    8.401498293147879e-05,
+    -1.5758197122204896,
+    -0.0040320048044671375,
+    -1.5715194862259532,
+    -4.27446080881236e-05,
+    0.0010956729274157373,
 ]
-EXPECTED_FINAL_EE_POS = [0.010118103975687933, -0.23398735129287185, 1.079945447324358]
+EXPECTED_FINAL_EE_POS = [0.006677818892950299, -0.2339994396976498, 1.0799738266265693]
 
 
 def test_controller_rollout_matches_pre_refactor_golden_values(tmp_path: Path) -> None:
