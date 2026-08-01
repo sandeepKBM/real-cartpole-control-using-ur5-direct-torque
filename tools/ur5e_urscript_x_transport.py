@@ -44,6 +44,10 @@ def resolve_move_limit_overrides(args: argparse.Namespace) -> dict[str, float | 
         overrides["accel_gap_cycles"] = int(args.accel_gap_cycles)
     if args.speed_lowpass_alpha is not None:
         overrides["speed_lowpass_alpha"] = float(args.speed_lowpass_alpha)
+    if args.speed_limit_gap_cycles is not None:
+        overrides["speed_limit_gap_cycles"] = int(args.speed_limit_gap_cycles)
+    if args.speed_limit_lowpass_alpha is not None:
+        overrides["speed_limit_lowpass_alpha"] = float(args.speed_limit_lowpass_alpha)
     if args.accel_max_consecutive_violations is not None:
         overrides["accel_max_consecutive_violations"] = int(args.accel_max_consecutive_violations)
     if args.accel_hard_multiple is not None:
@@ -122,6 +126,30 @@ def parse_args() -> argparse.Namespace:
             "filtering). EMA smoothing factor in (0, 1] applied to the gap-windowed "
             "speed sample before differencing for the accel estimate -- smaller = "
             "more smoothing. See --accel-gap-cycles."
+        ),
+    )
+    p.add_argument(
+        "--speed-limit-gap-cycles",
+        type=int,
+        default=None,
+        help=(
+            "All three control modes. Explicit override of "
+            "CartesianMoveLimits.speed_limit_gap_cycles (class default 1 = original "
+            "single-cycle behavior). See --speed-limit-lowpass-alpha and "
+            "tools/ur5e_direct_torque_x_transport.py's identical flag for the "
+            "real-hardware finding motivating this (2026-08-01)."
+        ),
+    )
+    p.add_argument(
+        "--speed-limit-lowpass-alpha",
+        type=float,
+        default=None,
+        help=(
+            "All three control modes. Explicit override of "
+            "CartesianMoveLimits.speed_limit_lowpass_alpha (class default 1.0 = no "
+            "filtering). EMA smoothing factor in (0, 1] applied to the gap-windowed "
+            "speed sample used for the speed-LIMIT decision itself -- smaller = more "
+            "smoothing. See --speed-limit-gap-cycles."
         ),
     )
     p.add_argument(
@@ -257,6 +285,8 @@ def main() -> int:
             max_tcp_accel_mps2_override=move_limit_overrides.get("max_tcp_accel_mps2"),
             accel_gap_cycles_override=move_limit_overrides.get("accel_gap_cycles"),
             speed_lowpass_alpha_override=move_limit_overrides.get("speed_lowpass_alpha"),
+            speed_limit_gap_cycles_override=move_limit_overrides.get("speed_limit_gap_cycles"),
+            speed_limit_lowpass_alpha_override=move_limit_overrides.get("speed_limit_lowpass_alpha"),
             accel_max_consecutive_violations_override=move_limit_overrides.get(
                 "accel_max_consecutive_violations"
             ),

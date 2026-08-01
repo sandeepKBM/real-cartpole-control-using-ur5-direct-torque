@@ -119,6 +119,8 @@ def run_urscript_x_transport(
     max_tcp_accel_mps2_override: float | None = None,
     accel_gap_cycles_override: int | None = None,
     speed_lowpass_alpha_override: float | None = None,
+    speed_limit_gap_cycles_override: int | None = None,
+    speed_limit_lowpass_alpha_override: float | None = None,
     accel_max_consecutive_violations_override: int | None = None,
     accel_hard_multiple_override: float | None = None,
     speed_max_consecutive_violations_override: int | None = None,
@@ -212,6 +214,10 @@ def run_urscript_x_transport(
             accel_overrides["accel_gap_cycles"] = int(accel_gap_cycles_override)
         if speed_lowpass_alpha_override is not None:
             accel_overrides["speed_lowpass_alpha"] = float(speed_lowpass_alpha_override)
+        if speed_limit_gap_cycles_override is not None:
+            accel_overrides["speed_limit_gap_cycles"] = int(speed_limit_gap_cycles_override)
+        if speed_limit_lowpass_alpha_override is not None:
+            accel_overrides["speed_limit_lowpass_alpha"] = float(speed_limit_lowpass_alpha_override)
         # DeadlineMonitor-style graduated tolerance overrides -- see
         # CartesianMoveLimits.accel_max_consecutive_violations' docstring and
         # NOISE_ROBUST_GUARD_OVERRIDES in hardware/safety.py. Explicit opt-in

@@ -447,6 +447,40 @@ class CartesianMoveLimits:
     accel_gap_cycles: int = 1
     speed_lowpass_alpha: float = 1.0
 
+    # Noise-robust TCP SPEED-LIMIT estimation (added 2026-08-01, real-hardware
+    # finding). Unlike the accel estimate above, the speed-limit check was
+    # deliberately kept as a raw, single-cycle, unfiltered
+    # step_m/real_dt_s -- see the comment at its use site in check() -- on the
+    # grounds that single-differenced position noise is far smaller than the
+    # double-differenced accel noise. That's still true at rest (measured
+    # tonight from real traces: stationary/near-static p100 <= ~0.030 m/s,
+    # consistent with the original documented 0.036 m/s capture). But a real
+    # trip tonight (direct_torque_20260801_193232, split_base_wrist_task
+    # config, accel_duration_scurve, target_accel=0.02) was root-caused by
+    # pulling the raw per-cycle speed trend for the 140ms before the trip:
+    # the underlying smoothed trend climbed genuinely and monotonically
+    # (~0.020 -> ~0.051 m/s, tracking a real, separately-confirmed
+    # orientation-error growth), while raw single-cycle noise on top of that
+    # trend (residual std ~0.007-0.009 m/s during real motion, vs ~0.006 at
+    # rest -- meaningfully noisier moving than stationary, unlike the
+    # documented rest-only capture the original no-smoothing decision was
+    # based on) meant the *exact* 3 consecutive cycles that tripped
+    # speed_max_consecutive_violations were partly noise-timing-dependent
+    # rather than a clean threshold crossing. The real average had genuinely
+    # already crossed 0.05 m/s -- smoothing does not prevent this class of
+    # trip -- but it removes noise-driven jitter in exactly *when* it trips,
+    # the same rationale already applied to the accel estimate. Separate
+    # field names from accel_gap_cycles/speed_lowpass_alpha above (not
+    # reused) because those are documented as feeding ONLY the accel
+    # estimate, not the speed-limit decision -- conflating the two would
+    # silently change what an existing --noise-robust-guards run does.
+    # Defaults (1, 1.0) reproduce the exact old raw single-cycle behavior --
+    # opt-in only, not folded into NOISE_ROBUST_GUARD_OVERRIDES below (that
+    # preset is already validated on real hardware as-is; extending it is a
+    # separate, deliberate decision, not bundled silently here).
+    speed_limit_gap_cycles: int = 1
+    speed_limit_lowpass_alpha: float = 1.0
+
     # DeadlineMonitor-style graduated tolerance (2026-07-30). Real-hardware
     # evidence (docs/status/safety_envelope_backtest_2026-07-30.md,
     # experiments/safety-envelope-study branch): of 21 real guard trips
@@ -504,6 +538,10 @@ class CartesianMoveLimits:
             raise ValueError("accel_gap_cycles must be >= 1")
         if not (0.0 < float(self.speed_lowpass_alpha) <= 1.0):
             raise ValueError("speed_lowpass_alpha must be in (0.0, 1.0]")
+        if int(self.speed_limit_gap_cycles) < 1:
+            raise ValueError("speed_limit_gap_cycles must be >= 1")
+        if not (0.0 < float(self.speed_limit_lowpass_alpha) <= 1.0):
+            raise ValueError("speed_limit_lowpass_alpha must be in (0.0, 1.0]")
         if int(self.accel_max_consecutive_violations) < 1:
             raise ValueError("accel_max_consecutive_violations must be >= 1")
         if not np.isfinite(self.accel_hard_multiple) or self.accel_hard_multiple < 1.0:
@@ -633,6 +671,17 @@ class CartesianMoveMonitor:
         self._gap = max(int(limits.accel_gap_cycles), 1)
         self._corrected_clock_s = 0.0
         self._pos_history: deque[tuple[np.ndarray, float]] = deque(maxlen=self._gap)
+        # Separate gap-windowed ring buffer + EMA state for the SPEED-LIMIT
+        # check specifically (see CartesianMoveLimits.speed_limit_gap_cycles/
+        # speed_limit_lowpass_alpha docstring) -- independent from
+        # _pos_history/_prev_speed_mps above, which feed only the
+        # acceleration estimate.
+        self._speed_limit_gap = max(int(limits.speed_limit_gap_cycles), 1)
+        self._speed_limit_corrected_clock_s = 0.0
+        self._speed_limit_pos_history: deque[tuple[np.ndarray, float]] = deque(
+            maxlen=self._speed_limit_gap
+        )
+        self._prev_speed_limit_ema: float | None = None
         # DeadlineMonitor-style consecutive-violation counters -- see
         # CartesianMoveLimits.accel_max_consecutive_violations' docstring.
         self._speed_consecutive_violations = 0
@@ -652,6 +701,10 @@ class CartesianMoveMonitor:
         self._corrected_clock_s = 0.0
         self._pos_history.clear()
         self._pos_history.append((pose[:3].copy(), 0.0))
+        self._speed_limit_corrected_clock_s = 0.0
+        self._speed_limit_pos_history.clear()
+        self._speed_limit_pos_history.append((pose[:3].copy(), 0.0))
+        self._prev_speed_limit_ema = None
         self._speed_consecutive_violations = 0
         self._accel_consecutive_violations = 0
 
@@ -726,28 +779,50 @@ class CartesianMoveMonitor:
         measured_dt_s = (now_ns - self._prev_check_ns) / 1e9 if self._prev_check_ns is not None else float(dt_s)
         real_dt_s = max(float(dt_s), measured_dt_s)
 
-        # Immediate single-cycle speed -- used for the speed-limit check.
-        # Real telemetry noise measured this to be far less noisy than the
-        # double-differenced accel estimate (p100 0.036 m/s over a 10s
-        # stationary capture, comfortably under any real max_tcp_speed_mps
-        # value used so far), so this stays on the tightest, most responsive
-        # baseline; only the accel estimate below needs the noise-robust
-        # gap/filter treatment.
+        # Speed used for the speed-limit check. At speed_limit_gap_cycles=1,
+        # speed_limit_lowpass_alpha=1.0 (the defaults), this reduces exactly
+        # to the original immediate single-cycle step_m/real_dt_s -- see
+        # CartesianMoveLimits.speed_limit_gap_cycles/speed_limit_lowpass_alpha
+        # docstring for the real-hardware finding motivating the opt-in
+        # smoothing path. Mirrors the accel estimate's gap-windowed/EMA
+        # mechanism below, with its own independent ring buffer/EMA state so
+        # enabling this cannot change the (separately opt-in) accel
+        # behavior.
         speed_mps = step_m / real_dt_s
-        if speed_mps > self.limits.max_tcp_speed_mps:
+        speed_limit_new_clock_s = self._speed_limit_corrected_clock_s + real_dt_s
+        speed_mps_for_limit = speed_mps
+        if len(self._speed_limit_pos_history) >= self._speed_limit_gap:
+            limit_gap_pos, limit_gap_clock_s = self._speed_limit_pos_history[0]
+            limit_gap_step_m = float(np.linalg.norm(pos - limit_gap_pos))
+            limit_gap_dt_s = max(speed_limit_new_clock_s - limit_gap_clock_s, 1e-9)
+            raw_limit_gap_speed_mps = limit_gap_step_m / limit_gap_dt_s
+
+            limit_alpha = float(self.limits.speed_limit_lowpass_alpha)
+            if self._prev_speed_limit_ema is None:
+                speed_mps_for_limit = raw_limit_gap_speed_mps
+            else:
+                speed_mps_for_limit = (
+                    limit_alpha * raw_limit_gap_speed_mps
+                    + (1.0 - limit_alpha) * self._prev_speed_limit_ema
+                )
+            self._prev_speed_limit_ema = speed_mps_for_limit
+
+        if speed_mps_for_limit > self.limits.max_tcp_speed_mps:
             speed_hard_ceiling = self.limits.max_tcp_speed_mps * self.limits.speed_hard_multiple
-            if self.limits.speed_max_consecutive_violations <= 1 or speed_mps >= speed_hard_ceiling:
-                decision.add(f"TCP speed {speed_mps:.4f} m/s > {self.limits.max_tcp_speed_mps} m/s")
+            if self.limits.speed_max_consecutive_violations <= 1 or speed_mps_for_limit >= speed_hard_ceiling:
+                decision.add(f"TCP speed {speed_mps_for_limit:.4f} m/s > {self.limits.max_tcp_speed_mps} m/s")
                 self._speed_consecutive_violations = 0
             else:
                 self._speed_consecutive_violations += 1
                 if self._speed_consecutive_violations >= self.limits.speed_max_consecutive_violations:
                     decision.add(
-                        f"TCP speed {speed_mps:.4f} m/s > {self.limits.max_tcp_speed_mps} m/s "
+                        f"TCP speed {speed_mps_for_limit:.4f} m/s > {self.limits.max_tcp_speed_mps} m/s "
                         f"for {self._speed_consecutive_violations} consecutive cycles"
                     )
         else:
             self._speed_consecutive_violations = 0
+        self._speed_limit_corrected_clock_s = speed_limit_new_clock_s
+        self._speed_limit_pos_history.append((pos.copy(), speed_limit_new_clock_s))
 
         # Gap-windowed, optionally low-pass-filtered speed sample, used ONLY
         # to feed the acceleration estimate (see CartesianMoveLimits'

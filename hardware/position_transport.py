@@ -50,6 +50,8 @@ def _load_cartesian_limits(
     max_tcp_accel_mps2_override: float | None = None,
     accel_gap_cycles_override: int | None = None,
     speed_lowpass_alpha_override: float | None = None,
+    speed_limit_gap_cycles_override: int | None = None,
+    speed_limit_lowpass_alpha_override: float | None = None,
     accel_max_consecutive_violations_override: int | None = None,
     accel_hard_multiple_override: float | None = None,
     speed_max_consecutive_violations_override: int | None = None,
@@ -88,6 +90,10 @@ def _load_cartesian_limits(
         overrides["accel_gap_cycles"] = int(accel_gap_cycles_override)
     if speed_lowpass_alpha_override is not None:
         overrides["speed_lowpass_alpha"] = float(speed_lowpass_alpha_override)
+    if speed_limit_gap_cycles_override is not None:
+        overrides["speed_limit_gap_cycles"] = int(speed_limit_gap_cycles_override)
+    if speed_limit_lowpass_alpha_override is not None:
+        overrides["speed_limit_lowpass_alpha"] = float(speed_limit_lowpass_alpha_override)
     # DeadlineMonitor-style graduated tolerance overrides (2026-07-30) -- see
     # CartesianMoveLimits.accel_max_consecutive_violations' docstring and
     # NOISE_ROBUST_GUARD_OVERRIDES in hardware/safety.py. Explicit opt-in
@@ -119,6 +125,8 @@ def run_x_transport_position(
     max_tcp_accel_mps2_override: float | None = None,
     accel_gap_cycles_override: int | None = None,
     speed_lowpass_alpha_override: float | None = None,
+    speed_limit_gap_cycles_override: int | None = None,
+    speed_limit_lowpass_alpha_override: float | None = None,
     accel_max_consecutive_violations_override: int | None = None,
     accel_hard_multiple_override: float | None = None,
     speed_max_consecutive_violations_override: int | None = None,
@@ -160,6 +168,8 @@ def run_x_transport_position(
             max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
             accel_gap_cycles_override=accel_gap_cycles_override,
             speed_lowpass_alpha_override=speed_lowpass_alpha_override,
+            speed_limit_gap_cycles_override=speed_limit_gap_cycles_override,
+            speed_limit_lowpass_alpha_override=speed_limit_lowpass_alpha_override,
             accel_max_consecutive_violations_override=accel_max_consecutive_violations_override,
             accel_hard_multiple_override=accel_hard_multiple_override,
             speed_max_consecutive_violations_override=speed_max_consecutive_violations_override,

@@ -525,6 +525,92 @@ def test_cartesian_move_monitor_speed_trips_immediately_on_hard_multiple():
     assert "consecutive" not in decisions[0].reason
 
 
+def test_cartesian_move_limits_validate_rejects_bad_speed_limit_gap_cycles():
+    with pytest.raises(ValueError):
+        CartesianMoveLimits(speed_limit_gap_cycles=0).validate()
+
+
+def test_cartesian_move_limits_validate_rejects_bad_speed_limit_lowpass_alpha():
+    with pytest.raises(ValueError):
+        CartesianMoveLimits(speed_limit_lowpass_alpha=0.0).validate()
+    with pytest.raises(ValueError):
+        CartesianMoveLimits(speed_limit_lowpass_alpha=1.5).validate()
+
+
+def test_cartesian_move_monitor_speed_limit_defaults_match_original_raw_behavior():
+    # speed_limit_gap_cycles=1, speed_limit_lowpass_alpha=1.0 (defaults) must
+    # reproduce the exact original single-cycle, unfiltered speed_mps value
+    # -- same regression contract as accel_gap_cycles=1/speed_lowpass_alpha=1.0.
+    monitor = _monitor(max_tcp_speed_mps=1.0, max_tcp_accel_mps2=1e9, max_waypoint_jump_m=1e9)
+    monitor.set_start([0.0, 0.0, 0.5, 0.0, 0.0, 0.0], move_axis_index=0)
+    decisions = _run_x_deltas(monitor, [0.001, 0.01])  # 0.01/0.002 = 5.0 m/s > 1.0
+    assert decisions[0].ok is True
+    assert decisions[1].ok is False
+    assert "TCP speed 5.0000 m/s > 1.0 m/s" == decisions[1].reason
+
+
+def test_cartesian_move_monitor_speed_limit_wider_gap_reduces_stationary_noise_sensitivity():
+    # Mirrors test_cartesian_move_monitor_wider_gap_reduces_stationary_noise_sensitivity
+    # (the accel-estimate version) for the speed-LIMIT check specifically.
+    rng = np.random.default_rng(0)
+    n = 300
+    true_pos = np.array([0.0, 0.0, 0.5])
+    noisy_positions = [true_pos + rng.normal(0.0, 1e-5, size=3) for _ in range(n)]
+
+    def peak_speed(gap: int, alpha: float) -> float:
+        monitor = _monitor(
+            speed_limit_gap_cycles=gap,
+            speed_limit_lowpass_alpha=alpha,
+            max_tcp_speed_mps=1e-12,  # trip on essentially anything so decision.reason reports the value
+            max_tcp_accel_mps2=1e9,
+            max_waypoint_jump_m=1e9,
+        )
+        monitor.set_start(np.concatenate([true_pos, [0.0, 0.0, 0.0]]), move_axis_index=0)
+        peak = 0.0
+        for p in noisy_positions:
+            pose = np.concatenate([p, [0.0, 0.0, 0.0]])
+            decision = monitor.check(
+                q=np.zeros(6), qd=np.zeros(6), tcp_pose=pose, target_tcp_pose=pose,
+                orientation_error_rad=0.0, axis_target_moving=True, dt_s=0.002,
+            )
+            for reason in decision.reasons:
+                if reason.startswith("TCP speed"):
+                    peak = max(peak, float(reason.split()[2]))
+        return peak
+
+    peak_raw = peak_speed(gap=1, alpha=1.0)
+    peak_smoothed = peak_speed(gap=5, alpha=0.2)
+    assert peak_raw > 0.0
+    assert peak_smoothed > 0.0
+    # Unlike the accel estimate (a difference-of-differences, so gap helps
+    # quadratically), this is a single position difference over a wider gap
+    # -- noise reduction is real but more modest. Measured ~1.87x at these
+    # settings; assert a conservative fraction of that, not a hand-derived
+    # exact ratio (same honest-margin style as the accel-estimate test).
+    assert peak_smoothed < peak_raw / 1.5, f"raw peak {peak_raw}, smoothed peak {peak_smoothed}"
+
+
+def test_cartesian_move_monitor_speed_limit_smoothing_still_catches_a_genuine_sustained_rise():
+    # The real-hardware finding this feature is built from: a genuinely
+    # rising average speed must still trip even with smoothing enabled --
+    # smoothing only removes noise-driven jitter in *when* it trips, not
+    # whether it trips. Constant-velocity ramp well above the ceiling for
+    # long enough to clear the smoothing window many times over.
+    monitor = _monitor(
+        speed_limit_gap_cycles=5,
+        speed_limit_lowpass_alpha=0.2,
+        max_tcp_speed_mps=1.0,
+        max_tcp_accel_mps2=1e9,
+        max_waypoint_jump_m=1e9,
+    )
+    monitor.set_start([0.0, 0.0, 0.5, 0.0, 0.0, 0.0], move_axis_index=0)
+    # 0.01 m per 0.002s cycle = 5.0 m/s, sustained -- must eventually trip.
+    decisions = _run_x_deltas(monitor, [0.01] * 40)
+    assert any(not d.ok for d in decisions), "a genuine sustained 5.0 m/s rise never tripped"
+    tripped_reasons = [d.reason for d in decisions if not d.ok]
+    assert all("TCP speed" in r for r in tripped_reasons)
+
+
 def test_cartesian_move_monitor_trips_on_off_axis_drift():
     monitor = _monitor(max_off_axis_drift_m=0.01)
     start = [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]

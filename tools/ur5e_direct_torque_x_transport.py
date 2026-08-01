@@ -83,6 +83,10 @@ def resolve_move_limit_overrides(args: argparse.Namespace) -> dict[str, float | 
         overrides["accel_gap_cycles"] = int(args.accel_gap_cycles)
     if args.speed_lowpass_alpha is not None:
         overrides["speed_lowpass_alpha"] = float(args.speed_lowpass_alpha)
+    if args.speed_limit_gap_cycles is not None:
+        overrides["speed_limit_gap_cycles"] = int(args.speed_limit_gap_cycles)
+    if args.speed_limit_lowpass_alpha is not None:
+        overrides["speed_limit_lowpass_alpha"] = float(args.speed_limit_lowpass_alpha)
     if args.accel_max_consecutive_violations is not None:
         overrides["accel_max_consecutive_violations"] = int(args.accel_max_consecutive_violations)
     if args.accel_hard_multiple is not None:
@@ -214,6 +218,38 @@ def parse_args() -> argparse.Namespace:
             "filtering). EMA smoothing factor in (0, 1] applied to the gap-windowed "
             "speed sample before differencing for the accel estimate -- smaller = "
             "more smoothing. See --accel-gap-cycles."
+        ),
+    )
+    p.add_argument(
+        "--speed-limit-gap-cycles",
+        type=int,
+        default=None,
+        help=(
+            "All three control modes. Explicit override of "
+            "CartesianMoveLimits.speed_limit_gap_cycles (class default 1 = original "
+            "single-cycle behavior). Added 2026-08-01: unlike --accel-gap-cycles/"
+            "--speed-lowpass-alpha above (which only feed the acceleration "
+            "estimate), the TCP speed-LIMIT check itself was still raw and "
+            "unfiltered -- real-hardware trace evidence the same night showed a "
+            "genuine, sustained speed rise (from real orientation-error growth) "
+            "with real per-cycle noise (~1.5-2x the stationary noise floor during "
+            "active motion) riding on top of it, making the exact trip cycle "
+            "somewhat noise-timing-dependent even though the underlying average had "
+            "genuinely crossed the guard. This does not prevent a genuine sustained "
+            "trip -- it only removes noise jitter in exactly when it trips. See "
+            "--speed-limit-lowpass-alpha."
+        ),
+    )
+    p.add_argument(
+        "--speed-limit-lowpass-alpha",
+        type=float,
+        default=None,
+        help=(
+            "All three control modes. Explicit override of "
+            "CartesianMoveLimits.speed_limit_lowpass_alpha (class default 1.0 = no "
+            "filtering). EMA smoothing factor in (0, 1] applied to the gap-windowed "
+            "speed sample used for the speed-LIMIT decision itself -- smaller = more "
+            "smoothing. See --speed-limit-gap-cycles."
         ),
     )
     p.add_argument(
@@ -428,6 +464,8 @@ def main() -> int:
             enable_residual_observer=not bool(args.disable_residual_observer),
             residual_observer_async=bool(args.residual_observer_async),
             speed_lowpass_alpha_override=move_limit_overrides.get("speed_lowpass_alpha"),
+            speed_limit_gap_cycles_override=move_limit_overrides.get("speed_limit_gap_cycles"),
+            speed_limit_lowpass_alpha_override=move_limit_overrides.get("speed_limit_lowpass_alpha"),
             accel_max_consecutive_violations_override=move_limit_overrides.get(
                 "accel_max_consecutive_violations"
             ),
