@@ -209,7 +209,75 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Seed for the noise RNG (separate from --seed). Defaults to --seed if unset.",
     )
+    p.add_argument(
+        "--enable-tcp-accel-guard",
+        action="store_true",
+        help=(
+            "Opt-in diagnostic/guard, default OFF (zero effect on any existing run's "
+            "output when unset). Ports hardware/safety.py's CartesianMoveMonitor "
+            "(TCP speed/acceleration finite-difference guard -- the real-hardware safety "
+            "check that has no sim-side equivalent) into this per-step loop, reusing that "
+            "class via a local import (only imported when this flag is set, so this "
+            "module's 'never imports hardware code' invariant holds for every "
+            "existing/default run). When tripped, ends the run with "
+            "termination_reason='tcp_accel_guard: <CartesianMoveMonitor reason>', exactly "
+            "like any other adapter.safety_monitor trip. See "
+            "docs/status/sim_tcp_accel_guard_2026-08-01.md."
+        ),
+    )
+    p.add_argument(
+        "--tcp-accel-guard-noise-robust",
+        dest="tcp_accel_guard_noise_robust",
+        action="store_true",
+        help=(
+            "Only meaningful with --enable-tcp-accel-guard. Applies "
+            "hardware.safety.NOISE_ROBUST_GUARD_OVERRIDES (the exact preset validated "
+            "on real hardware to avoid single-cycle finite-difference noise spikes) "
+            "before any individual override flag below. Named --tcp-accel-guard-* here "
+            "since this tool already has other --*-noise-* flags with a different meaning "
+            "(sensor-noise injection; see --q-noise-std-rad)."
+        ),
+    )
+    p.add_argument("--max-tcp-accel-mps2", type=float, default=None, help="Override CartesianMoveLimits.max_tcp_accel_mps2 (class default 0.5).")
+    p.add_argument("--max-tcp-speed-mps", type=float, default=None, help="Override CartesianMoveLimits.max_tcp_speed_mps (class default 0.05).")
+    p.add_argument("--accel-gap-cycles", type=int, default=None, help="Override CartesianMoveLimits.accel_gap_cycles (class default 1).")
+    p.add_argument("--speed-lowpass-alpha", type=float, default=None, help="Override CartesianMoveLimits.speed_lowpass_alpha (class default 1.0).")
+    p.add_argument("--accel-max-consecutive-violations", type=int, default=None, help="Override CartesianMoveLimits.accel_max_consecutive_violations (class default 1).")
+    p.add_argument("--accel-hard-multiple", type=float, default=None, help="Override CartesianMoveLimits.accel_hard_multiple (class default 5.0).")
+    p.add_argument("--speed-max-consecutive-violations", type=int, default=None, help="Override CartesianMoveLimits.speed_max_consecutive_violations (class default 1).")
+    p.add_argument("--speed-hard-multiple", type=float, default=None, help="Override CartesianMoveLimits.speed_hard_multiple (class default 5.0).")
     return p.parse_args()
+
+
+def _resolve_tcp_accel_guard_limits(args: argparse.Namespace):
+    """Build a hardware.safety.CartesianMoveLimits from CLI overrides. Only called
+    when --enable-tcp-accel-guard is set -- the local import keeps this module free of
+    any hardware/RTDE dependency for every default/existing run (see that flag's help
+    text). Same merge convention as tools/ur5e_direct_torque_x_transport.py's
+    resolve_move_limit_overrides: --tcp-accel-guard-noise-robust's preset is applied
+    first, then any explicit individual override flag wins for that field."""
+    from hardware.safety import CartesianMoveLimits, NOISE_ROBUST_GUARD_OVERRIDES
+
+    overrides: dict[str, float | int] = {}
+    if bool(args.tcp_accel_guard_noise_robust):
+        overrides.update(NOISE_ROBUST_GUARD_OVERRIDES)
+    if args.max_tcp_accel_mps2 is not None:
+        overrides["max_tcp_accel_mps2"] = float(args.max_tcp_accel_mps2)
+    if args.max_tcp_speed_mps is not None:
+        overrides["max_tcp_speed_mps"] = float(args.max_tcp_speed_mps)
+    if args.accel_gap_cycles is not None:
+        overrides["accel_gap_cycles"] = int(args.accel_gap_cycles)
+    if args.speed_lowpass_alpha is not None:
+        overrides["speed_lowpass_alpha"] = float(args.speed_lowpass_alpha)
+    if args.accel_max_consecutive_violations is not None:
+        overrides["accel_max_consecutive_violations"] = int(args.accel_max_consecutive_violations)
+    if args.accel_hard_multiple is not None:
+        overrides["accel_hard_multiple"] = float(args.accel_hard_multiple)
+    if args.speed_max_consecutive_violations is not None:
+        overrides["speed_max_consecutive_violations"] = int(args.speed_max_consecutive_violations)
+    if args.speed_hard_multiple is not None:
+        overrides["speed_hard_multiple"] = float(args.speed_hard_multiple)
+    return CartesianMoveLimits(**overrides)
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -789,6 +857,24 @@ def run() -> int:
     termination_reason = "duration_complete"
     safety_violation = False
     clip_observed = False
+
+    # Opt-in TCP-accel/speed guard (see --enable-tcp-accel-guard's help text).
+    # move_monitor stays None -- and every downstream branch below is a no-op --
+    # unless the flag is set, so this whole block has zero effect on any
+    # existing/default run (no import, no new summary/trace keys, identical
+    # control flow).
+    move_monitor = None
+    if bool(args.enable_tcp_accel_guard):
+        from hardware.safety import CartesianMoveMonitor
+
+        move_limits = _resolve_tcp_accel_guard_limits(args)
+        move_monitor = CartesianMoveMonitor(move_limits)
+        tcp_pose0 = np.concatenate(
+            [np.asarray(state0.ee_pos, dtype=np.float64).reshape(3), np.zeros(3, dtype=np.float64)]
+        )
+        move_monitor.set_start(tcp_pose0, move_axis_index=int(args.transport_axis_index))
+        summary["tcp_accel_guard_enabled"] = True
+        summary["tcp_accel_guard_limits"] = dataclasses.asdict(move_limits)
     total_effort = 0.0
     total_energy_proxy = 0.0
     max_abs_tau_controller = 0.0
@@ -1060,6 +1146,34 @@ def run() -> int:
                 orientation_error_norm=post_orient_err,
                 axis_target_moving=bool(abs(post_axis_target_vel) > 1e-9),
             )
+            # Opt-in TCP-accel/speed guard (see move_monitor's construction above).
+            # move_monitor is None unless --enable-tcp-accel-guard was passed, in
+            # which case move_guard_decision stays None and row_safety_ok/
+            # row_safety_reason below reduce to exactly bool(post_safety.ok)/
+            # str(post_safety.reason) -- byte-identical to before this flag existed.
+            move_guard_decision = None
+            if move_monitor is not None:
+                tcp_pose_now = np.concatenate(
+                    [np.asarray(post_state.ee_pos, dtype=np.float64).reshape(3), np.zeros(3, dtype=np.float64)]
+                )
+                target_tcp_pose_now = np.concatenate(
+                    [np.asarray(target_ee_pos, dtype=np.float64).reshape(3), np.zeros(3, dtype=np.float64)]
+                )
+                move_guard_decision = move_monitor.check(
+                    q=post_state.q,
+                    qd=post_state.qd,
+                    tcp_pose=tcp_pose_now,
+                    target_tcp_pose=target_tcp_pose_now,
+                    orientation_error_rad=post_orient_err,
+                    axis_target_moving=bool(abs(post_axis_target_vel) > 1e-9),
+                    dt_s=dt,
+                )
+            row_safety_ok = bool(post_safety.ok)
+            row_safety_reason = str(post_safety.reason)
+            if move_guard_decision is not None and not move_guard_decision.ok:
+                guard_reason = f"tcp_accel_guard: {move_guard_decision.reason}"
+                row_safety_ok = False
+                row_safety_reason = f"{row_safety_reason}; {guard_reason}" if row_safety_reason else guard_reason
             joint_prox = compute_joint_limit_proximity(model, post_state.q, joint_ids)
             joint_limit_min_fraction = float(min(joint_prox.values())) if joint_prox else 0.0
             reward_terms = compute_reward_terms(
@@ -1120,8 +1234,8 @@ def run() -> int:
                 "orientation_error_norm": float(diag.get("orientation_error_norm", 0.0)),
                 "reward": reward_terms["reward"],
                 "reward_terms": reward_terms,
-                "safety_ok": bool(post_safety.ok),
-                "safety_reason": str(post_safety.reason),
+                "safety_ok": row_safety_ok,
+                "safety_reason": row_safety_reason,
                 "controller_kind": str(diag.get("controller_kind", "")),
                 "jacobian_cond": controller_output.get("jacobian_cond"),
                 "singular_scale": controller_output.get("singular_scale"),
@@ -1148,11 +1262,14 @@ def run() -> int:
                 "raw_mode_used": bool(diag.get("raw_mode_used", gravity_mode == "raw")),
                 "trajectory_profile": trajectory_profile,
             }
+            if move_monitor is not None:
+                row["tcp_accel_guard_ok"] = bool(move_guard_decision.ok) if move_guard_decision is not None else True
+                row["tcp_accel_guard_reason"] = str(move_guard_decision.reason) if move_guard_decision is not None else ""
             trace_rows.append(row)
             trace_writer.write_row(row)
-            if not bool(post_safety.ok):
+            if not row_safety_ok:
                 safety_violation = True
-                termination_reason = str(post_safety.reason) or "safety_violation"
+                termination_reason = row_safety_reason or "safety_violation"
                 failure_time_s = float(data.time)
                 row["termination_reason"] = termination_reason
                 trace_rows[-1] = row
@@ -1262,6 +1379,8 @@ def run() -> int:
             summary["failure_time_s"] = float(trace_rows[-1]["time_s"])
     if not summary["success"]:
         summary["failure_reason"] = termination_reason
+    if move_monitor is not None:
+        summary["tcp_accel_guard_tripped"] = bool(termination_reason.startswith("tcp_accel_guard:"))
     if args.mode == "safety-clipping":
         summary["success"] = bool(clip_observed) and not safety_violation
 
