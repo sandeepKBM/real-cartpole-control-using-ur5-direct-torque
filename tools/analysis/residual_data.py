@@ -33,6 +33,20 @@ real-hardware-logged residual are computed identically once real trace data
 (with the observer's fields already populated) is available -- see
 ``tools/pull_hardware_logs_ssh.sh`` for how that would be pulled from
 thinkrobot.
+
+Real-hardware trace rows are now actually consumable, not just anticipated
+(fixed 2026-08-01, see
+``docs/status/residual_observer_real_trace_gap_2026-08-01.md``): a pulled
+real ``direct_torque`` trace has ``qdd_residual`` already populated but has
+NEITHER of the sim-only reconstruction fields above (it logs
+``tau_applied``/``tau_controller``/``tau_coriolis``, never a bare ``"tau"``,
+and has no ``"qfrc_bias"`` field at all), so the reconstruction path was
+unconditionally rejecting every real row before this date even though the
+observer's own output was sitting right there in the trace. ``_required_fields_present``/
+``build_run_dataset`` now accept a row via a second path -- non-null
+``qdd_residual`` present -- and use it directly (only ``M(q) @ qdd_residual``
+is still computed), skipping the tau/qfrc_bias/accel-estimator
+reconstruction entirely for that row.
 """
 
 from __future__ import annotations
@@ -80,9 +94,21 @@ class ResidualDatasetRun:
 
 
 def _required_fields_present(row: dict) -> bool:
-    return all(key in row for key in ("q", "qd", "tau", "qfrc_bias")) and (
-        "dt_s" in row or "time_s" in row
-    )
+    if "q" not in row or "qd" not in row:
+        return False
+    if row.get("qdd_residual") is not None:
+        # Real-hardware direct_torque path (found 2026-08-01, see
+        # docs/status/residual_observer_real_trace_gap_2026-08-01.md): the
+        # residual observer (hardware/direct_torque_transport.py /
+        # hardware/residual_observer_worker.py) already computes and logs
+        # qdd_residual = qdd_measured - qdd_pred every cycle. Real traces
+        # never have "tau" or "qfrc_bias" (they log tau_applied /
+        # tau_controller / tau_coriolis instead -- sim-only field names),
+        # so the reconstruction path below always rejected them even though
+        # the quantity it reconstructs is already sitting in the row. Reuse
+        # it directly instead of requiring the sim-only fields.
+        return True
+    return all(key in row for key in ("tau", "qfrc_bias")) and ("dt_s" in row or "time_s" in row)
 
 
 def build_run_dataset(
@@ -125,9 +151,34 @@ def build_run_dataset(
     for row in rows:
         q = np.asarray(row["q"], dtype=np.float64).reshape(NUM_JOINTS)
         qd = np.asarray(row["qd"], dtype=np.float64).reshape(NUM_JOINTS)
+        t_s = float(row.get("time_s", 0.0))
+
+        precomputed_qdd_residual = row.get("qdd_residual")
+        if precomputed_qdd_residual is not None:
+            # Real-hardware direct_torque path: qdd_residual was already
+            # computed online by the residual observer -- no need to
+            # reconstruct it via tau/qfrc_bias/the accel estimator (those
+            # sim-only fields don't exist on this path anyway). Only
+            # M(q) @ qdd_residual is left to compute.
+            qdd_residual = np.asarray(precomputed_qdd_residual, dtype=np.float64).reshape(NUM_JOINTS)
+            if not (
+                np.all(np.isfinite(q)) and np.all(np.isfinite(qd)) and np.all(np.isfinite(qdd_residual))
+            ):
+                continue
+            mass_matrix = dynamics.mass_matrix(q)
+            tau_residual = mass_matrix @ qdd_residual
+            if not np.all(np.isfinite(tau_residual)):
+                continue
+            q_list.append(q)
+            qd_list.append(qd)
+            tau_residual_list.append(tau_residual)
+            qdd_residual_list.append(qdd_residual)
+            t_list.append(t_s)
+            prev_t = t_s
+            continue
+
         tau = np.asarray(row["tau"], dtype=np.float64).reshape(NUM_JOINTS)
         qfrc_bias = np.asarray(row["qfrc_bias"], dtype=np.float64).reshape(NUM_JOINTS)
-        t_s = float(row.get("time_s", 0.0))
 
         if "dt_s" in row and row["dt_s"] is not None:
             real_dt_s = float(row["dt_s"])

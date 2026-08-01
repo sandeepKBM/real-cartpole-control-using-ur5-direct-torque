@@ -139,6 +139,69 @@ def test_build_run_dataset_returns_none_for_empty_trace(tmp_path: Path, dynamics
     assert run is None
 
 
+def test_build_run_dataset_uses_precomputed_qdd_residual_on_real_hardware_rows(
+    tmp_path: Path, dynamics: PinocchioUR5eDynamics
+):
+    """Real hardware/direct_torque_transport.py trace rows have neither the
+    sim-only "tau" field nor "qfrc_bias" -- they log tau_applied/
+    tau_controller/tau_coriolis instead -- but the residual observer already
+    computed and logged qdd_residual online. Regression test for the gap
+    found 2026-08-01 (docs/status/residual_observer_real_trace_gap_2026-08-01.md):
+    build_run_dataset must use that precomputed value directly rather than
+    unconditionally requiring the sim-only reconstruction fields, which real
+    traces never have."""
+    q = np.asarray(HEIGHT_ALPHA_0_5_Q, dtype=np.float64)
+    qdd_residual = np.array([0.0, 0.3, 0.0, 0.0, 0.0, -0.1])
+    rows = [
+        {
+            "time_s": i * 0.002,
+            "q": q.tolist(),
+            "qd": [0.0] * 6,
+            "tau_applied": [0.0] * 6,
+            "tau_controller": [0.0] * 6,
+            "tau_coriolis": [0.0] * 6,
+            "qdd_pred": [0.0] * 6,
+            "qdd_measured": qdd_residual.tolist(),
+            "qdd_residual": qdd_residual.tolist(),
+            "qdd_residual_norm": float(np.linalg.norm(qdd_residual)),
+        }
+        for i in range(5)
+    ]
+    trace_path = tmp_path / "trace.jsonl"
+    _write_trace(trace_path, rows)
+
+    run = build_run_dataset(trace_path, dynamics=dynamics, gap_cycles=1, lowpass_alpha=1.0)
+    assert run is not None
+    assert run.n_rows_valid == 5
+    assert run.n_rows_total == 5
+    expected_tau_residual = dynamics.mass_matrix(q) @ qdd_residual
+    for row_qdd_residual in run.qdd_residual:
+        np.testing.assert_allclose(row_qdd_residual, qdd_residual, atol=1e-12)
+    for row_tau_residual in run.tau_residual:
+        np.testing.assert_allclose(row_tau_residual, expected_tau_residual, atol=1e-10)
+
+
+def test_build_run_dataset_precomputed_path_ignores_null_qdd_residual(
+    tmp_path: Path, dynamics: PinocchioUR5eDynamics
+):
+    """A row with the key present but null (the graceful-degradation case --
+    e.g. the estimator's gap window hasn't filled yet, or the observer failed
+    to construct) must fall through to the sim-reconstruction path, not be
+    treated as a valid precomputed measurement of zero."""
+    rows = [
+        {
+            "time_s": 0.0,
+            "q": [0.0] * 6,
+            "qd": [0.0] * 6,
+            "qdd_residual": None,
+        }
+    ]
+    trace_path = tmp_path / "trace.jsonl"
+    _write_trace(trace_path, rows)
+    run = build_run_dataset(trace_path, dynamics=dynamics, gap_cycles=1, lowpass_alpha=1.0)
+    assert run is None
+
+
 def test_build_dataset_skips_unusable_files_and_keeps_usable_ones(
     tmp_path: Path, dynamics: PinocchioUR5eDynamics
 ):
