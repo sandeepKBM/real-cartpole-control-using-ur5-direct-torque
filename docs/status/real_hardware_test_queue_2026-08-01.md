@@ -167,14 +167,28 @@ python3 tools/ur5e_direct_torque_x_transport.py --robot-ip 172.16.71.77 \
   --noise-robust-guards --i-understand-this-moves-the-robot
 ```
 
-## 4. Friction feedforward — confirm real coverage before repeating anything
+## 4. Friction feedforward — real coverage now CONFIRMED (pulled via the SSH gateway, 2026-08-01), mostly negative
 
-Sim validation is solid (height_alpha 0.2/0.3/0.5, see AGENTS.md §3). Real-hardware coverage tonight is
-uncertain from where I'm sitting (see the run_log pull at the top of this doc) — **check that first**
-before re-running what might be a duplicate. If it turns out untested, this is the config:
-`config/ur5e_mujoco_torque_osc_tuned_friction_ff.yaml`. **Confirmed final number at the -45° pose**:
-17/38 vs. 18/38 baseline — roughly neutral (not a fix, not a full regression), so it's not
-disqualified there, but don't expect it to help either.
+Sim validation is solid (height_alpha 0.2/0.3/0.5, see AGENTS.md §3). Real-hardware coverage is no
+longer uncertain — pulled all 81 real run records from `thinkrobot` directly. **10 real runs used
+`config/ur5e_mujoco_torque_osc_tuned_friction_ff.yaml` (all `2026-07-31`), 9 of 10 failed via guard
+trip, only 1 succeeded**:
+
+- 4 runs at the standard `min_jerk` profile (`dx=0.03m` once, `dx=0.1m` three times) — **all 4
+  failed** (TCP-acceleration or TCP-speed guard). Every attempt at the more meaningful `dx=0.1m`
+  scale failed, all three times it was tried.
+- 6 runs at the new `accel_duration_scurve`/`triangular` profiles — 5 failed the same way, 1
+  succeeded: `target_accel=0.02, move_duration=4.0s` (target `~0.051m`, achieved `~0.042m`, 83%).
+  This is the "known-clean point" already referenced in section 3 above.
+
+**Do not re-run `min_jerk` at `dx=0.1m` with this config expecting a different result** — already
+tried 3 times tonight, failed every time, consistent with the documented real breakaway/stick-slip
+signature (`docs/hardware/LUGRE_FRICTION_MODEL_PLAN.md`). If testing this config further, try
+something genuinely new: a smaller `min_jerk` displacement (never tried), or reconfirm the one
+known-clean scurve point still holds.
+
+**Confirmed final sim number at the -45° pose**: 17/38 vs. 18/38 baseline — roughly neutral (not a
+fix, not a full regression), so it's not disqualified there, but don't expect it to help either.
 
 ## 5. New tools tonight that are sim-only and should NOT be pointed at real hardware yet
 
