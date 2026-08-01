@@ -315,6 +315,62 @@ class CartesianImpedanceConfig:
     y_integral_action: bool = False
     ki_y: float = 0.0
     y_integral_limit_m_s: float = 0.02
+    # Base/wrist task split (default off = historical behavior). Added
+    # 2026-08-01 after a real-hardware TCP-accel guard trip at the
+    # height_alpha=0.5 pose using accel_duration_scurve at a modest
+    # target_accel (0.005-0.02 m/s^2), root-caused directly from real
+    # trace.jsonl: the arm sits almost exactly at wrist_2=0 (a UR5e
+    # kinematic singularity present at every height_alpha,
+    # hardware/poses.py::q_for_height_alpha), where the FULL 6x6 J's
+    # cond() (used unconditionally above for singular_scale/adaptive-eps
+    # scheduling, and for task_space_inertia_shaping's Lambda when that
+    # flag is on) oscillates 5-10x cycle-to-cycle purely from being
+    # parked there -- lambda_diagonal_shaping/lambda_adaptive_regularization
+    # do not help (verified on real hardware, if anything slightly worse):
+    # neither touches cond(J) itself, an upstream geometric property of J
+    # at that exact configuration that no downstream Lambda regularization
+    # fixes.
+    #
+    # Numeric evidence (docs/status/split_base_wrist_impedance_2026-08-01.md,
+    # exact failure pose q=[0, -0.835398, -1.2, -0.985398, 0, 0] =
+    # hardware/poses.py::HEIGHT_ALPHA_0_5_Q): cond(full 6x6 J) ~= 7.28e16
+    # (numerically singular); cond(3x3 position-rows x base-joint-cols
+    # [shoulder_pan, shoulder_lift, elbow]) ~= 7.8 (well conditioned);
+    # cond(3x3 rotation-rows x wrist-joint-cols [wrist_1, wrist_2,
+    # wrist_3]) == inf (exactly rank-deficient, smallest singular value
+    # 0.0 -- wrist_1/wrist_3 axes align when wrist_2=0, the textbook UR
+    # wrist gimbal lock). This REFUTES a naive symmetric design (base-only
+    # translation impedance + wrist-only orientation impedance): the
+    # wrist-only rotation sub-Jacobian is exactly as singular as the
+    # shared pipeline it would replace, not better.
+    #
+    # Design driven by that evidence: with this flag on, the position
+    # task (Fx, Fy, Fz) is mapped through a reduced Jacobian that zeroes
+    # the wrist columns (J_task[:, 0:3] = J[0:3, 0:3], J_task[:, 3:6] = 0)
+    # -- structurally, translation-task torque can never route through
+    # wrist_2 (or any wrist joint) at all, regardless of how ill-
+    # conditioned the full J is there. The rotational wrench (kp_rot/
+    # kd_rot term) is dropped from this task-wrench pipeline entirely
+    # (kept only in the diagnostic `wrench` output field) rather than
+    # routed through the singular wrist-only submatrix. Orientation
+    # instead stays held by the EXISTING, already-validated
+    # nullspace_posture mechanism -- but its projector is recomputed
+    # against this same reduced task Jacobian (so it sees a rank-3 task
+    # with an intact nullspace for base AND wrist redundancy) instead of
+    # the near-singular full 6x6 one -- and, if wrist_orientation_task is
+    # also enabled, that separate joint-space PD path (no matrix
+    # inversion, so it cannot itself blow up from ill-conditioning).
+    #
+    # Implementation note: every downstream computation that currently
+    # uses the full J (wrench-shaping Lambda, the nullspace projector,
+    # cond()-based singular_scale/adaptive-eps scheduling, the
+    # jacobian_cond trace field) is rewritten in terms of a local
+    # `J_task`/`wrench_task`/`cond_task` that equal J/wrench/cond exactly
+    # when this flag is off (J_task = J is a 6x6 identity substitution),
+    # so the flag-off path is unchanged arithmetic, not just
+    # coincidentally equal output -- verified byte-identical in
+    # tests/unit/test_split_base_wrist_task.py.
+    split_base_wrist_task: bool = False
 
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianImpedanceConfig":
@@ -434,6 +490,7 @@ class CartesianImpedanceConfig:
             y_integral_action=bool(ctrl.get("y_integral_action", False)),
             ki_y=float(gains.get("ki_y", 0.0)),
             y_integral_limit_m_s=float(ctrl.get("y_integral_limit_m_s", 0.02)),
+            split_base_wrist_task=bool(ctrl.get("split_base_wrist_task", False)),
         )
 
 
@@ -474,6 +531,7 @@ class CartesianImpedanceOutput:
     friction_z: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
     y_integral_action_active: bool = False
     y_integral_value: float = 0.0
+    split_base_wrist_task_active: bool = False
 
 
 class XAxisCartesianImpedanceController:
@@ -722,6 +780,33 @@ class XAxisCartesianImpedanceController:
         # when lambda_adaptive_regularization is on, to schedule eps.
         cond = float(np.linalg.cond(J))
 
+        # Base/wrist task split (default off = historical behavior; see
+        # split_base_wrist_task's docstring above for the full evidence and
+        # rationale). When off, J_task/wrench_task/cond_task are exactly
+        # J/wrench/cond (a 6x6 identity substitution), so every computation
+        # below that uses them is unchanged arithmetic, not just
+        # coincidentally-equal output.
+        use_split_base_wrist = bool(self.cfg.split_base_wrist_task)
+        if use_split_base_wrist:
+            # Position rows only, base-joint columns only (shoulder_pan,
+            # shoulder_lift, elbow -- JOINT_NAME_ORDER[0:3]); wrist columns
+            # stay exactly zero so translation-task torque structurally
+            # cannot route through them. The rotational wrench (M) is
+            # dropped from this pipeline -- the wrist-only rotation
+            # sub-Jacobian is exactly singular at the motivating pose (step-1
+            # evidence above), so routing M through it would just relocate
+            # the same problem, not fix it. Orientation stays with
+            # nullspace_posture (recomputed below against this same reduced
+            # J_task) and, if enabled, wrist_orientation_task.
+            J_task = np.zeros((3, 6), dtype=np.float64)
+            J_task[:, 0:3] = J[0:3, 0:3]
+            wrench_task = wrench[0:3].copy()
+            cond_task = float(np.linalg.cond(J[0:3, 0:3]))
+        else:
+            J_task = J
+            wrench_task = wrench
+            cond_task = cond
+
         # Operational-space terms (P3, flag-gated; default off).
         use_shaping = bool(self.cfg.task_space_inertia_shaping)
         use_nullspace = bool(self.cfg.nullspace_posture)
@@ -743,18 +828,21 @@ class XAxisCartesianImpedanceController:
             # (measured joint-velocity blowup at cond(J)~1e3-1e4, well short of
             # the exact singularity) -- a separate failure mode from the
             # nullspace-projector leak the adaptive schedule targets. Only the
-            # nullspace projector's Lambda is scheduled.
-            a_mat = J @ m_inv @ J.T
-            lambda_mat = np.linalg.inv(a_mat + eps_wrench * np.eye(6))
+            # nullspace projector's Lambda is scheduled. Uses J_task (== J
+            # when split_base_wrist_task is off), so a_mat is 3x3 in split
+            # mode and 6x6 otherwise.
+            a_mat = J_task @ m_inv @ J_task.T
+            eye_task = np.eye(a_mat.shape[0], dtype=np.float64)
+            lambda_mat = np.linalg.inv(a_mat + eps_wrench * eye_task)
             if use_adaptive_eps:
-                eps_effective = self._scheduled_lambda_regularization(cond)
-                lambda_mat_nullspace = np.linalg.inv(a_mat + eps_effective * np.eye(6))
+                eps_effective = self._scheduled_lambda_regularization(cond_task)
+                lambda_mat_nullspace = np.linalg.inv(a_mat + eps_effective * eye_task)
             else:
                 lambda_mat_nullspace = lambda_mat
 
         singular_scale = 1.0
-        if cond > self.cfg.jacobian_singular_cond_max > 0.0:
-            singular_scale = float(self.cfg.jacobian_singular_cond_max / cond)
+        if cond_task > self.cfg.jacobian_singular_cond_max > 0.0:
+            singular_scale = float(self.cfg.jacobian_singular_cond_max / cond_task)
         use_diagonal_shaping = bool(self.cfg.lambda_diagonal_shaping)
         if use_shaping and lambda_mat is not None:
             # Wrench is treated as a desired task acceleration; Lambda maps it
@@ -762,20 +850,23 @@ class XAxisCartesianImpedanceController:
             # below always uses the full (undiagonalized) lambda_mat -- only
             # the wrench-shaping step is affected by lambda_diagonal_shaping.
             lambda_for_wrench = np.diag(np.diag(lambda_mat)) if use_diagonal_shaping else lambda_mat
-            wrench_effective = lambda_for_wrench @ wrench
+            wrench_effective = lambda_for_wrench @ wrench_task
         else:
-            wrench_effective = wrench
+            wrench_effective = wrench_task
         wrench_scaled = wrench_effective * singular_scale
-        tau_task_nominal = J.T @ wrench_scaled
+        tau_task_nominal = J_task.T @ wrench_scaled
         tau_damping = -self.cfg.kd_joint * qd
         tau_posture = self.cfg.kp_posture * (self._q_rest - q) - self.cfg.kd_posture * qd
         if use_nullspace and lambda_mat_nullspace is not None and m_inv is not None:
             # Dynamically consistent nullspace projector: posture torques can
             # no longer produce task-space acceleration. Uses
             # lambda_mat_nullspace (== lambda_mat unless lambda_adaptive_
-            # regularization is on), not the wrench-shaping lambda_mat.
-            j_bar = m_inv @ J.T @ lambda_mat_nullspace
-            nullspace_proj = np.eye(6) - J.T @ j_bar.T
+            # regularization is on), not the wrench-shaping lambda_mat, and
+            # J_task (== J when split_base_wrist_task is off) so the
+            # projector sees the same reduced/rank-3 task the wrench-shaping
+            # step used.
+            j_bar = m_inv @ J_task.T @ lambda_mat_nullspace
+            nullspace_proj = np.eye(6) - J_task.T @ j_bar.T
             tau_posture = nullspace_proj @ tau_posture
 
         use_wrist_orientation_task = bool(self.cfg.wrist_orientation_task)
@@ -852,7 +943,7 @@ class XAxisCartesianImpedanceController:
             tau_friction_ff=tau_friction_ff,
             tau_gravity=g,
             tau_saturated=saturated.astype(np.float64),
-            jacobian_cond=cond,
+            jacobian_cond=cond_task,
             singular_scale=singular_scale,
             task_backtrack_scale=float(task_backtrack_scale),
             task_scale=task_scale,
@@ -876,4 +967,5 @@ class XAxisCartesianImpedanceController:
             friction_z=self._friction_z.copy(),
             y_integral_action_active=use_y_integral,
             y_integral_value=float(self._y_integral),
+            split_base_wrist_task_active=use_split_base_wrist,
         )
