@@ -83,6 +83,28 @@ class UrscriptOscParams:
     # stiffness would have been silently ignored on the real arm. Defaulted to 0
     # so existing callers keep working (the tuned config has kp_rot=0).
     kp_rot: float = 0.0
+    # Wrist-orientation task (2026-08-01), ported from
+    # controller_core.x_axis_cartesian_impedance.CartesianImpedanceConfig
+    # .wrist_orientation_task -- see that file's docstring and
+    # docs/status/wrist_orientation_task_2026-07-29.md for the mechanism and
+    # docs/status/urscript_wrist_orientation_parity_2026-08-01.md for this port.
+    # Unlike kp_rot (damping-only rotation, no orientation-error math at all),
+    # this term is structurally SEPARATE from the shared Lambda-weighted wrench
+    # pipeline: a plain joint-space PD term computed from
+    # J_rot.T @ (kp_rot_wrist*e_rot - kd_rot_wrist*omega), masked to the wrist
+    # joints only via the fixed WRIST_ORIENTATION_MASK shape (baked as a literal
+    # in the template -- not user-configurable, matching the Python source).
+    # Porting this requires quaternion orientation-error math the template
+    # previously had no need for (get_actual_tcp_pose() returns a UR rotation
+    # vector, not a quaternion) -- see the template's new
+    # rotvec_to_quat/orientation_error_vec helpers. Default False/0.0/0.0 =
+    # historical (pre-2026-08-01) behavior; the term evaluates to the zero
+    # vector whenever the flag is off (regardless of the gain values) or both
+    # gains are zero, verified numerically identical to before in
+    # tests/hardware/test_urscript_parity.py.
+    use_wrist_orientation_task: bool = False
+    kp_rot_wrist: float = 0.0
+    kd_rot_wrist: float = 0.0
 
 
 def load_params_from_yaml(
@@ -126,6 +148,9 @@ def load_params_from_yaml(
         task_resample_min_scale=float(ctrl.get("task_resample_min_scale", 1.0 / 16384.0)),
         task_resample_max_iters=int(ctrl.get("task_resample_max_iters", 14)),
         jacobian_singular_cond_max=float(ctrl.get("jacobian_singular_cond_max", 1.0e5)),
+        use_wrist_orientation_task=bool(ctrl.get("wrist_orientation_task", False)),
+        kp_rot_wrist=float(gains.get("kp_rot_wrist", 0.0)),
+        kd_rot_wrist=float(gains.get("kd_rot_wrist", 0.0)),
     )
 
 
@@ -166,6 +191,9 @@ def render_urscript(
         "{{LAMBDA_REG}}": f"{params.lambda_regularization:.12g}",
         "{{USE_LAMBDA}}": "1" if params.use_lambda else "0",
         "{{USE_NULLSPACE}}": "1" if params.use_nullspace else "0",
+        "{{USE_WRIST_ORIENT}}": "1" if params.use_wrist_orientation_task else "0",
+        "{{KP_ROT_WRIST}}": f"{params.kp_rot_wrist:.12g}",
+        "{{KD_ROT_WRIST}}": f"{params.kd_rot_wrist:.12g}",
         "{{TASK_RESAMPLE_FACTOR}}": f"{params.task_resample_factor:.12g}",
         "{{TASK_RESAMPLE_MIN_SCALE}}": f"{params.task_resample_min_scale:.12g}",
         "{{TASK_RESAMPLE_MAX_ITERS}}": str(int(params.task_resample_max_iters)),

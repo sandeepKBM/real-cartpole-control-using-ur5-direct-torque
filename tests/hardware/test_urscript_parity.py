@@ -34,10 +34,13 @@ import re
 import numpy as np
 import pytest
 
+from controller_core.kinematics_utils import rotvec_to_quat_wxyz
 from controller_core.x_axis_cartesian_impedance import (
+    WRIST_ORIENTATION_MASK,
     CartesianImpedanceConfig,
     XAxisCartesianImpedanceController,
 )
+from hardware.poses import HEIGHT_ALPHA_0_5_Q
 from hardware.urscript_gen import (
     DEFAULT_CONFIG,
     DEFAULT_TEMPLATE,
@@ -45,6 +48,8 @@ from hardware.urscript_gen import (
     load_params_from_yaml,
     render_urscript,
 )
+
+WRIST_ORIENT_CONFIG = DEFAULT_CONFIG.parent / "ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed.yaml"
 
 _HUGE_LIMIT = np.full(6, 1.0e6)  # non-saturating, isolates the control law
 
@@ -136,6 +141,60 @@ def _urscript_backtrack_task_scale(
     return tau_candidate
 
 
+def _urscript_rotvec_to_quat(rv: np.ndarray) -> np.ndarray:
+    """Python transcription of the template's ``rotvec_to_quat`` helper
+    (2026-08-01). Same algorithm as
+    controller_core.kinematics_utils.rotvec_to_quat_wxyz, written out fresh
+    here (not calling that function) for a genuine from-scratch port check --
+    consistent with how every other transcribed helper in this module works."""
+    rv = np.asarray(rv, dtype=np.float64).reshape(3)
+    angle = float(np.sqrt(rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2]))
+    if angle < 1.0e-12:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    half = 0.5 * angle
+    s = np.sin(half)
+    return np.array([np.cos(half), (rv[0] / angle) * s, (rv[1] / angle) * s, (rv[2] / angle) * s])
+
+
+def _urscript_quat_norm(q: np.ndarray) -> np.ndarray:
+    q = np.asarray(q, dtype=np.float64).reshape(4)
+    n = float(np.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]))
+    if n < 1.0e-12:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    return q / n
+
+
+def _urscript_quat_conj(q: np.ndarray) -> np.ndarray:
+    q = np.asarray(q, dtype=np.float64).reshape(4)
+    return np.array([q[0], -q[1], -q[2], -q[3]])
+
+
+def _urscript_quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    w1, x1, y1, z1 = np.asarray(a, dtype=np.float64).reshape(4)
+    w2, x2, y2, z2 = np.asarray(b, dtype=np.float64).reshape(4)
+    return np.array(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ]
+    )
+
+
+def _urscript_orientation_error_vec(quat_des: np.ndarray, quat_cur: np.ndarray) -> np.ndarray:
+    """Python transcription of the template's ``orientation_error_vec`` helper
+    (2026-08-01): q_err = conj(q_des) * q_cur (normalized), sign-flipped so
+    w>=0, e = 2*vec(q_err)."""
+    qd = _urscript_quat_norm(quat_des)
+    qc = _urscript_quat_norm(quat_cur)
+    q_err = _urscript_quat_mul(_urscript_quat_conj(qd), qc)
+    q_err = _urscript_quat_norm(q_err)
+    if q_err[0] < 0.0:
+        q_err = -q_err
+    return 2.0 * q_err[1:4]
+
+
 def _urscript_reference_tau(
     *,
     J: np.ndarray,
@@ -159,6 +218,10 @@ def _urscript_reference_tau(
     resample_max_iters: int = 14,
     cond_max: float = 1.0e18,
     jacobi_sweeps: int = 8,
+    use_wrist_orient: bool = False,
+    kp_rot_wrist: float = 0.0,
+    kd_rot_wrist: float = 0.0,
+    quat0: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Faithful Python transcription of ``x_axis_osc_inner.script.template``.
 
@@ -213,7 +276,27 @@ def _urscript_reference_tau(
     else:
         tau_post = tau_post_raw
 
-    tau_nominal = tau_task + tau_damp + tau_post  # NB: no gravity; PolyScope adds it
+    # Wrist-orientation task (2026-08-01) -- template: computed after tau_post,
+    # deliberately outside the Lambda-weighted wrench pipeline above. Mirrors
+    # controller_core.x_axis_cartesian_impedance.compute()'s tau_orient_wrist
+    # exactly: J_rot.T @ (kp_rot_wrist*e_rot - kd_rot_wrist*omega) * mask.
+    tau_orient_wrist = np.zeros(6, dtype=np.float64)
+    if use_wrist_orient:
+        assert quat0 is not None, "quat0 required when use_wrist_orient=True"
+        quat_cur = _urscript_rotvec_to_quat(tcp[3:6])
+        e_rot_w = _urscript_orientation_error_vec(quat0, quat_cur)
+        m_wrist = np.array(
+            [
+                kp_rot_wrist * e_rot_w[0] - kd_rot_wrist * wx,
+                kp_rot_wrist * e_rot_w[1] - kd_rot_wrist * wy,
+                kp_rot_wrist * e_rot_w[2] - kd_rot_wrist * wz,
+            ],
+            dtype=np.float64,
+        )
+        j_rot = J[3:6, :]
+        tau_orient_wrist = (j_rot.T @ m_wrist) * WRIST_ORIENTATION_MASK
+
+    tau_nominal = tau_task + tau_damp + tau_post + tau_orient_wrist  # NB: no gravity; PolyScope adds it
 
     lim_head = headroom * tau_lim
     tau_backtracked = _urscript_backtrack_task_scale(
@@ -231,6 +314,7 @@ def _urscript_reference_tau(
         "tau_task": tau_task,
         "tau_damp": tau_damp,
         "tau_post": tau_post,
+        "tau_orient_wrist": tau_orient_wrist,
         "tau": tau_clamped,
         "tau_preclamp": tau_nominal,
     }
@@ -244,6 +328,7 @@ def _parse_baked_gains(script: str) -> dict[str, float]:
         "kp_x": "kp_x", "kd_x": "kd_x", "kp_y": "kp_y", "kd_y": "kd_y",
         "kp_z": "kp_z", "kd_z": "kd_z", "kd_rot": "kd_rot",
         "kp_post": "kp_posture", "kd_post": "kd_posture", "kd_joint": "kd_joint",
+        "kp_rot_wrist": "kp_rot_wrist", "kd_rot_wrist": "kd_rot_wrist",
     }
     out: dict[str, float] = {}
     for script_name, ref_name in wanted.items():
@@ -253,7 +338,15 @@ def _parse_baked_gains(script: str) -> dict[str, float]:
     return out
 
 
-def _py_config(*, cond_max: float, nullspace: bool, tau_lim: np.ndarray) -> CartesianImpedanceConfig:
+def _py_config(
+    *,
+    cond_max: float,
+    nullspace: bool,
+    tau_lim: np.ndarray,
+    wrist_orientation_task: bool = False,
+    kp_rot_wrist: float = 0.0,
+    kd_rot_wrist: float = 0.0,
+) -> CartesianImpedanceConfig:
     return CartesianImpedanceConfig(
         kp_x=400.0, kd_x=40.0, kp_y=80.0, kd_y=15.0, kp_z=120.0, kd_z=20.0,
         kp_rot=0.0, kd_rot=10.0, kp_posture=25.0, kd_posture=6.0, kd_joint=4.0,
@@ -261,6 +354,8 @@ def _py_config(*, cond_max: float, nullspace: bool, tau_lim: np.ndarray) -> Cart
         torque_headroom=0.9, task_space_inertia_shaping=True,
         nullspace_posture=nullspace, lambda_regularization=0.1,
         posture_reanchor_on_settle=False,
+        wrist_orientation_task=wrist_orientation_task,
+        kp_rot_wrist=kp_rot_wrist, kd_rot_wrist=kd_rot_wrist,
     )
 
 
@@ -277,12 +372,24 @@ def _run_python(
     x_des: float,
     x_vel_des: float,
 ):
+    # ee_quat is derived from tcp0/tcp's rotation-vector block (indices 3:6),
+    # the same convention hardware/direct_torque_link.py already uses
+    # (rotvec_to_quat_wxyz(tcp[3:6])) -- previously hardcoded to identity here
+    # since e_rot was multiplied by kp_rot=0 everywhere in this module and so
+    # never affected any prior test's result. Real rotvecs are needed now that
+    # wrist_orientation_task (2026-08-01) gives e_rot a nonzero-gain path via
+    # kp_rot_wrist/kd_rot_wrist independent of kp_rot. Verified this swap is a
+    # no-op for every pre-existing (wrist_orientation_task=False) test in this
+    # module, since e_rot is otherwise only reachable through kp_rot (always 0
+    # in _py_config).
+    quat0 = rotvec_to_quat_wxyz(tcp0[3:6])
+    quat = rotvec_to_quat_wxyz(tcp[3:6])
     ctrl = XAxisCartesianImpedanceController(cfg)
     # reset defines x0/y0/z0/quat0/q_rest from the "start" state
     ctrl.reset_from_state(
         dict(
             time=0.0, q=q0, qd=np.zeros(6), ee_pos=tcp0[:3],
-            ee_quat=np.array([1.0, 0.0, 0.0, 0.0]),
+            ee_quat=quat0,
             ee_lin_vel=np.zeros(3), ee_ang_vel=np.zeros(3),
             target_x=x_des, jacobian=J, mass_matrix=M,
         )
@@ -293,7 +400,7 @@ def _run_python(
     return ctrl.compute(
         dict(
             time=0.01, q=q, qd=qd, ee_pos=tcp[:3],
-            ee_quat=np.array([1.0, 0.0, 0.0, 0.0]),
+            ee_quat=quat,
             ee_lin_vel=twist[:3], ee_ang_vel=twist[3:],
             target_x=x_des, target_x_vel=x_vel_des, jacobian=J, mass_matrix=M,
         )
@@ -556,3 +663,172 @@ def test_backtracking_matches_python_under_saturation() -> None:
         if out.task_backtrack_scale < 1.0 - 1e-9:
             saw_backtracking_engage = True
     assert saw_backtracking_engage, "expected at least one sample to actually saturate and engage backtracking"
+
+
+# --------------------------------------------------------------------------- #
+# 6. Wrist-orientation task (2026-08-01) now matches -- the URScript template
+#    previously had no orientation-error math at all (damping-only rotation,
+#    see the module-level renderer's kp_rot rejection); this term is
+#    structurally SEPARATE from the shared Lambda-weighted wrench pipeline the
+#    tests above cover, so it needed its own port (new quaternion helpers in
+#    the template) and its own dedicated parity coverage here. See
+#    docs/status/urscript_wrist_orientation_parity_2026-08-01.md.
+# --------------------------------------------------------------------------- #
+def test_wrist_orientation_task_default_config_bakes_flag_off() -> None:
+    """config/ur5e_mujoco_torque_osc_tuned.yaml (DEFAULT_CONFIG) does not set
+    wrist_orientation_task, so the generator must bake use_wrist_orient=0,
+    kp_rot_wrist=0, kd_rot_wrist=0 -- reproducing the pre-2026-08-01 rendered
+    script's runtime behavior exactly (this term evaluates to the zero vector
+    whenever use_wrist_orient==0, verified below and in
+    test_wrist_orientation_task_off_matches_pre_existing_behavior)."""
+    params = load_params_from_yaml(
+        DEFAULT_CONFIG, target_x_delta_m=0.02, move_duration_s=1.0, duration_s=3.0
+    )
+    assert params.use_wrist_orientation_task is False
+    assert params.kp_rot_wrist == 0.0
+    assert params.kd_rot_wrist == 0.0
+    script = render_urscript(params, template_path=DEFAULT_TEMPLATE)
+    assert "use_wrist_orient = 0" in script
+    assert "kp_rot_wrist = 0" in script
+    assert "kd_rot_wrist = 0" in script
+
+
+def test_wrist_orientation_task_fixed_config_bakes_flag_on() -> None:
+    """config/ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed.yaml -- the
+    config that actually fixed the height_alpha=0.5 directional-ceiling
+    failure (AGENTS.md sec 3) -- must bake use_wrist_orient=1 with its real
+    validated gains (kp_rot_wrist=0.0, kd_rot_wrist=10.0, damping-only per
+    docs/status/wrist_orientation_task_2026-07-29.md's stability finding)."""
+    params = load_params_from_yaml(
+        WRIST_ORIENT_CONFIG, target_x_delta_m=0.02, move_duration_s=1.0, duration_s=3.0
+    )
+    assert params.use_wrist_orientation_task is True
+    assert params.kp_rot_wrist == pytest.approx(0.0)
+    assert params.kd_rot_wrist == pytest.approx(10.0)
+    script = render_urscript(params, template_path=DEFAULT_TEMPLATE)
+    assert "use_wrist_orient = 1" in script
+    assert "def rotvec_to_quat(rv):" in script
+    assert "def orientation_error_vec(quat_des, quat_cur):" in script
+
+
+def test_wrist_orientation_task_off_matches_pre_existing_behavior() -> None:
+    """use_wrist_orient=False (the default, regardless of the gain values --
+    proves the flag itself gates the term, not just the gains happening to be
+    zero) must produce tau_orient_wrist == 0 and leave tau identical to a
+    reference run that never had the term at all. This is the numerical
+    (not textual) sense in which the default config's generated output is
+    unchanged -- see docs/status/urscript_wrist_orientation_parity_2026-08-01.md."""
+    rng = np.random.default_rng(2026)
+    params = load_params_from_yaml(
+        DEFAULT_CONFIG, target_x_delta_m=0.02, move_duration_s=1.0, duration_s=3.0
+    )
+    gains = _parse_baked_gains(render_urscript(params))
+    for _ in range(20):
+        s = _sample_state(rng, cond=50.0)
+        s["tcp"] = s["tcp0"] + 0.02 * rng.normal(size=6)
+        x_des = float(s["tcp0"][0]) + 0.02
+        cfg_gated = _py_config(
+            cond_max=1.0e18, nullspace=False, tau_lim=_HUGE_LIMIT,
+            wrist_orientation_task=False, kp_rot_wrist=50.0, kd_rot_wrist=20.0,
+        )
+        cfg_reference = _py_config(cond_max=1.0e18, nullspace=False, tau_lim=_HUGE_LIMIT)
+        out_gated = _run_python(
+            cfg_gated, J=s["J"], M=s["M"], q0=s["q0"], q=s["q"], qd=s["qd"],
+            tcp0=s["tcp0"], tcp=s["tcp"], x_des=x_des, x_vel_des=0.0,
+        )
+        out_reference = _run_python(
+            cfg_reference, J=s["J"], M=s["M"], q0=s["q0"], q=s["q"], qd=s["qd"],
+            tcp0=s["tcp0"], tcp=s["tcp"], x_des=x_des, x_vel_des=0.0,
+        )
+        assert np.allclose(out_gated.tau_orient_wrist, np.zeros(6), atol=1e-12)
+        assert np.allclose(out_gated.tau, out_reference.tau, atol=1e-12)
+        ref_gated = _urscript_reference_tau(
+            J=s["J"], M=s["M"], q=s["q"], qd=s["qd"], tcp=s["tcp"],
+            x_des=x_des, x_vel_des=0.0, y0=float(s["tcp0"][1]),
+            z0=float(s["tcp0"][2]), q_rest=s["q0"], gains=gains,
+            tau_lim=_HUGE_LIMIT, headroom=params.torque_headroom,
+            use_lambda=True, lambda_reg=params.lambda_regularization,
+            use_wrist_orient=False, kp_rot_wrist=50.0, kd_rot_wrist=20.0,
+        )
+        assert np.allclose(ref_gated["tau_orient_wrist"], np.zeros(6), atol=1e-12)
+        assert np.allclose(out_gated.tau, ref_gated["tau"], atol=1e-9)
+
+
+def _wrist_orient_state(rng: np.random.Generator, *, q0: np.ndarray, cond: float = 50.0):
+    """Like _sample_state, but with an explicit q0 (joint pose) so the
+    height_alpha=0.5 transport pose (AGENTS.md sec 3's directional-ceiling
+    case, the failure this term was built to fix) can be exercised directly
+    instead of only randomized poses."""
+    return dict(
+        q0=q0.copy(),
+        q=q0 + 0.02 * rng.normal(size=6),
+        qd=0.1 * rng.normal(size=6),
+        J=_jac_with_cond(rng, cond),
+        M=_rand_spd(rng),
+        tcp0=rng.normal(size=6),
+        tcp=None,
+    )
+
+
+def test_wrist_orientation_task_matches_python() -> None:
+    """Main parity test: XAxisCartesianImpedanceController.compute() with
+    wrist_orientation_task=True (ground truth) vs. the Python transcription of
+    the new URScript template math (_urscript_reference_tau with
+    use_wrist_orient=True), across randomized poses plus the height_alpha=0.5
+    transport pose specifically (hardware.poses.HEIGHT_ALPHA_0_5_Q) -- the
+    exact pose whose directional-ceiling failure this term fixed (AGENTS.md
+    sec 3). Exercises both the shipped damping-only gains
+    (kp_rot_wrist=0, kd_rot_wrist=10, matching
+    config/ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed.yaml) and a
+    synthetic nonzero kp_rot_wrist so the e_rot (proportional) branch of the
+    formula is actually exercised by this test, not just multiplied by zero
+    (the shipped config deliberately uses kp_rot_wrist=0 for stability, see
+    docs/status/wrist_orientation_task_2026-07-29.md, but that means a
+    damping-only-gains test alone would never catch a bug in the e_rot term)."""
+    rng = np.random.default_rng(42)
+    params = load_params_from_yaml(
+        WRIST_ORIENT_CONFIG, target_x_delta_m=0.02, move_duration_s=1.0, duration_s=3.0
+    )
+    gains = _parse_baked_gains(render_urscript(params))
+
+    q0_poses = [None, None, None, HEIGHT_ALPHA_0_5_Q]  # None -> randomized q0
+    gain_pairs = [(params.kp_rot_wrist, params.kd_rot_wrist), (15.0, 6.0)]
+
+    saw_nonzero_term = False
+    for q0_fixed in q0_poses:
+        for kp_rot_wrist, kd_rot_wrist in gain_pairs:
+            s = (
+                _wrist_orient_state(rng, q0=q0_fixed, cond=50.0)
+                if q0_fixed is not None
+                else _sample_state(rng, cond=50.0)
+            )
+            s["tcp"] = s["tcp0"] + 0.02 * rng.normal(size=6)
+            x_des = float(s["tcp0"][0]) + 0.02
+
+            cfg = _py_config(
+                cond_max=1.0e18, nullspace=True, tau_lim=_HUGE_LIMIT,
+                wrist_orientation_task=True,
+                kp_rot_wrist=kp_rot_wrist, kd_rot_wrist=kd_rot_wrist,
+            )
+            out = _run_python(
+                cfg, J=s["J"], M=s["M"], q0=s["q0"], q=s["q"], qd=s["qd"],
+                tcp0=s["tcp0"], tcp=s["tcp"], x_des=x_des, x_vel_des=0.0,
+            )
+            quat0 = rotvec_to_quat_wxyz(s["tcp0"][3:6])
+            ref = _urscript_reference_tau(
+                J=s["J"], M=s["M"], q=s["q"], qd=s["qd"], tcp=s["tcp"],
+                x_des=x_des, x_vel_des=0.0, y0=float(s["tcp0"][1]),
+                z0=float(s["tcp0"][2]), q_rest=s["q0"], gains=gains,
+                tau_lim=_HUGE_LIMIT, headroom=params.torque_headroom,
+                use_lambda=True, lambda_reg=params.lambda_regularization,
+                use_nullspace=True,
+                use_wrist_orient=True,
+                kp_rot_wrist=kp_rot_wrist, kd_rot_wrist=kd_rot_wrist,
+                quat0=quat0,
+            )
+            assert np.allclose(out.tau_orient_wrist, ref["tau_orient_wrist"], atol=1e-9)
+            assert np.allclose(out.tau_task_nominal, ref["tau_task"], atol=1e-8)
+            assert np.allclose(out.tau, ref["tau"], atol=1e-8)
+            if float(np.max(np.abs(out.tau_orient_wrist))) > 1e-6:
+                saw_nonzero_term = True
+    assert saw_nonzero_term, "expected the wrist-orientation term to be measurably nonzero on some sample"

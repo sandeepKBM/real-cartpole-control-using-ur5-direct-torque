@@ -35,6 +35,17 @@
 #     port -- see docs/status/urscript_singular_scaling_parity_2026-07-29.md.
 #   - rotation is damping-only (Mx/My/Mz = -kd_rot*omega); there is no
 #     orientation-error / kp_rot term. The generator refuses nonzero kp_rot.
+#   - wrist-orientation task (2026-08-01): now implemented, gated by
+#     use_wrist_orient (baked from the config's wrist_orientation_task flag).
+#     Ported from CartesianImpedanceConfig.wrist_orientation_task -- a SEPARATE
+#     joint-space PD term, structurally isolated from the shared Lambda-weighted
+#     wrench pipeline above (the same pipeline that makes kp_rot unstable near
+#     the wrist_2=0 singularity): tau_orient_wrist = (J_rot.T @ (kp_rot_wrist *
+#     e_rot - kd_rot_wrist * omega)) * WRIST_ORIENTATION_MASK. Requires
+#     quaternion orientation-error math the template previously had no need for
+#     (get_actual_tcp_pose() returns a UR rotation vector, not a quaternion) --
+#     see rotvec_to_quat/orientation_error_vec below. See
+#     docs/status/urscript_wrist_orientation_parity_2026-08-01.md.
 # NONE of the above has been validated on real hardware. Numerical parity vs the
 # Python controller is covered by the test above; live behavior is not.
 # Validate on real hardware before large moves.
@@ -208,6 +219,61 @@ def min_jerk_move_hold_x(t, x0, dx, move_dur, total_dur):
   return [x0 + dx, 0.0]
 end
 
+def rotvec_to_quat(rv):
+  # UR rotation-vector [rx,ry,rz] -> quaternion [w,x,y,z]. Mirrors
+  # controller_core.kinematics_utils.rotvec_to_quat_wxyz -- the exact
+  # convention hardware/direct_torque_link.py already uses to build ee_quat
+  # from get_actual_tcp_pose()'s rotation-vector block on the real-hardware
+  # Python side.
+  angle = sqrt(rv[0]*rv[0] + rv[1]*rv[1] + rv[2]*rv[2])
+  if angle < 1.0e-12:
+    return [1.0, 0.0, 0.0, 0.0]
+  end
+  half = 0.5 * angle
+  s = sin(half)
+  return [cos(half), (rv[0]/angle)*s, (rv[1]/angle)*s, (rv[2]/angle)*s]
+end
+
+def quat_norm(q):
+  n = sqrt(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3])
+  if n < 1.0e-12:
+    return [1.0, 0.0, 0.0, 0.0]
+  end
+  return [q[0]/n, q[1]/n, q[2]/n, q[3]/n]
+end
+
+def quat_conj(q):
+  return [q[0], -q[1], -q[2], -q[3]]
+end
+
+def quat_mul(a, b):
+  # Hamilton product, [w,x,y,z] storage -- mirrors
+  # controller_core.kinematics_utils.quat_multiply_wxyz.
+  w1 = a[0]
+  x1 = a[1]
+  y1 = a[2]
+  z1 = a[3]
+  w2 = b[0]
+  x2 = b[1]
+  y2 = b[2]
+  z2 = b[3]
+  return [w1*w2 - x1*x2 - y1*y2 - z1*z2, w1*x2 + x1*w2 + y1*z2 - z1*y2, w1*y2 - x1*z2 + y1*w2 + z1*x2, w1*z2 + x1*y2 - y1*x2 + z1*w2]
+end
+
+def orientation_error_vec(quat_des, quat_cur):
+  # Mirrors controller_core.kinematics_utils.orientation_error_vec_wxyz
+  # exactly: q_err = conj(q_des) * q_cur (normalized), sign-flipped so w>=0,
+  # e = 2*vec(q_err).
+  qd = quat_norm(quat_des)
+  qc = quat_norm(quat_cur)
+  q_err = quat_mul(quat_conj(qd), qc)
+  q_err = quat_norm(q_err)
+  if q_err[0] < 0.0:
+    q_err = [-q_err[0], -q_err[1], -q_err[2], -q_err[3]]
+  end
+  return [2.0*q_err[1], 2.0*q_err[2], 2.0*q_err[3]]
+end
+
 def osc_x_axis_transport():
   # --- baked parameters (from Python generator) ---
   dx = {{TARGET_X_DELTA}}
@@ -226,6 +292,14 @@ def osc_x_axis_transport():
   lambda_reg = {{LAMBDA_REG}}
   use_lambda = {{USE_LAMBDA}}
   use_nullspace = {{USE_NULLSPACE}}
+  use_wrist_orient = {{USE_WRIST_ORIENT}}
+  kp_rot_wrist = {{KP_ROT_WRIST}}
+  kd_rot_wrist = {{KD_ROT_WRIST}}
+  # Fixed wrist-orientation task mask (not user-configurable -- literal port of
+  # controller_core.x_axis_cartesian_impedance.WRIST_ORIENTATION_MASK, joint
+  # order shoulder_pan/shoulder_lift/elbow/wrist_1/wrist_2/wrist_3):
+  # [0, 0, 0, 1.25/1.55, 1.0, 1.25/1.55], baked to float64 precision.
+  wrist_mask = [0.0, 0.0, 0.0, 0.8064516129032258, 1.0, 0.8064516129032258]
   resample_factor = {{TASK_RESAMPLE_FACTOR}}
   resample_min_scale = {{TASK_RESAMPLE_MIN_SCALE}}
   resample_max_iters = {{TASK_RESAMPLE_MAX_ITERS}}
@@ -246,6 +320,7 @@ def osc_x_axis_transport():
   x0 = tcp0[0]
   y0 = tcp0[1]
   z0 = tcp0[2]
+  quat0 = rotvec_to_quat([tcp0[3], tcp0[4], tcp0[5]])
   q_rest = get_actual_joint_positions()
   reanchored = 0
   x_des_anchor = x0
@@ -374,10 +449,31 @@ def osc_x_axis_transport():
       tau_post = tau_post_raw
     end
 
+    # Wrist-orientation task (2026-08-01): a plain joint-space PD term,
+    # deliberately NOT part of the Lambda-weighted wrench pipeline above --
+    # see the header comment and
+    # docs/status/urscript_wrist_orientation_parity_2026-08-01.md. Mirrors
+    # controller_core.x_axis_cartesian_impedance.compute()'s tau_orient_wrist
+    # exactly: J_rot.T @ (kp_rot_wrist*e_rot - kd_rot_wrist*omega), masked to
+    # the wrist joints via wrist_mask.
+    tau_orient_wrist = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    if use_wrist_orient == 1:
+      quat_cur = rotvec_to_quat([tcp[3], tcp[4], tcp[5]])
+      e_rot_w = orientation_error_vec(quat0, quat_cur)
+      mx_w = kp_rot_wrist * e_rot_w[0] - kd_rot_wrist * wx
+      my_w = kp_rot_wrist * e_rot_w[1] - kd_rot_wrist * wy
+      mz_w = kp_rot_wrist * e_rot_w[2] - kd_rot_wrist * wz
+      j = 0
+      while j < 6:
+        tau_orient_wrist[j] = (J[3][j]*mx_w + J[4][j]*my_w + J[5][j]*mz_w) * wrist_mask[j]
+        j = j + 1
+      end
+    end
+
     tau_nominal = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     i = 0
     while i < 6:
-      tau_nominal[i] = tau_task[i] + tau_damp[i] + tau_post[i]
+      tau_nominal[i] = tau_task[i] + tau_damp[i] + tau_post[i] + tau_orient_wrist[i]
       i = i + 1
     end
 
