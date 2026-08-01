@@ -202,6 +202,47 @@ class CartesianImpedanceConfig:
     # config/ur5e_mujoco_torque_osc_tuned_friction_ff.yaml's header for the
     # measured before/after numbers.
     friction_ff_qd_deadband: float = 0.05
+    # Y-axis integral action (default off = historical behavior: pure kp_y/
+    # kd_y PD, ki_y implicitly 0). Added 2026-08-01 to address the -45 deg
+    # base-rotation Y-drift failure (AGENTS.md sec 3): diagnosis (see
+    # docs/status/neg45_y_axis_diagnosis_and_fix_2026-08-01.md) ruled out
+    # geometric backtracking (task_backtrack_scale measured == 1.0 throughout
+    # the failing move -- torque never gets close to tau_limit, peak ~4.7% of
+    # headroom), the global cond(J) singular_scale (measured == 1.0 throughout
+    # at jacobian_singular_cond_max=1e18), kd_joint (0x and 2x both fail
+    # identically to baseline), and the wrench-shaping Lambda's off-diagonal
+    # X->Y leak (lambda_diagonal_shaping has zero effect on the Y-drift
+    # magnitude, matching the already-documented Phase-2 beam-search result).
+    # A direct large-multiplier kp_y/kd_y sweep (not previously tried -- prior
+    # attempts topped out around 1.6x-1.7x, both live on real hardware and in
+    # the staged gain search) found the true behavior is a genuine steady-
+    # state trade-off, not a simple insufficient-bandwidth problem: raising
+    # kp_y/kd_y by 5x-10x does stop the Y-drift guard trip, but X tracking
+    # then stalls at a *steady-state* equilibrium roughly 45-55% short of the
+    # commanded X target (confirmed non-transient -- unchanged from a 1s move
+    # to a 3s move + 2s hold) -- i.e. proportional/derivative gain on Y can
+    # only trade X authority for Y authority at this pose, never satisfy both,
+    # consistent with a persistent kinematic/dynamic X-Y coupling disturbance
+    # that a P/D term structurally cannot null at steady state (the same
+    # class of problem friction_feedforward already solves for joint
+    # friction, just on a different axis and with an integral rather than a
+    # feedforward term, since the coupling's exact model isn't known the way
+    # friction's is). This flag adds a standard clamped integral term to the
+    # existing Fy PD law:
+    #
+    #   Fy = kp_y*y_err - kd_y*v_y + ki_y*y_integral
+    #   y_integral(t) = clip(y_integral(t-1) + y_err*dt, -y_integral_limit_m_s, +y_integral_limit_m_s)
+    #
+    # Anti-windup clamp mirrors controller_core/lqr_controller.py's existing
+    # `_x_integral` pattern (accumulate, then clip every step -- never clip
+    # only occasionally). y_integral resets to 0 in reset_from_state(), same
+    # lifecycle as _q_rest/_quat0. Not added to _SCHEDULABLE_GAIN_FIELDS
+    # (matches kp_rot_wrist/kd_rot_wrist precedent: config/gain-override only,
+    # not part of the live gain-scheduling contract tested against
+    # transport_metrics.GAIN_FIELDS).
+    y_integral_action: bool = False
+    ki_y: float = 0.0
+    y_integral_limit_m_s: float = 0.02
 
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianImpedanceConfig":
@@ -267,6 +308,9 @@ class CartesianImpedanceConfig:
                 else np.array([0.4, 0.4, 0.4, 0.15, 0.15, 0.15], dtype=np.float64)
             ),
             friction_ff_qd_deadband=float(ctrl.get("friction_ff_qd_deadband", 0.05)),
+            y_integral_action=bool(ctrl.get("y_integral_action", False)),
+            ki_y=float(gains.get("ki_y", 0.0)),
+            y_integral_limit_m_s=float(ctrl.get("y_integral_limit_m_s", 0.02)),
         )
 
 
@@ -303,6 +347,8 @@ class CartesianImpedanceOutput:
     posture_reanchored: bool = False
     wrist_orientation_task_active: bool = False
     friction_feedforward_active: bool = False
+    y_integral_action_active: bool = False
+    y_integral_value: float = 0.0
 
 
 class XAxisCartesianImpedanceController:
@@ -332,6 +378,7 @@ class XAxisCartesianImpedanceController:
         self._q_rest = np.zeros(6, dtype=np.float64)
         self._posture_reanchored = False
         self._x_des_at_anchor = 0.0
+        self._y_integral = 0.0
 
     def reset_from_state(self, state: dict[str, Any]) -> None:
         st = as_impedance_robot_state(state)
@@ -344,6 +391,7 @@ class XAxisCartesianImpedanceController:
         self._hold_reference_initialized = False
         self._posture_reanchored = False
         self._x_des_at_anchor = float(np.asarray(st["ee_pos"], dtype=np.float64).reshape(3)[0])
+        self._y_integral = 0.0
         self._initialized = True
 
     @property
@@ -480,8 +528,24 @@ class XAxisCartesianImpedanceController:
                 self._x_des_at_anchor = float(x_des)
                 self._posture_reanchored = True
 
+        use_y_integral = bool(self.cfg.y_integral_action)
+        if use_y_integral:
+            # dt_s is optional on the state contract (AGENTS.md sec 2); fall
+            # back to the 500 Hz direct_torque loop period, this controller's
+            # primary real-hardware cadence, if the caller doesn't supply it.
+            dt = float(st.get("dt_s", 1.0 / 500.0))
+            if not np.isfinite(dt) or dt <= 0.0:
+                dt = 1.0 / 500.0
+            y_integral_limit = max(float(self.cfg.y_integral_limit_m_s), 0.0)
+            self._y_integral += y_err * dt
+            if y_integral_limit > 0.0:
+                self._y_integral = float(np.clip(self._y_integral, -y_integral_limit, y_integral_limit))
+            else:
+                self._y_integral = 0.0
+        Fy_integral = self.cfg.ki_y * self._y_integral if use_y_integral else 0.0
+
         Fx = self.cfg.kp_x * x_err + self.cfg.kd_x * (x_vel_des - float(v[0]))
-        Fy = self.cfg.kp_y * y_err - self.cfg.kd_y * float(v[1])
+        Fy = self.cfg.kp_y * y_err - self.cfg.kd_y * float(v[1]) + Fy_integral
         Fz = self.cfg.kp_z * z_err - self.cfg.kd_z * float(v[2])
 
         e_rot = orientation_error_vec_wxyz(quat_ref, quat)
@@ -633,4 +697,6 @@ class XAxisCartesianImpedanceController:
             posture_reanchored=bool(self._posture_reanchored),
             wrist_orientation_task_active=use_wrist_orientation_task,
             friction_feedforward_active=use_friction_feedforward,
+            y_integral_action_active=use_y_integral,
+            y_integral_value=float(self._y_integral),
         )

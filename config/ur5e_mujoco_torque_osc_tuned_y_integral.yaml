@@ -1,0 +1,107 @@
+# y_integral_action smoke config. Base = config/ur5e_mujoco_torque_osc_tuned.yaml (unmodified
+# gains) + y_integral_action: true, a new opt-in clamped Y-axis integral term added to
+# controller_core/x_axis_cartesian_impedance.py 2026-08-01 while diagnosing the -45 deg
+# base-rotation Y-drift failure (AGENTS.md sec 3;
+# docs/status/neg45_y_axis_diagnosis_and_fix_2026-08-01.md has the full writeup).
+#
+# HONEST RESULT: this does NOT fix the -45 deg failure. Full diagnosis found the Y-drift is a
+# genuine, bounded, self-correcting geometric/dynamic X-Y coupling transient at this rotated
+# pose (peaks ~0.048m during the move at dx=0.06m, recovers to ~0.006m by end of hold; grows
+# roughly linearly with dx in the passing canonical-grid cases) -- not an instability, and not
+# something task_backtrack_scale or singular_scale are involved in (both measured == 1.0/no-op
+# throughout the failing move). Suppressing the transient below the 0.03m guard requires
+# enough Y-axis authority (via kp_y/kd_y OR this ki_y term -- tried both) that X-tracking
+# collapses to a genuine STEADY-STATE equilibrium ~45-65% short of the commanded target
+# (measured at 5x-10x kp_y/kd_y and at a fast-acting ki_y=3000/limit=0.02: X error 0.026-0.036m
+# against a 0.06m target, non-transient -- unchanged from a 1s move to a 3s move + 2s hold), far
+# outside the ~0.015m move-hold X tolerance at this displacement. A gentle, non-regressive dose
+# (ki_y=150, this file's value) has ZERO measurable effect on the sweep below -- confirmed via
+# the same 4-category rigor sweep used throughout this investigation, byte-identical to plain
+# baseline (0/38 both). This file is kept as a validated, zero-regression, flag-gated capability
+# for future use (e.g. a slower steady-state disturbance elsewhere), NOT as a fix for this
+# failure. See the status doc for the full evidence trail, including a third hypothesis (the
+# fixed 0.03m guard threshold, an unmodified default inherited from this repo's very first
+# commit, may itself be miscalibrated for this pose's genuine kinematics) that this
+# investigation surfaced but explicitly did not act on -- changing any safety threshold is a
+# human decision, out of scope here.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+    ki_y: 150.0
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  y_integral_action: true
+  y_integral_limit_m_s: 0.02
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
