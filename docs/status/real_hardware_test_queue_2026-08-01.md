@@ -28,6 +28,31 @@ for r in rows[-30:]:
 ```
 (If `run_log.csv` doesn't exist at that path, it may be per-sweep — check `outputs/hardware_transport/*/run_log.csv`.)
 
+## 0. M0 — the one real prerequisite blocking the auto-tuning ("auto experiment") system
+
+`docs/hardware/AUTO_TUNING_PLAN.md` is a real, sim-gated Bayesian-optimization (Optuna TPE) system
+for auto-calibrating controller gains on the real robot — not a plan, actually **built and tested**
+(`tools/ur5e_suggest_gains.py` + `tools/ur5e_auto_tune_gains.py`, batches 4 candidates per round,
+sim-gates every one automatically, requires a typed `CONFIRM` before even printing real commands,
+verified to never import `hardware.*` — statically checked, not just claimed). It has never touched
+real hardware, for exactly one reason: **M0**, its own hard prerequisite, has never been done. M0 is
+small and mechanical — just proving the unmodified, sim-validated gains move the real arm once in
+each control mode, before any search is layered on top:
+
+1. `tools/ur5e_connect.py --once` — confirm the link works at all.
+2. `position` mode, `--distance-m 0.02`, typed `MOVE`. (First-ever real motion this repo makes in a
+   session, if not already done.)
+3. `direct_torque` mode, same tiny displacement, fixed validated gains, no exploration.
+4. `urscript` mode, same tiny displacement — **this is exactly section 1 below**, do that test and
+   M0 step 4 is satisfied at the same time, no separate run needed.
+5. Only after all three pass at `dx=0.02m`: escalate to the sim-validated envelope (`dx=0.10-0.20m`)
+   with the *unmodified* gains, still no auto-tuning yet.
+
+**Once M0 is done**, `tools/ur5e_auto_tune_gains.py` becomes usable for real — that's the actual
+unlock, not a separate future task. Do not run it before M0 completes; there's no scored trial data
+for it to build on yet, and per the plan's own explicit decision, autonomy stays human-gated (you
+approve every batch before anything moves) even after M0 — this was never meant to be unattended.
+
 ## 1. URScript first real test — never run on hardware before tonight's plumbing fix
 
 Motivation: `hardware/urscript_transport.py` has full Python-math parity (`tests/hardware/test_urscript_parity.py`,
