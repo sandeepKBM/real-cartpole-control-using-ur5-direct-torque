@@ -5,6 +5,12 @@ tomorrow's in-lab session execution-only: copy a command, type `MOVE`, paste the
 for analysis. Nothing here removes the typed-confirmation safety step — every command below still
 prompts for it (no `--yes`).
 
+**Updated later the same night** after two real fixes landed for what section 2 originally called
+"no fix attempted" — read section 2 fresh even if you read an earlier version of this doc. Two
+background tasks were still running when this update was written (a harder-plant comparison
+campaign, a URScript `wrist_orientation_task` parity port) — check `git log --oneline -10` for
+commits after `3f77057` before relying on this doc being fully current.
+
 **Before anything else**, run this on `thinkrobot` and paste the tail — I don't have visibility into
 tonight's real run history (`outputs/hardware_transport/` only exists on `thinkrobot`, not `westeros`),
 so I can't tell from here exactly which configs got real coverage tonight vs. only sim coverage:
@@ -54,20 +60,61 @@ python3 tools/ur5e_urscript_x_transport.py --robot-ip 172.16.71.77 \
 on URScript until at least one small run has been visually + numerically confirmed clean — this is a
 new code path touching the real robot for the first time, independent of direct_torque's own track record.
 
-## 2. Negative-X direction — currently 0-for-2 real, no fix attempted
+## 2. Negative-X direction — TWO real, sim-validated fixes now exist, neither real-hardware tested
 
-Real state: `+0.20m` passes cleanly; `-0.20m` (historical) and `-0.15m` (tonight) both failed —
-diagnosed as a real, slow orientation/Z-drift creep (not noise, not instability), consistent with
-AGENTS.md's documented directional-ceiling / nullspace-projector-asymmetry finding. No fix has been
-designed. **Do not** re-attempt a negative-X `direct_torque` move expecting a different outcome without
-a real change first — this is a known, reproducible, structural failure, not a fluke.
+Original real state (unchanged as fact): `+0.20m` passes cleanly; `-0.20m` (historical) and
+`-0.15m` (tonight) both failed on real hardware. This turned out to be TWO separate failures,
+both root-caused and both fixed in sim since this doc was first written:
 
-Practical options for tomorrow if you need a real round-trip:
-- **Joint-space return** (`moveJ` back to the start pose) instead of fighting the Cartesian `-X` OSC
-  path — untested tonight but architecturally simple; ask me to wire a small script for this if wanted.
-- Or treat root-causing this as its own dedicated block of the 5 hours, with me pulling `pre_trip_trend`
-  (now captures `y_drift_m`/`z_drift_m` automatically, commit `467fe52`) after each attempt instead of a
-  manual trace pull.
+**Fix A — the un-rotated directional ceiling** (this is almost certainly what the real `-0.20m`/
+`-0.15m` failures above actually were, since those ran at the un-rotated height_alpha=0.5 pose):
+`config/ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed.yaml` — `wrist_orientation_task` combined
+with the already-promoted singular-scale fix. Sim: 8/8 vs baseline 6/8 at both `dx=+0.20m` and
+`dx=-0.20m`, worst-case orientation error roughly halved. Zero regressions anywhere tested
+(`docs/status/nullspace_envelope_search_2026-08-01.md`). **Start here** for a real retest:
+
+```bash
+python3 tools/ur5e_direct_torque_x_transport.py --robot-ip 172.16.71.77 \
+  --control-mode direct_torque --skip-joint-move \
+  --target-x-delta -0.05 --move-duration 1.0 --duration 3.0 \
+  --config config/ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed.yaml \
+  --i-understand-this-moves-the-robot
+```
+Small first (`-0.05m`), matching this repo's own start-small discipline — this config's real
+behavior is completely unknown, only sim-validated. If clean, escalate toward `-0.20m` in a couple
+of steps, not directly.
+
+**Fix B — the -45° pose's Y-drift** (only relevant if you're testing from the real-hardware
+default `HEIGHT_ALPHA_0_5_CLEARANCE_Q` pose, not the un-rotated one): root-caused as a genuine
+structural X-Y authority trade-off in the controller (no P/D/I gain fixes it without breaking
+X-tracking — three independent investigations agree). You explicitly directed and reviewed a
+deliberate, evidence-scoped safety-tolerance change for this pose specifically:
+`config/ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed_neg45_pose.yaml` raises
+`max_abs_orthogonal_drift_m` from 0.03m to 0.05m (real margin above the largest measured natural
+transient, not a blanket loosening — `controller_core/safety.py`'s class default is untouched).
+Sim: 32/38, but **only validated up to `dx=0.06m`** — `dx≥0.10m` deliberately still fails/blocked,
+don't expect it to pass. `docs/status/neg45_drift_tolerance_validation_2026-08-01.md` has the full
+numbers. Real dose-response at this pose has an unexplained sim-vs-real gap already documented
+(real historically tripped at `dx=0.20m`, sim onset `dx=0.05-0.06m`) — so this needs its own small
+real test, separate from Fix A:
+
+```bash
+python3 tools/ur5e_direct_torque_x_transport.py --robot-ip 172.16.71.77 \
+  --control-mode direct_torque \
+  --target-x-delta 0.04 --move-duration 1.0 --duration 3.0 \
+  --config config/ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed_neg45_pose.yaml \
+  --i-understand-this-moves-the-robot
+```
+(No `--skip-joint-move` here — let it drive to the -45° pose fresh.) Small positive-X first to
+confirm the config behaves sanely at all on real hardware before ever trying the negative
+direction or anything past `dx=0.06m`.
+
+Neither fix has ANY real-hardware validation yet — both are pure sim results. Treat both real
+tests above as first-ever, start-small runs, not confirmations of something already known-safe.
+
+Still available if you'd rather sidestep this entirely for a quick real round-trip: **joint-space
+return** (`moveJ` back to the start pose) instead of fighting the Cartesian `-X` OSC path —
+untested tonight but architecturally simple; ask if you want a small script for this.
 
 ## 3. Accel/duration trajectory profiles — partially characterized
 
@@ -100,10 +147,27 @@ python3 tools/ur5e_direct_torque_x_transport.py --robot-ip 172.16.71.77 \
 Sim validation is solid (height_alpha 0.2/0.3/0.5, see AGENTS.md §3). Real-hardware coverage tonight is
 uncertain from where I'm sitting (see the run_log pull at the top of this doc) — **check that first**
 before re-running what might be a duplicate. If it turns out untested, this is the config:
-`config/ur5e_mujoco_torque_osc_tuned_friction_ff.yaml`. Do **not** use it at the -45° pose without
-`--start-q-rad` override caution — corrected result tonight: 17/38 vs. 18/38 baseline (roughly neutral,
-not a fix, not a full regression either — see `docs/status/` for tonight's corrected numbers once
-written up).
+`config/ur5e_mujoco_torque_osc_tuned_friction_ff.yaml`. **Confirmed final number at the -45° pose**:
+17/38 vs. 18/38 baseline — roughly neutral (not a fix, not a full regression), so it's not
+disqualified there, but don't expect it to help either.
+
+## 5. New tools tonight that are sim-only and should NOT be pointed at real hardware yet
+
+- `config/ur5e_mujoco_torque_osc_tuned_y_integral.yaml` (`y_integral_action`/`ki_y`) — built and
+  tested while diagnosing the -45° failure, confirmed to have **zero effect** at its committed
+  gentle dose (byte-identical to baseline). Not a real candidate; no reason to test it live.
+- `--asymmetric-coulomb-friction` (new opt-in plant-side friction model on
+  `tools/ur5e_mujoco_torque_experiments.py`/`tools/ur5e_move_hold_transport.py`) — a **sim-only
+  plant realism addition** for stress-testing controllers against more adversarial physics before
+  ever going real. It changes MuJoCo simulation behavior, not anything on the real robot — there
+  is no real-hardware equivalent to run.
+- `tools/analysis/fit_residual_torque_model.py` (phase-1 offline residual-torque regression) —
+  offline data analysis only, not a controller change, nothing to run live.
+- URScript `wrist_orientation_task` port — if it landed by the time you read this (check
+  `docs/status/urscript_wrist_orientation_parity_2026-08-01.md`), it is Python-vs-Python
+  numerical parity ONLY, same standing caveat as the rest of URScript mode: zero real-hardware
+  execution. Do not treat it as ready for a real `wrist_orient_fixed` config test via URScript
+  without independently confirming that doc says so explicitly.
 
 ## Standing rules for tomorrow (carried over, not new)
 
