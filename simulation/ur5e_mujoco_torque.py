@@ -43,6 +43,117 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "ur5e_mujoco_torque"
 
 ControllerKind = Literal["torque_qp", "impedance", "zero_torque"]
 
+# Default per-joint magnitudes for the asymmetric-Coulomb plant friction extra
+# term below, mirroring the size3/size1 joint-class split already used for the
+# MJCF's own frictionloss values (assets/ur5e_torque/ur5e_torque.xml:
+# size3 = shoulder_pan/shoulder_lift/elbow, 5.0 Nm; size1 = wrists, 1.0 Nm).
+# Set to 30% of the matching frictionloss value -- a modest, literature-
+# informed but NOT precisely-calibrated placeholder (no authoritative UR5e
+# backdrive/drive friction-ratio table was found any more than one existed
+# for the base frictionloss/damping values themselves; see
+# docs/status/ur5e_sim_friction_modeling_2026-07-31.md sec 1 for that same
+# honest gap). Order-of-magnitude only, meant to be replaced by a real
+# calibration once real breakaway/backdrive data exists.
+_ASYM_FRICTION_DEFAULT_EXTRA_NM = np.array([1.5, 1.5, 1.5, 0.3, 0.3, 0.3], dtype=np.float64)
+
+
+@dataclass
+class AsymmetricCoulombFrictionConfig:
+    """Opt-in PLANT-side extra Coulomb friction, asymmetric in the direction of
+    mechanical power flow through the joint (motor-to-load "driving" vs.
+    load-to-motor "backdriving"), not just in the sign of qd like the existing
+    static symmetric frictionloss/damping model already baked into the MJCF.
+
+    Motivation (Clochiatti et al., Robotica 2024 -- UR5e-specific electro-
+    mechanical identification): real UR5e joint friction is NOT symmetric
+    Coulomb+viscous; harmonic-drive reducers have direction-of-power-flow-
+    dependent friction (backdriving typically sees MORE resistance than
+    driving). This is a genuinely different physical regime than "which way
+    is qd pointing" -- it depends on the SIGN of tau_drive * qd, not the sign
+    of qd alone. MuJoCo's native joint frictionloss is a single, direction-
+    symmetric scalar and cannot represent this, so this term is injected as an
+    extra generalized force (data.qfrc_applied) by the caller's per-step loop,
+    not expressed in the MJCF itself.
+
+    Purely additive: default `enabled=False` reproduces exactly today's plant
+    behavior (this term contributes nothing; existing frictionloss/damping in
+    the MJCF are untouched either way). Never replaces or modifies the
+    existing static friction values -- it can only add extra resistance on
+    top of them, and only when explicitly turned on.
+    """
+
+    enabled: bool = False
+    # Extra Coulomb-only torque magnitude (Nm), applied ONLY during load-to-
+    # motor ("backdriving") power flow -- i.e. when tau_drive and qd have
+    # opposite signs. Zero during motor-to-load ("driving") flow. Per-joint,
+    # matching JOINT_NAME_ORDER / UR5E_JOINT_ORDER.
+    extra_coulomb_backdrive_nm: np.ndarray = field(
+        default_factory=lambda: _ASYM_FRICTION_DEFAULT_EXTRA_NM.copy()
+    )
+    # Smoothing scale (rad/s) for the sign(qd) term, same role as
+    # controller_core's friction_ff_qd_deadband -- avoids a hard
+    # discontinuity/chatter exactly at qd=0.
+    qd_deadband_radps: float = 0.02
+
+    def validate(self) -> None:
+        self.extra_coulomb_backdrive_nm = np.asarray(
+            self.extra_coulomb_backdrive_nm, dtype=np.float64
+        ).reshape(6)
+        if np.any(self.extra_coulomb_backdrive_nm < 0.0):
+            raise ValueError("extra_coulomb_backdrive_nm must be non-negative")
+        if not np.isfinite(float(self.qd_deadband_radps)) or float(self.qd_deadband_radps) <= 0.0:
+            raise ValueError("qd_deadband_radps must be a positive finite scalar")
+
+    @classmethod
+    def from_mujoco_yaml_section(cls, mujoco_cfg: dict[str, Any]) -> "AsymmetricCoulombFrictionConfig":
+        """Build from the optional `mujoco: asymmetric_coulomb_friction:` YAML
+        block. Missing/absent block -> default (disabled), byte-identical to
+        every existing config that doesn't mention this feature."""
+        section = (mujoco_cfg or {}).get("asymmetric_coulomb_friction") or {}
+        if not isinstance(section, dict):
+            raise ValueError("mujoco.asymmetric_coulomb_friction must be a mapping")
+        cfg = cls(enabled=bool(section.get("enabled", False)))
+        extra_nm = section.get("extra_coulomb_backdrive_nm")
+        if extra_nm is not None:
+            if isinstance(extra_nm, dict):
+                cfg.extra_coulomb_backdrive_nm = np.array(
+                    [float(extra_nm[name]) for name in UR5E_JOINT_ORDER], dtype=np.float64
+                )
+            else:
+                cfg.extra_coulomb_backdrive_nm = np.asarray(extra_nm, dtype=np.float64).reshape(6)
+        if "qd_deadband_radps" in section:
+            cfg.qd_deadband_radps = float(section["qd_deadband_radps"])
+        cfg.validate()
+        return cfg
+
+
+def asymmetric_coulomb_backdrive_torque(
+    qd: np.ndarray,
+    tau_drive: np.ndarray,
+    cfg: AsymmetricCoulombFrictionConfig,
+) -> np.ndarray:
+    """Extra plant-side friction torque (Nm), opposing motion, active only
+    during load-to-motor ("backdriving") power flow.
+
+    Power-flow direction is determined by sign(tau_drive * qd): positive means
+    the drive torque and joint velocity agree (motor driving the load
+    forward), negative means they oppose (the load is driving the joint back
+    through the gearbox). Returns all-zeros when `cfg.enabled` is False, or
+    trivially at any instant where the joint is in the driving regime -- this
+    is a pure function of the instantaneous state, no persistent state,
+    matching the "simpler than LuGre, no new integrated state" scope decision
+    documented in docs/status/literature_grounded_sim_forces_2026-08-01.md.
+    """
+    if not cfg.enabled:
+        return np.zeros(6, dtype=np.float64)
+    qd = np.asarray(qd, dtype=np.float64).reshape(6)
+    tau_drive = np.asarray(tau_drive, dtype=np.float64).reshape(6)
+    power_flow = tau_drive * qd
+    backdriving = power_flow < 0.0
+    smooth_sign = np.tanh(qd / max(float(cfg.qd_deadband_radps), 1e-6))
+    extra = -np.asarray(cfg.extra_coulomb_backdrive_nm, dtype=np.float64).reshape(6) * smooth_sign
+    return np.where(backdriving, extra, 0.0).astype(np.float64)
+
 
 def expand_mass_matrix(model: mujoco.MjModel, data: mujoco.MjData) -> np.ndarray:
     """Dense ``nv x nv`` mass matrix — compatible with MuJoCo 3.x and older bindings.

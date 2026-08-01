@@ -31,7 +31,9 @@ from mujoco_ur5e_tools import get_compiled_ur5e_torque_model_diagnostics  # noqa
 from mujoco_ur5e_tools import validate_ur5e_torque_xml_source_tree  # noqa: E402
 from simulation.ur5e_mujoco_torque import (  # noqa: E402
     DEFAULT_OUTPUT_DIR,
+    AsymmetricCoulombFrictionConfig,
     apply_start_q,
+    asymmetric_coulomb_backdrive_torque,
     build_initial_state_and_adapter,
     build_mujoco_state,
     compute_joint_limit_proximity,
@@ -148,6 +150,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Add C(q,qd)qd feedforward on top of gravity compensation (default off; overrides mujoco.coriolis_feedforward).",
     )
+    p.add_argument(
+        "--asymmetric-coulomb-friction",
+        action="store_true",
+        help=(
+            "Enable opt-in PLANT-side extra Coulomb friction, asymmetric in the direction of "
+            "mechanical power flow through the joint (Clochiatti et al. 2024, UR5e-specific; "
+            "see simulation.ur5e_mujoco_torque.AsymmetricCoulombFrictionConfig). Default off; "
+            "overrides mujoco.asymmetric_coulomb_friction.enabled. Can only turn this ON via "
+            "CLI, never off (same pattern as --coriolis-feedforward)."
+        ),
+    )
     p.add_argument("--joint-index", type=int, default=0)
     p.add_argument("--torque-nm", type=float, default=1.0)
     p.add_argument("--torque-amp-nm", type=float, default=1.0)
@@ -247,6 +260,17 @@ def _choose_gravity_source(explicit: str | None, mujoco_cfg: dict[str, Any]) -> 
     if configured in ("mujoco_qfrc", "pinocchio"):
         return str(configured)
     return "mujoco_qfrc"
+
+
+def _choose_asymmetric_friction_cfg(cli_flag: bool, mujoco_cfg: dict[str, Any]) -> AsymmetricCoulombFrictionConfig:
+    """Same override pattern as _choose_coriolis_feedforward: the YAML
+    mujoco.asymmetric_coulomb_friction block (if any) sets the baseline; the
+    CLI flag can only force it ON, never off."""
+    cfg = AsymmetricCoulombFrictionConfig.from_mujoco_yaml_section(mujoco_cfg)
+    if cli_flag:
+        cfg.enabled = True
+    cfg.validate()
+    return cfg
 
 
 def _choose_coriolis_feedforward(cli_flag: bool, mujoco_cfg: dict[str, Any]) -> bool:
@@ -621,6 +645,7 @@ def run() -> int:
     gravity_mode = _choose_gravity_mode(args.mode, args.gravity_mode, mujoco_cfg)
     gravity_source = _choose_gravity_source(args.gravity_source, mujoco_cfg)
     coriolis_feedforward = _choose_coriolis_feedforward(bool(args.coriolis_feedforward), mujoco_cfg)
+    asym_friction_cfg = _choose_asymmetric_friction_cfg(bool(args.asymmetric_coulomb_friction), mujoco_cfg)
     trajectory_profile = _choose_trajectory_profile(args.mode, args.trajectory_profile, mujoco_cfg)
     move_duration_s, move_duration_source = _resolve_move_duration(mujoco_cfg, args.move_duration)
     run_dir = _make_run_dir(output_dir, args.mode, controller_kind if args.mode != "model-load" else None)
@@ -856,6 +881,17 @@ def run() -> int:
             # decision and the noisy applied result.
             if torque_noise_std > 0.0:
                 tau = np.asarray(tau, dtype=np.float64).reshape(6) + noise_rng.normal(0.0, torque_noise_std, size=6)
+
+            # PLANT-side extra friction (opt-in, default zeros -- see
+            # simulation.ur5e_mujoco_torque.AsymmetricCoulombFrictionConfig):
+            # injected as an extra generalized force via qfrc_applied, i.e. it
+            # affects the physics regardless of what the controller commands,
+            # exactly like the MJCF's own frictionloss/damping already do --
+            # this is a plant realism addition, not a controller term. Set
+            # every step (even when disabled, where it is all-zeros) since
+            # nothing else in this script's step loop touches qfrc_applied.
+            extra_friction_tau = asymmetric_coulomb_backdrive_torque(pre_state.qd, tau, asym_friction_cfg)
+            data.qfrc_applied[:6] = extra_friction_tau
 
             clip_observed = clip_observed or bool(np.any(np.asarray(diag.get("tau_saturated", []), dtype=bool)))
             if not bool(diag.get("safety_ok", True)):

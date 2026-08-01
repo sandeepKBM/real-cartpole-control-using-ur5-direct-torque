@@ -111,6 +111,15 @@ def parse_args() -> argparse.Namespace:
         help="Forwarded to the child experiment: add C(q,qd)qd feedforward.",
     )
     p.add_argument(
+        "--asymmetric-coulomb-friction",
+        action="store_true",
+        help=(
+            "Forwarded to the child experiment: enable opt-in PLANT-side "
+            "asymmetric backdrive Coulomb friction (Clochiatti et al. 2024, "
+            "see simulation.ur5e_mujoco_torque.AsymmetricCoulombFrictionConfig)."
+        ),
+    )
+    p.add_argument(
         "--gravity-mode",
         choices=("raw", "gravity_comp"),
         default="gravity_comp",
@@ -377,6 +386,8 @@ def _run_child_experiment(
         cmd.extend(["--gravity-source", str(args.gravity_source)])
     if getattr(args, "coriolis_feedforward", False):
         cmd.append("--coriolis-feedforward")
+    if getattr(args, "asymmetric_coulomb_friction", False):
+        cmd.append("--asymmetric-coulomb-friction")
     if args.no_plot:
         cmd.append("--no-plot")
 
