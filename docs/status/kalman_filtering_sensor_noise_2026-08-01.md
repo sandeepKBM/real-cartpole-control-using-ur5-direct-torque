@@ -278,3 +278,152 @@ this offline analysis suggests), the concrete next steps, none of which are done
 - Added: this doc.
 - No existing file modified. Rollback: `git rm tools/diagnostics/kalman_tcp_accel_filter_prototype.py
   docs/status/kalman_filtering_sensor_noise_2026-08-01.md` (or `git revert` the commit).
+
+---
+
+## 8. Follow-up (2026-08-01, same day): parallel/bucketed architecture -- does a diagnostic-only KF branch help?
+
+**The original verdict above (SS5, "don't implement Kalman filtering as a replacement for the
+current heuristic") is unchanged and stays as the recommendation for that framing.** This
+section tests a materially different proposal, raised after reviewing SS1-7: don't pick one KF
+tuning to *replace* the accel-guard heuristic (that's the tradeoff already shown above -- lower
+noise floor costs real lag, and lag is a genuine hazard on the trip-gating path). Instead: keep
+the current heuristic as the **sole, unmodified, real-time trip authority** (so a genuine fast
+divergence still trips exactly as it does today -- zero regression, zero added lag on the
+safety-critical path), and run a **separate, more heavily-smoothed KF branch alongside it purely
+as a diagnostic/trend channel that gates nothing**, where the ~300ms lag measured above is
+irrelevant by construction, since it's aimed at slow/gradual trends whose own timescale is much
+longer than 300ms -- specifically, the `y_drift_m`/`z_drift_m`/`orientation_error_norm_rad`
+pre-trip trend window `hardware/direct_torque_transport.py::_build_pre_trip_trend`/
+`_classify_trend` already captures (commit `467fe52`, landed after a real -0.15m return-leg trip
+needed manual trace re-parsing to see this trend by hand).
+
+Script: `tools/diagnostics/kalman_parallel_trend_prototype.py`. Reuses
+`ConstantAccelKalmanFilter1D` and the real capture-loading from the original prototype
+(no duplicated math); imports the real, unmodified `_classify_trend`/`PRE_TRIP_TREND_WINDOW_CYCLES`
+from `hardware.direct_torque_transport`.
+
+**No real trace.jsonl for the actual -0.15m return-leg incident exists in this checkout** --
+only the commit-message/AGENTS.md prose description survived (`outputs/hardware_transport/`
+only has the 2026-07-28 runs already used in SS1; nothing dated 2026-07-31). The slow-creep
+profile used below is an **explicitly synthetic reconstruction** matching that description
+(y_drift ramping to the real 0.03 m off-axis-drift guard over a
+`PRE_TRIP_TREND_WINDOW_CYCLES=60`-cycle / ~127ms window at the real capture's measured 2.119ms/
+cycle rate -- consistent with the "~118ms" figure in the incident description), with real
+noise bootstrapped from the same stationary capture used throughout this doc (not a hand-picked
+number): `y_drift` std `9.86e-06 m`, `z_drift` std `3.25e-06 m`, an `orientation_error_norm`
+noise-floor proxy (real rotation-vector residual norm, since no real `orientation_error_norm`
+capture exists -- an honestly-labeled approximation, not production's exact quaternion-error
+computation) std `1.94e-05 rad`.
+
+### 8.1 Architecture is genuinely independent (confirmed, not just asserted)
+
+`bucket_demo()` re-runs the original `large_displacement` (dx=-0.20m/T=1.0s) fast-move backtest
+through the real, unmodified `CartesianMoveMonitor`: **30/30 correct on both `current_default`
+and `current_graduated_filtered`, byte-identical to SS4(c)'s original numbers.** The script
+asserts this and would raise if it ever changed. Nothing about adding a parallel KF branch can
+regress this, since the branch is a separate object over the same read-only input stream with no
+return path into the monitor's own decision.
+
+### 8.2 Does the parallel KF branch help detect the slow y_drift/z_drift/orientation creep?
+
+**Short answer: no, not measurably -- for a specific, checked reason, not by assumption.**
+
+First check: at the synthetic incident's own headline magnitude (`y_drift` 0->0.031m,
+`z_drift` 0->0.012m, `orientation_error_norm` 0->0.10 rad over the 60-cycle window), both raw
+and KF-smoothed `_classify_trend()` on the full window correctly report "rising" **50/50 seeds,
+every channel, both methods** -- this magnitude isn't the hard case; a sensitivity sweep down
+toward the real noise floor is needed to find one.
+
+**Sensitivity sweep** (`y_drift_m`, true final magnitude as a multiple of its own real measured
+per-cycle noise std `9.86e-06 m`, full 60-cycle window, 50 seeds/point, real bootstrapped noise):
+
+| true final magnitude | raw "rising" rate | KF "rising" rate |
+|---|---|---|
+| 0 (null -- no real drift at all) | 29/50 | 30/50 |
+| 0.5x std (~5 um) | 49/50 | 46/50 |
+| 1x-2.5x std | 50/50 | 50/50 |
+| 3x-1000x std | 50/50 | 50/50 |
+
+**Raw `_classify_trend` is already saturated at essentially its maximum possible sensitivity by
+0.5-1x the real noise std** -- i.e. a true drift of a few *micrometers* over 60 cycles, three to
+four orders of magnitude below the 0.03 m guard this trend window exists to give early warning
+about. There is no real-world-relevant magnitude range in which the raw signal fails to detect
+the trend but the KF-smoothed signal succeeds. At the one point tested below full saturation
+(0.5x std), the KF is if anything *slightly worse* (46/50 vs 49/50, within noise of each other
+but never better) -- consistent with the KF's own transient/lag interacting with the first-third/
+last-third split, not a real advantage.
+
+**Why, root-caused**: unlike the TCP accel estimate (a *double* finite difference that amplifies
+noise by ~1/dt^2, the actual reason the original heuristic needed engineering), `y_drift_m`/
+`z_drift_m`/`orientation_error_norm_rad` are **not derivatives at all** -- they're direct,
+single-shot geometric quantities (drift-from-start position, orientation error), computed once
+per cycle with no differencing. Their real noise floor (`~1e-5 to 2e-5`) is already 3-4 orders of
+magnitude below the guard thresholds these trends are meant to anticipate, so there was never a
+noise-suppression problem here for a KF to solve.
+
+**A separate, unplanned finding, found as a side effect of building this test, not assumed
+going in**: the null-case row above (29/50 raw, 30/50 KF report "rising"; the rest mostly
+"falling", not "stable") shows `_classify_trend`'s `deadband_frac`-based relative-change check
+essentially **never** reports "stable" for a channel whose own mean sits near zero -- which
+describes `y_drift_m`/`z_drift_m` by definition (they're computed as an offset *from* the start
+position, so they're expected to hover near zero for a stable run). `rel_change`'s denominator
+(`max(|first_mean|, |last_mean|, 1e-9)`) collapses toward the `1e-9` floor whenever both means are
+near zero, so even sub-noise-floor fluctuations produce a relative change that blows past the 5%
+deadband. **This is a real weakness in the existing, unmodified `_classify_trend` heuristic,
+independent of Kalman filtering** -- and critically, **Kalman smoothing does not fix it** (29/50
+vs 30/50 is not a meaningful difference): smoothing reduces variance, but the failure mode here
+is a scale-normalization issue in `_classify_trend`'s own math, not a noise-magnitude issue a
+lower-variance input signal would resolve. Per this task's own scope (diagnostic-only,
+`hardware/direct_torque_transport.py` is not `hardware/safety.py` and gates no trip, but still
+out of scope to silently patch here) this is **flagged, not fixed**: `_build_pre_trip_trend`
+only ever runs once, at trip time, on a run that already tripped some *other* guard, so this
+specific weakness doesn't cause a false trip by itself -- but it does mean the "stable" label in
+`pre_trip_trend`'s output for a near-zero-mean channel should not be trusted as evidence of a
+truly flat trend without checking the raw values, since "rising"/"falling" is nearly the default
+output there regardless of whether anything real is happening.
+
+### 8.3 Revised recommendation
+
+**The reframing is real and changes the risk profile, but the parallel branch still doesn't earn
+its complexity for the specific slow-drift/trend-detection use case tested.** Concretely:
+
+- The safety argument for going parallel is sound and is conceded: a diagnostic-only branch that
+  never gates a trip genuinely has zero real-time/lag risk, confirmed in 8.1. If a future use
+  case needs heavy smoothing for its own sake with no lag constraint, "run it in parallel, don't
+  replace the trip authority" is the right shape for that, and the original SS5 objection (lag is
+  a hazard) legitimately does not apply to a branch that never gates anything.
+- But for *this* concrete target -- helping `_classify_trend` read the `y_drift`/`z_drift`/
+  `orientation_error_norm` pre-trip window -- there is no measurable win: those channels were
+  never noise-limited in the first place (they're not derivatives), the raw signal already
+  detects a real trend at a few micrometers/microradians (far below anything operationally
+  relevant), and the one real weakness found in that detection path (`_classify_trend`'s
+  near-zero-baseline deadband collapse) is a *different* bug that a KF branch does not fix.
+- **Do not build a parallel KF trend branch for `y_drift_m`/`z_drift_m`/`orientation_error_norm_rad`
+  specifically** -- there's nothing here for it to improve. If `_classify_trend`'s deadband issue
+  is worth fixing, that's a separate, small, targeted fix (e.g. an absolute-magnitude floor on top
+  of the relative deadband) -- flagged here for a deliberate decision, not implemented, and not a
+  Kalman-filtering question at all.
+- The one place in this codebase where a parallel/diagnostic-only KF branch *would* face a real
+  tradeoff worth solving is the one this doc already covers in SS1-7: the TCP accel estimate
+  itself, which genuinely is noise-limited by a double differentiation. Item 1's `bucket_demo()`
+  demonstrates that running the SS7 KF variant (`jerk_psd=0.1`) alongside the unchanged heuristic
+  is mechanically trivial and safe -- but per SS5, that specific signal's own KF variant still
+  doesn't outperform the current heuristic even as an independent diagnostic overlay, since the
+  question there was never "is it safe to compute in parallel" (yes, trivially) but "does it show
+  something the current heuristic's own trip decision and `pre_trip_trend` capture don't already
+  show" -- and SS1-7 already found comparable noise/lag tradeoffs, not a clear win, even before
+  this parallel framing.
+
+### 8.4 Tests / files
+
+- `python tools/diagnostics/kalman_parallel_trend_prototype.py` -- runs cleanly end to end, no
+  import errors, no crashes, asserts the fast-move sanity check itself (would raise on any
+  regression).
+- `python -m pytest -q tests/hardware/test_direct_torque_transport_pre_trip_trend.py
+  tests/hardware/test_hardware_safety.py`: 46 passed (both files this script imports from,
+  confirming nothing about running it disturbs their own test coverage -- no production file
+  was modified).
+- Added: `tools/diagnostics/kalman_parallel_trend_prototype.py`. No existing file modified.
+  Rollback: `git rm tools/diagnostics/kalman_parallel_trend_prototype.py` (or `git revert` the
+  follow-up commit) plus reverting this section of the doc.
