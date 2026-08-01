@@ -15,6 +15,24 @@ DEFAULT_CONFIG = REPO_ROOT / "config" / "ur5e_mujoco_torque_osc_tuned.yaml"
 DEFAULT_VISCOUS = [0.9, 0.9, 0.8, 0.9, 0.9, 0.9]
 DEFAULT_COULOMB = [0.8, 0.8, 0.7, 0.8, 0.8, 0.8]
 
+# Found 2026-08-01, first-ever real URScript execution: the cond(J) estimate
+# (two from-scratch 6x6 Jacobi eigendecompositions, 8 sweeps each, every
+# control cycle) is real, substantial embedded-real-time computation whose
+# per-cycle cost on actual PolyScope hardware had never been benchmarked
+# (flagged as a known gap in AGENTS.md sec 4) -- and the first real attempt
+# hung, almost certainly because the loop couldn't keep up with its own 2ms
+# budget. For jacobian_singular_cond_max at or above this threshold,
+# singular_scale is PROVABLY always 1.0 (cond > threshold > cond_max is
+# unreachable for any physically realizable Jacobian -- see
+# CartesianImpedanceConfig.jacobian_singular_cond_max's own promoted-default
+# value, 1.0e18, which every config exercised so far uses). Skipping the
+# whole Jacobi computation in that regime and hardcoding singular_scale=1.0
+# produces bit-identical output to running it, so this is a pure performance
+# fix, not a behavior change -- verified by the existing parity tests, whose
+# only near-singular case (jacobian_singular_cond_max=1.0e5) stays well
+# under this threshold and still exercises the real computation.
+SINGULAR_SCALE_SKIP_THRESHOLD = 1.0e10
+
 JOINT_ORDER = (
     "shoulder_pan_joint",
     "shoulder_lift_joint",
@@ -199,6 +217,9 @@ def render_urscript(
         "{{TASK_RESAMPLE_MAX_ITERS}}": str(int(params.task_resample_max_iters)),
         "{{JACOBIAN_SINGULAR_COND_MAX}}": f"{params.jacobian_singular_cond_max:.12g}",
         "{{SINGULAR_SCALE_JACOBI_SWEEPS}}": str(int(params.singular_scale_jacobi_sweeps)),
+        "{{USE_SINGULAR_SCALE}}": (
+            "1" if params.jacobian_singular_cond_max < SINGULAR_SCALE_SKIP_THRESHOLD else "0"
+        ),
         "{{TORQUE_HEADROOM}}": f"{params.torque_headroom:.12g}",
         "{{REANCHOR_X_TOL}}": f"{params.reanchor_x_tol_m:.12g}",
         "{{REANCHOR_QD_TOL}}": f"{params.reanchor_qd_tol_radps:.12g}",

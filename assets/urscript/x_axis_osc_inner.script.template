@@ -305,6 +305,7 @@ def osc_x_axis_transport():
   resample_max_iters = {{TASK_RESAMPLE_MAX_ITERS}}
   cond_max = {{JACOBIAN_SINGULAR_COND_MAX}}
   jacobi_sweeps = {{SINGULAR_SCALE_JACOBI_SWEEPS}}
+  use_singular_scale = {{USE_SINGULAR_SCALE}}
   headroom = {{TORQUE_HEADROOM}}
   x_tol = {{REANCHOR_X_TOL}}
   qd_tol = {{REANCHOR_QD_TOL}}
@@ -399,18 +400,20 @@ def osc_x_axis_transport():
     # computed here (right after the wrench, before wrench shaping) to match
     # that source's line order. See jacobi_eigenvalues_sym6 above and the
     # header comment for how cond(J) is estimated without a built-in SVD.
-    Jinv = inv(J)
-    JinvT = transpose(Jinv)
-    AtA = JT * J
-    BtB = JinvT * Jinv
-    eig_AtA = jacobi_eigenvalues_sym6(AtA, jacobi_sweeps)
-    eig_BtB = jacobi_eigenvalues_sym6(BtB, jacobi_sweeps)
-    lam_max_AtA = max_of6(eig_AtA)
-    lam_max_BtB = max_of6(eig_BtB)
-    cond_j = sqrt(lam_max_AtA * lam_max_BtB)
     singular_scale = 1.0
-    if cond_j > cond_max and cond_max > 0.0:
-      singular_scale = cond_max / cond_j
+    if use_singular_scale == 1:
+      Jinv = inv(J)
+      JinvT = transpose(Jinv)
+      AtA = JT * J
+      BtB = JinvT * Jinv
+      eig_AtA = jacobi_eigenvalues_sym6(AtA, jacobi_sweeps)
+      eig_BtB = jacobi_eigenvalues_sym6(BtB, jacobi_sweeps)
+      lam_max_AtA = max_of6(eig_AtA)
+      lam_max_BtB = max_of6(eig_BtB)
+      cond_j = sqrt(lam_max_AtA * lam_max_BtB)
+      if cond_j > cond_max and cond_max > 0.0:
+        singular_scale = cond_max / cond_j
+      end
     end
 
     # Lambda is needed for wrench shaping (use_lambda) AND/OR the nullspace
