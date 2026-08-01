@@ -149,7 +149,32 @@ an MP4 or a bare exit code as success evidence — read the run record.
     real evidence against that), which is a controller-design question, not a retune.
     Practical floor until then: **the safe symmetric range at height_alpha=0.5 is ±0.15 m**,
     not ±0.20 m.
-  - **-45° base-rotation Y-drift coupling, unfixed (2026-07-31)**: `hardware/poses.py::
+  - **Directional-ceiling failure, fixed at height_alpha=0.5 (2026-08-01)**:
+    `config/ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed.yaml` — the existing
+    `wrist_orientation_task` mechanism (a dedicated wrist-only joint-space PD term,
+    structurally isolated from the shared Lambda-weighted wrench pipeline; see
+    `docs/status/wrist_orientation_task_2026-07-29.md`) combined with the already-promoted
+    `jacobian_singular_cond_max: 1.0e18` fix — never validated together before this pass
+    (`docs/status/nullspace_envelope_search_2026-08-01.md`). Fully resolves this failure in
+    both directions: 8/8 vs baseline 6/8 at both `dx=+0.20m` and `dx=-0.20m` (hold 1/2s), worst-
+    case orientation error roughly halved (0.2497 rad at the ceiling → 0.125–0.127 rad). Zero
+    regressions anywhere tested: `canonical_grid`/`long_holds`/`torque_scale_robustness` byte-
+    identical to baseline at height_alpha=0.5, and the fix generalizes with no gain retuning to
+    height_alpha ∈ {0.2, 0.35}. It has **zero measurable effect** on the separate -45° pose
+    failure below — a bounded Phase-2 beam search combining it with `lambda_diagonal_shaping`/
+    `lambda_adaptive_regularization` (individually and together) also failed identically at
+    every dx tried, direct evidence the -45° failure is a distinct task-space Y-axis phenomenon,
+    not an orientation/nullspace/Lambda-coupling issue at all — the entire orientation-holding
+    mechanism family this controller has targets the wrong axis for that failure. No
+    `controller_core/` changes; no existing config modified. **Not yet real-hardware validated**
+    and not a general replacement for the real-hardware default
+    (`config/ur5e_mujoco_torque_osc_tuned.yaml`, unmodified) without a separate decision, since
+    that default is still the actual real-hardware start-pose config per `hardware/poses.py`.
+    (Side note correcting §4's earlier "Not yet applied" framing: a `singular_scale`-disabled
+    variant of the plain `wrist_orient` config was already independently validated 2026-07-30,
+    before this fix — see §4's "Fixed and promoted to default" entry below for the update.)
+  - **-45° base-rotation Y-drift coupling — root-caused 2026-08-01, evidence-scoped fix landed
+    for small/moderate displacement (2026-07-31 → 2026-08-01)**: `hardware/poses.py::
     HEIGHT_ALPHA_0_5_CLEARANCE_Q` (`HEIGHT_ALPHA_0_5_Q` with `shoulder_pan` overridden to
     -0.7853981633974483 rad, i.e. -45°) became the **default** real-hardware start pose for
     `direct_torque` transport this date, needed for real wall/base clearance in the physical
@@ -168,10 +193,63 @@ an MP4 or a bare exit code as success evidence — read the run record.
     found **no candidate that fixes it** — every one failed identically to baseline, matching
     both live real-hardware attempts. Likely a structural kinematic/Jacobian effect of the
     rotated pose (same family as the directional-ceiling finding above), not a gain problem.
-    **Practical floor**: the -45° clearance pose is validated safe only at small displacement
-    (dx≤~0.04m passes cleanly in both sim and real); dx≥0.06m (sim) / dx≥0.20m (real) is a
-    known, reproducible failure with no current fix. Do not assume the -45° pose inherits the
-    un-rotated pose's validated envelope at any displacement.
+    **Root cause confirmed 2026-08-01** (`docs/status/neg45_y_axis_diagnosis_and_fix_2026-08-01.md`):
+    new per-cycle trace instrumentation (`task_backtrack_scale`, `y_error`, raw `wrench`,
+    `tau_preclip`/`tau_task`/`tau_posture`/`tau_damping`, pre-step Jacobian — added to
+    `tools/ur5e_mujoco_torque_experiments.py`, purely additive) directly ruled out the two
+    mechanisms most plausibly "neutralizing" gain increases: geometric backtracking and the
+    global `singular_scale` term are both provably inactive throughout the failure
+    (`task_backtrack_scale==1.0`, `singular_scale==1.0` for all 342 steps of the reproduction,
+    torque never exceeds ~4.7% of headroom) — this also rules out saturation as the explanation
+    for why the real +50% kp_y/kd_y live-hardware attempt had zero effect. Confirmed instead: a
+    genuine, structural kinematic/dynamic **X-Y authority trade-off**. kp_y/kd_y at 5-10x
+    baseline (well past the ~1.67x ceiling every prior gain search tried) does stop the guard
+    trip, but forces X-tracking into a non-transient steady-state shortfall (45-55% of the
+    0.06m target, unchanged by tripling the move duration). A new opt-in `y_integral_action`/
+    `ki_y` term (`controller_core/x_axis_cartesian_impedance.py`, mirrors
+    `lqr_controller.py`'s `_x_integral` anti-windup pattern) hits the identical trade-off at
+    high gain and has **zero measurable effect** at a gentle, non-destructive dose (4-category
+    sweep: 0/38 baseline vs 0/38 candidate, byte-identical) — ruled out as a fix, kept as a
+    validated, zero-regression, default-off addition (`ki_y=0.0` by default). **Verdict: no P,
+    D, or I gain in this controller architecture can hold Y without breaking X-tracking at this
+    pose/displacement** — three independent investigations (gain sweep, orientation/nullspace
+    mechanism family, and this P/D/I-authority + instrumentation pass) now confirm this is
+    structural, not a search gap.
+
+    A second, separate finding from the same diagnosis, reported for a human decision and
+    explicitly not acted on unilaterally: with the drift guards temporarily widened for
+    observation only (never committed), the natural Y excursion at dx=0.06m is a bounded,
+    self-correcting **transient**, not a hazard signature — peaks 0.0423m during the move,
+    decays to 0.0058m by end of hold, grows roughly linearly with dx (0.0059m at dx=0.01m), no
+    oscillation (`|qd| ≤ 0.158 rad/s` throughout). `max_abs_y_drift_m`/`max_abs_z_drift_m`/
+    `max_abs_orthogonal_drift_m` have been a flat, pose-independent 0.03m
+    (`controller_core/safety.py`) since this repo's first commit, predating this pose,
+    controller, and friction model entirely, with no commit or doc ever revisiting the value.
+
+    **User reviewed this evidence and directed an evidence-scoped fix (2026-08-01,
+    `docs/status/neg45_drift_tolerance_validation_2026-08-01.md`)**:
+    `config/ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed_neg45_pose.yaml` (built on the
+    directional-ceiling fix above) raises `controller.safety.max_abs_orthogonal_drift_m` — the
+    field `ImpedanceSafetyMonitor` actually enforces on this path, confirmed by reading the
+    class directly — from the class default 0.03m to **0.05m** for this one pose only (~18%
+    margin above the largest validated natural peak, 0.0423m; deliberately not raised further).
+    `controller_core/safety.py`'s class default is unchanged — this is a config-only override,
+    applied only when a caller also selects the -45° pose, not a silent threshold change.
+    Validated (same 4-category rigor sweep, current friction-including model): **32/38** —
+    `canonical_grid` 8/8, `long_holds` 8/8, `torque_scale_robustness` 14/14,
+    `large_displacements` 2/8 (only `dx=0.05m` passes both hold durations; `dx=0.10-0.20m`
+    deliberately still fail via `y_drift`, since the dose-response measurement this tolerance
+    was sized from never validated past `dx=0.06m` — an evidence-scoped increase, not a blanket
+    loosening). **Not yet real-hardware validated** — the -45° pose's real-vs-sim dose-response
+    already has an unexplained gap (real trip historically at dx=0.20m vs. sim onset
+    dx=0.05-0.06m), so this needs its own careful, small-first real-lab check before trust.
+
+    **Practical floor, updated 2026-08-01**: with the plain (un-widened) default config, dx≤~0.04m
+    passes cleanly in both sim and real, unchanged. With the new evidence-scoped tolerance config
+    specifically (`..._neg45_pose.yaml`), small/moderate displacement (dx≤0.06m, where the
+    dose-response was actually measured) now passes in sim; dx≥0.10m remains a known,
+    reproducible, now root-caused failure with no fix in any PID-family controller mechanism —
+    do not assume the tolerance raise covers displacement beyond what was validated.
   - **Real joint friction added to the sim model (2026-07-31)**: the same lab session found the
     real UR5e only achieves ~55-72% of a small commanded X displacement with steady-state
     hold-phase torque that never decays toward zero — a friction/stiction signature the
@@ -210,6 +288,72 @@ an MP4 or a bare exit code as success evidence — read the run record.
     nudging an already-marginal case (this pose's directional-ceiling envelope, see above) over
     the edge. **Not yet validated on real hardware** as of this note — that is the next
     real-lab step.
+  - **High-level accel/duration trajectory profiles, `accel_duration_triangular`/
+    `accel_duration_scurve` (2026-07-31)**: `simulation/ur5e_mujoco_torque.py::x_profile_target()`
+    (the shared trajectory function for both sim tooling and the real `direct_torque` loop)
+    gained two opt-in profiles driven by (peak acceleration, duration) instead of (displacement,
+    duration) — displacement becomes an analytically-computed output
+    (`accel_duration_displacement()`), threaded through the existing `target_x_delta_m` plumbing
+    unchanged so every downstream consumer (tolerances, scoring, `summary.json`) is unaffected.
+    `accel_duration_triangular`: bang-bang ±a acceleration, real jerk discontinuity at the
+    midpoint. `accel_duration_scurve`: `a(t) = accel*sin(2*pi*t/T)`, jerk-continuous, designed to
+    avoid TCP-accel guard trips. New CLI flags `--trajectory-profile`/`--target-accel` on
+    `tools/ur5e_direct_torque_x_transport.py` and `tools/ur5e_mujoco_torque_experiments.py`;
+    `hardware/x_transport.py` wires the new profiles into `direct_torque` mode only (`position`/
+    `urscript` raise explicitly rather than silently ignoring them). Sim smoke test found a real,
+    quantified robustness difference before landing: at `target_accel=0.3 m/s²`/2s, triangular
+    trips the orientation guard (0.25 rad) while scurve completes cleanly (98.9% of target); at
+    0.15 m/s² triangular also completes cleanly (99.5%) — a genuine lower safe-accel ceiling for
+    the bang-bang profile, not a bug in either. **Real-hardware tested the same night**:
+    `accel_duration_scurve` clean at `accel=0.02, move_duration=4.0s`, but tripped the speed
+    guard at `move_duration=6.0s` and `10.0s` despite peak commanded velocity being
+    mathematically duration-independent for this profile family — a real, only-partially-
+    explained finding (diagnosed as healthy X-tracking convergence plus a growing off-axis/
+    orientation contribution at longer durations; connects to the directional-ceiling finding
+    above). `accel_duration_triangular` has unit coverage
+    (`tests/mujoco/test_accel_duration_profile.py`, 16 tests) but was never real-hardware tested.
+  - **Real per-cycle `dt_s` plumbed through the `RobotState` contract (2026-07-31)**: two silent-
+    drop points fixed, purely additive (verified byte-identical controller output with/without
+    the key present — no consumer reads `dt_s` yet). (1) `controller_core/state_types.py`'s
+    `as_robot_state()`/`as_impedance_robot_state()` didn't whitelist `dt_s`, so even though sim's
+    `MujocoUR5eState.as_robot_state()` already included it, `compute()`'s internal normalization
+    silently dropped it before any controller code could see it. (2)
+    `hardware/direct_torque_link.py`'s `compose_robot_state()`/`build_robot_state()` never
+    included it on the real-hardware path at all — now takes an optional `dt_s` kwarg (default
+    `None`). `hardware/direct_torque_transport.py`'s per-cycle call now passes the real measured
+    cycle interval (`cycle_start_ns - prev_cycle_start_ns`, falling back to the nominal
+    `1/frequency_hz` on the first cycle) — the same `real_dt_s` formula the loop already uses for
+    its residual-acceleration estimator, no new timing source. This is a real prerequisite for
+    any future stateful, time-integrated controller term — see the LuGre item next.
+  - **LuGre dynamic friction — motivated and planned, not yet implemented (2026-07-31)**: the
+    same night's real-hardware test of the two trajectory profiles above found both
+    `accel_duration_triangular` and `accel_duration_scurve` trip the real TCP-accel guard almost
+    identically despite very different jerk shaping (~0.37-0.38s into a 2s move, ~2% of target
+    displacement, real measured accel spiking to ~3.3-3.5x commanded) — the signature of a real
+    stick-slip breakaway event, not a profile-shape bug: static friction holds the arm nearly
+    still while torque builds, then releases suddenly with a transient neither trajectory's
+    shaping controls, and the existing static tanh-based `friction_feedforward` model above has
+    no memory of "how long has this joint been stuck" so cannot represent it.
+    `docs/hardware/LUGRE_FRICTION_MODEL_PLAN.md` is the concrete, buildable follow-on: a single
+    bristle-deflection state `z` per joint (`dz/dt = qd - |qd|*z/g(qd)`, Stribeck curve `g(qd)`),
+    literature-grounded (Canudas de Wit, Olsson, Åström, Lischinsky, IEEE TAC 1995, plus several
+    robot-joint-specific identification papers) — that plan's own honest gap: no single
+    authoritative numeric parameter table for UR5e-class joints was found in this literature
+    pass either (same gap already logged for the static model), so it defers to its own §4
+    real-calibration procedure rather than guessing. The `dt_s` plumbing fix above was a named
+    prerequisite (plan §3.3) and is now landed, unblocking this work. Planning only — no code
+    written, no config changed. Related same-night survey,
+    `docs/status/nonlinear_controller_research_2026-07-31.md`, ranks next steps for higher-order
+    controller representations generally; its top pick (after finishing real-hardware validation
+    of `friction_feedforward`, still outstanding above) is supervised residual-torque regression
+    on the existing residual-observer data pipeline (`controller_core/dynamics_residual.py`),
+    **not** another RL attempt, given six documented RL gain-scheduling failures (§4's pointer to
+    `docs/CURRENT_STATUS.md`). A separate same-session design doc,
+    `docs/status/long_horizon_planner_design_2026-08-01.md`, evaluated a receding-horizon
+    planner layered on top of the reactive controller and recommended **against** building it
+    next: neither of this repo's two gain-tuning-exhausted failures (the directional ceiling,
+    now fixed above; the -45° Y-drift trade-off, still open above) is a trajectory-reference
+    problem a smarter planner could reach — both are torque-path/authority problems.
 
 ## 4. Safety & guardrails (hardware — do not weaken)
 
@@ -280,7 +424,17 @@ self-referential speed guard replaced with a fixed ceiling.
   parity is proven; (2) the Jacobi solver's per-cycle compute cost on real PolyScope hardware
   has never been benchmarked — a from-scratch eigenvalue solve every control cycle is a real new
   computational cost on the robot's own controller that nothing here proves fits the real-time
-  budget.
+  budget. **CLI gap closed 2026-08-01** (commit `b586f23`): `tools/ur5e_urscript_x_transport.py`
+  now has the same `CartesianMoveMonitor` guard-override flags as the `direct_torque` CLI
+  (`--max-tcp-accel-mps2`/`--accel-gap-cycles`/`--speed-lowpass-alpha`/
+  `--accel-max-consecutive-violations`/`--accel-hard-multiple`/
+  `--speed-max-consecutive-violations`/`--speed-hard-multiple`/`--noise-robust-guards`) —
+  `hardware/urscript_transport.py::run_urscript_x_transport()` already accepted these overrides,
+  only the CLI argparse wiring was missing, blocking reproduction of the real-hardware-validated
+  `--noise-robust-guards` preset on this control mode. Purely additive (new flags default to
+  `None`/off). **This does not change the two real gaps above** — URScript mode still has zero
+  real-hardware or URSim execution ever; do not read this as "URScript now validated," only as
+  "less blocked than before."
 - **RL gain-scheduling's never-move collapse has a credible root cause**, see
   `docs/CURRENT_STATUS.md` — not a hardware item, kept here only as a pointer.
 
@@ -308,10 +462,21 @@ this is the first reproducible evidence. **Promoted to the default**:
 `config/ur5e_mujoco_torque_osc_tuned.yaml` now has the fix baked in; the previous default
 (`singular_scale` enabled) is preserved unmodified at
 `config/ur5e_mujoco_torque_osc_tuned_singular_scale_enabled.yaml`. **Not yet applied** to
-`config/ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml` (the most recently developed,
-actively-used config for the `wrist_orientation_task` fix) — it still has the class default
-and likely has the same freeze bug, unvalidated as of this promotion; needs its own validation
-pass before changing, since it was independently tuned with `singular_scale` on.
+`config/ur5e_mujoco_torque_osc_tuned_wrist_orient.yaml` itself (the file, unmodified) — but
+**since validated as the same real bug, separately** (2026-07-30, same night,
+`docs/status/disable_singular_scale_wrist_orient_validation_2026-07-30.md`, not folded into
+this file until the 2026-08-01 update below): freeze confirmed real in this config too (raw
+peak TCP accel 2.38 → 0.060 m/s², 39.6x lower; first real torque at t=0.028s vs. t=0.744s
+baseline) and fixed by the identical `jacobian_singular_cond_max: 1.0e18` override, saved as
+`config/ur5e_mujoco_torque_osc_tuned_wrist_orient_no_singular_scale.yaml` — 304-run 4-category
+sweep at height_alpha ∈ {0.1, 0.2, 0.3, 0.5}, zero regressions, byte-identical pass/fail
+(150/152 both configs; unlike the base config's validation this one recovers no additional
+passes, plausibly because `wrist_orientation_task`'s separate wrist PD path already damps
+enough during the freeze window for canonical-grid moves to complete anyway — not confirmed by
+a targeted ablation). Promotion into `wrist_orient.yaml` itself was left as a human decision,
+not acted on. On 2026-08-01 this same fix was combined with `wrist_orientation_task` again
+(functionally the same override) and validated as `config/ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed.yaml`
+— the config that resolves the directional-ceiling failure, see §3.
 `config/ur5e_mujoco_torque_osc_tuned_adaptive_lambda.yaml` and `..._diagonal_lambda.yaml`
 already had `jacobian_singular_cond_max: 1.0e18` set independently (unrelated prior work),
 unaffected by this promotion.
@@ -337,6 +502,62 @@ file was never updated after that commit landed):
   telemetry under its own load, not a bug in this codebase): see
   `hardware_captures/2026-07-28_thinkrobot_172.16.71.77/README.md` and
   `docs/status/clock_timing_late_cycles_2026-07-28.md`.
+
+**Added, 2026-07-31/2026-08-01 — automatic pre-trip diagnostic capture (`direct_torque` only)**:
+`hardware/direct_torque_transport.py` now captures a `pre_trip_trend` field automatically on any
+guard trip — a bounded 60-cycle deque (`PRE_TRIP_TREND_WINDOW_CYCLES`) of `qd`, TCP speed
+(single-cycle position-delta/dt, matching `CartesianMoveMonitor.check()`'s own formula, not
+`ee_lin_vel`), `x_error`, `tau_controller` L1 norm, `orientation_error_norm`, and (added the
+same night, commit `467fe52`) `y_drift`/`z_drift`, each classified rising/falling/stable
+(`_classify_trend`, a first-third-vs-last-third mean comparison) at trip time only — built
+because real-hardware trip diagnosis that night required repeatedly hand-parsing `trace.jsonl`.
+`summary.json`'s shape for clean runs is unchanged (`pre_trip_trend: None`).
+**Only wired into `direct_torque_transport.py`** — `position_transport.py` and
+`urscript_transport.py` have no equivalent capture; there is no guard/diagnostic parity across
+the three control modes for this specific feature. A real bug in `_classify_trend` was found and
+fixed 2026-08-01 (commit `b43a9b2`), via the Kalman-filtering investigation below: the original
+relative-only deadband collapses for a signal whose mean legitimately sits near zero (e.g.
+`y_drift_m`/`z_drift_m` during a clean segment) — a tiny absolute noise wiggle is then a huge
+fraction of an already-tiny mean, so pure noise was misclassified rising/falling almost every
+time (a sensitivity sweep found "stable" reported for only ~29-30/50 seeds even at the true-zero
+null case, pre-fix). Fixed by adding a second, absolute deadband condition (2x the window's own
+std) alongside the existing relative one — either being true means "stable"; verified against
+the real slow `z_drift` creep from the -0.15m return-leg trace, still correctly classified
+"falling".
+
+**Investigated, 2026-08-01 — Kalman filtering for TCP-accel/drift sensor noise: negative both
+times** (`docs/status/kalman_filtering_sensor_noise_2026-08-01.md`; no `hardware/safety.py`
+changes made). (1) Does a per-axis constant-acceleration KF (or its steady-state
+alpha-beta-gamma equivalent) beat `CartesianMoveMonitor`'s existing `accel_gap_cycles`/
+`speed_lowpass_alpha`/graduated-tolerance heuristic for the TCP-accel guard's noise chain (a
+genuine double finite-difference, ~1/dt² noise amplifier)? No: at a `jerk_psd` tuned to
+comparable tightness, the KF's noise floor is worse (p99 0.478 vs. the shipped preset's 0.272
+m/s²); tuning it tighter (p99 0.073 at `jerk_psd=0.1`) costs a real, measured ~300ms tracking
+lag on a genuine fast move — a real hazard, since the one documented real divergence event in
+this repo's history escalates on an 8ms/cycle timescale — and pass/fail outcomes on both
+reconstructable backtest profiles were identical to the current heuristic either way. Compute
+cost (77 us/cycle vs. ~1.7ms of measured loop headroom) is not the blocker. (2) A reframing
+tried the same day: run a heavily-smoothed KF branch in **parallel**, purely as a
+diagnostic overlay that never gates the real-time trip decision (so the ~300ms lag is
+irrelevant by construction). Also no benefit, for a different, checked reason:
+`y_drift`/`z_drift`/`orientation_error_norm` (the `pre_trip_trend` targets above) are direct
+single-shot geometric measurements, not derivatives, so they were never noise-limited in the
+first place (real noise floor ~1e-5, three to four orders of magnitude below the guards these
+trends anticipate); raw `_classify_trend` already saturates at near-maximum sensitivity
+(detects a true drift of a few micrometers over 60 cycles). This parallel pass is what surfaced
+the `_classify_trend` deadband bug fixed above. **Recommendation: do not implement Kalman
+filtering anywhere in this codebase currently** — neither as a guard replacement nor as a
+parallel trend overlay. Only standalone offline diagnostic scripts were added
+(`tools/diagnostics/kalman_tcp_accel_filter_prototype.py`,
+`tools/diagnostics/kalman_parallel_trend_prototype.py`), no production file touched.
+
+**Added, 2026-08-01 — SSH/rsync real-hardware log transfer**: `tools/pull_hardware_logs_ssh.sh`
+(run on westeros) / `tools/push_hardware_logs_ssh.sh` (run on thinkrobot) replace an earlier,
+never-configured rclone+Box-OAuth pair of scripts with a plain rsync-over-SSH transfer,
+reusing SSH access already proven to work between the two machines on the same subnet — no
+cloud account, no OAuth, nothing new to configure. Pulls/pushes only small text artifacts
+(`run_record.json`, `summary.json`, `trace.jsonl`/`supervisor_trace.jsonl`, `run_log.jsonl`/
+`.csv`), not video or other large binaries.
 
 Do-not-recreate (gravity/dynamics bugs, still relevant):
 - Do not tune gravity scale from single-joint probes; always test all 6 joints.
