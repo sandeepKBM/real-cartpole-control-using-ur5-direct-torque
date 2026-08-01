@@ -192,3 +192,23 @@ def test_classify_trend_edge_cases() -> None:
     assert _classify_trend([1.0, 1.0, 1.0, 1.0, 1.0, 1.0]) == "stable"
     assert _classify_trend([0.0, 0.0, 0.0, 5.0, 5.0, 5.0]) == "rising"
     assert _classify_trend([5.0, 5.0, 5.0, 0.0, 0.0, 0.0]) == "falling"
+
+
+def test_classify_trend_near_zero_noise_is_stable_not_rising() -> None:
+    """Regression for a real bug found 2026-08-01 via a Kalman-filtering
+    follow-up: a signal hovering near zero with no true trend (e.g.
+    y_drift_m/z_drift_m during a clean segment) used to get misclassified as
+    rising/falling almost every time, because the old relative-only deadband
+    collapses when the mean is near zero -- a tiny absolute noise wiggle is a
+    huge fraction of an already-tiny mean. Fixed via an added absolute
+    noise-floor deadband (2x the window's own std)."""
+    # A small, non-monotonic wiggle around zero -- no real drift, well
+    # within a plausible real RTDE position-noise floor (~1e-5 m).
+    noisy_near_zero = [1e-6, -2e-6, 3e-6, -1e-6, 2e-6, -3e-6]
+    assert _classify_trend(noisy_near_zero) == "stable"
+
+    # A genuine small-magnitude but real, monotonic drift (change well above
+    # the window's own noise floor) must still be classified correctly --
+    # the fix must not make the detector blind to real slow trends.
+    real_slow_drift = [-0.00301, -0.00302, -0.00303, -0.00336, -0.00338, -0.00339]
+    assert _classify_trend(real_slow_drift) == "falling"

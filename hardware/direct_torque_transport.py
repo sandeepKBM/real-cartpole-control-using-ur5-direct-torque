@@ -71,7 +71,18 @@ def _classify_trend(values: "list[float] | tuple[float, ...]", deadband_frac: fl
     window to the mean of the last third, with a small relative deadband for
     "stable". Deliberately not linear regression -- this only ever runs once,
     at trip time, so cost isn't the concern; simplicity/readability is (see
-    the module comment above)."""
+    the module comment above).
+
+    Two deadband conditions, either one is enough to call it "stable": the
+    original relative-to-mean check, plus an absolute one against the
+    window's own noise (std of all values). The relative-only check
+    collapses for a signal that legitimately hovers near zero with no real
+    trend (e.g. y_drift_m/z_drift_m during a clean segment) -- found
+    2026-08-01 via a Kalman-filtering follow-up investigation: under pure
+    noise with a near-zero mean, the relative check misclassified
+    rising/falling almost every time, since a tiny absolute noise fluctuation
+    is a huge fraction of an already-tiny mean. The absolute check catches
+    exactly that case without needing a per-channel hardcoded epsilon."""
     values = list(values)
     n = len(values)
     if n < 2:
@@ -79,11 +90,13 @@ def _classify_trend(values: "list[float] | tuple[float, ...]", deadband_frac: fl
     third = max(1, n // 3)
     first_mean = float(np.mean(values[:third]))
     last_mean = float(np.mean(values[-third:]))
+    change = last_mean - first_mean
     scale = max(abs(first_mean), abs(last_mean), 1e-9)
-    rel_change = (last_mean - first_mean) / scale
-    if abs(rel_change) < deadband_frac:
+    rel_change = change / scale
+    noise_floor = float(np.std(values))
+    if abs(rel_change) < deadband_frac or abs(change) < 2.0 * noise_floor:
         return "stable"
-    return "rising" if rel_change > 0.0 else "falling"
+    return "rising" if change > 0.0 else "falling"
 
 
 def _build_pre_trip_trend(
