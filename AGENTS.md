@@ -342,7 +342,18 @@ an MP4 or a bare exit code as success evidence — read the run record.
     pass either (same gap already logged for the static model), so it defers to its own §4
     real-calibration procedure rather than guessing. The `dt_s` plumbing fix above was a named
     prerequisite (plan §3.3) and is now landed, unblocking this work. Planning only — no code
-    written, no config changed. Related same-night survey,
+    written, no config changed. A follow-up, adversarially-verified literature pass
+    (`docs/status/literature_review_dynamics_and_sensor_noise_identification_2026-08-01.md`)
+    found real UR-series-specific precedent the original plan missed: Clochiatti et al.
+    (Robotica 2024) identify UR5e joint friction as viscous plus an **asymmetric** Coulomb term
+    keyed to mechanical power-flow direction through the harmonic drive (not just velocity sign,
+    unlike this repo's symmetric static/LuGre forms), jointly least-squares-fit with motor torque
+    constants from RTDE current logs — no torque sensor needed, same constraint this repo has.
+    Also: a learned probabilistic state-space friction model beat identified LuGre/GMS/Stribeck on
+    real KUKA data in held-out validation (Vantilborgh et al.) — real evidence that classical
+    dynamic-friction fits aren't clearly superior to a data-driven alternative, worth weighing
+    before investing real-lab calibration time in LuGre specifically over the asymmetric-Coulomb
+    variant or the residual-regression direction below. Related same-night survey,
     `docs/status/nonlinear_controller_research_2026-07-31.md`, ranks next steps for higher-order
     controller representations generally; its top pick (after finishing real-hardware validation
     of `friction_feedforward`, still outstanding above) is supervised residual-torque regression
