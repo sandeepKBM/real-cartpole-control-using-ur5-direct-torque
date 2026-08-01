@@ -1,0 +1,124 @@
+# config/ur5e_mujoco_torque_osc_tuned_wrist_orient_friction_ff.yaml with BOTH
+# lambda_diagonal_shaping and lambda_adaptive_regularization added on top (fields copied
+# verbatim from config/ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed_diag_adaptive_lambda.yaml).
+# All three flag groups (wrist_orientation_task + jacobian_singular_cond_max=1e18,
+# friction_feedforward, diagonal/adaptive lambda) are independently config-only additions to
+# an already-existing controller_core code path -- no new code, purely a new combination.
+#
+# Why (2026-08-01, real-hardware session): two consecutive real accel_duration_scurve trials
+# at the height_alpha=0.5 zero-degree pose (dx=-0.05m and dx=+0.05m target, wrist_orient_friction_ff
+# config) both tripped the TCP-acceleration guard, traced directly from trace.jsonl to the same
+# mechanism in both directions -- wrist_2 pinned at ~0 (the transport-pose singularity, present
+# at every height_alpha per hardware/poses.py::q_for_height_alpha, base-rotation-independent)
+# with jacobian_cond oscillating 4-10x cycle-to-cycle, while singular_scale/task_scale stayed
+# correctly pinned at 1.0 (the freeze mechanism is already disabled here, not the cause). -X
+# showed it fast via Y-drift+accel (tripped at t=1.28s, 8.5% of target achieved); +X showed it
+# slower via a late-onset orientation-error ramp (flat near 0 through t=0.9s, then 0.0013->0.022
+# rad by t=1.8s) that eventually also tripped the accel guard (t=1.836s, 35% of target achieved).
+# wrist_orient_friction_ff.yaml has neither lambda_diagonal_shaping nor
+# lambda_adaptive_regularization -- both are AGENTS.md sec 3's documented fixes for exactly this
+# class of Λ-conditioning-driven wrench/nullspace leak near a Jacobian singularity, landed
+# 2026-07-26, previously validated (zero regressions, sim only) but never combined with
+# friction_feedforward before this config, and never real-hardware tested with scurve.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+    kp_rot_wrist: 0.0
+    kd_rot_wrist: 10.0
+  wrist_orientation_task: true
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  lambda_diagonal_shaping: true
+  lambda_adaptive_regularization: true
+  lambda_regularization_far: 1.0e-4
+  lambda_cond_low: 1.0e4
+  lambda_cond_high: 1.0e8
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  friction_feedforward: true
+  friction_ff_qd_deadband: 0.05
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 5.0
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
