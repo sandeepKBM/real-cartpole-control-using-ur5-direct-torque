@@ -8,7 +8,7 @@ rest joint posture. Pure numpy; no simulator imports.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -202,6 +202,78 @@ class CartesianImpedanceConfig:
     # config/ur5e_mujoco_torque_osc_tuned_friction_ff.yaml's header for the
     # measured before/after numbers.
     friction_ff_qd_deadband: float = 0.05
+    # LuGre dynamic friction feedforward -- opt-in alternative to the static
+    # tanh/viscous model above (added 2026-08-01, see
+    # docs/hardware/LUGRE_FRICTION_MODEL_PLAN.md for the full design and its
+    # own real motivation). Real hardware the same night found the static
+    # model does NOT close a stick-slip breakaway failure (guard trip within
+    # ~0.2-0.4s, ~0.05-0.09% of commanded displacement achieved) -- if
+    # anything the trip happened slightly *earlier* with friction_feedforward
+    # active. This makes sense: tanh(qd/deadband) is a pure function of
+    # instantaneous qd, so it contributes almost nothing right at the
+    # breakaway moment (qd~=0) and has no memory of "how long has this joint
+    # been stuck." LuGre's bristle-deflection state z is built to fill
+    # exactly that gap.
+    #
+    # `friction_model` is nested under `friction_feedforward` (only consulted
+    # when that bool is True) rather than a parallel flag, so
+    # `friction_feedforward: false` unambiguously means "no friction
+    # feedforward at all" -- matching every other flag in this file's own
+    # pattern of one boolean gating one behavior addition. Default "static"
+    # means zero behavior change for every existing config.
+    friction_model: Literal["static", "lugre"] = "static"
+    # Per-joint LuGre parameters (used only when friction_model == "lugre").
+    # No authoritative UR5e-class LuGre parameter table exists (confirmed via
+    # a literature pass, see the plan doc sec 1) -- these are placeholders,
+    # not a calibrated fit, following the same "reasonable engineering
+    # estimate, not a calibrated fit" discipline already used for the static
+    # model's own friction_ff_coulomb_nm/friction_ff_viscous defaults.
+    #
+    # lugre_fc_nm mirrors friction_ff_coulomb_nm exactly (same physical
+    # quantity: the Coulomb/kinetic friction floor). lugre_sigma2_nm_s_per_rad
+    # mirrors friction_ff_viscous exactly (same role: viscous coefficient).
+    # lugre_fs_nm (breakaway peak, must be > Fc) is set to 1.3x Fc per joint
+    # -- a modest, explicitly-a-guess multiplier documented in
+    # config/ur5e_mujoco_torque_osc_tuned_friction_ff_lugre.yaml's header.
+    #
+    # lugre_sigma0_nm_per_rad, lugre_sigma1_nm_s_per_rad, and lugre_vs_radps
+    # have no static-model analog. Sizing them requires reading this file's
+    # own _lugre_step(): note the ODE below is written exactly as specified
+    # by the plan (`dz/dt = qd - |qd|*z/g(qd)`, `g` in Nm, NOT divided by
+    # sigma0 the way textbook LuGre normalizes it) -- under that literal
+    # form, z is bounded within +/-g(qd) (i.e. roughly +/-Fs at low speed)
+    # regardless of sigma0, so sigma0 alone sets the torque scale of
+    # sigma0*z. sigma0=1.0 keeps that steady-state torque comparable in
+    # magnitude to Fc/Fs themselves (a sane, directly comparable anchor to
+    # the static model, verified by a standalone numeric check before
+    # picking this value -- sigma0=100 would produce a ~15 Nm steady-state
+    # term from the same z trajectory, an unphysical jump). sigma1 (bristle
+    # micro-damping, shapes breakaway-transient sharpness via the dz/dt term)
+    # is set to 2x the matching sigma2/viscous value -- a modest, bounded
+    # addition on top of the dominant sigma0*z term, not independently
+    # identified (the plan's own sec 4 flags sigma1 as "typically needs
+    # either a dedicated stick-slip test or left at a small value and tuned
+    # qualitatively," unchanged here -- no such tuning pass was run).
+    # vs=0.02 rad/s sits in the plan's own cited Stribeck-velocity sweep
+    # range (0.01-0.2 rad/s, plan sec 4 item 2).
+    lugre_sigma0_nm_per_rad: np.ndarray = field(
+        default_factory=lambda: np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float64)
+    )
+    lugre_sigma1_nm_s_per_rad: np.ndarray = field(
+        default_factory=lambda: np.array([0.8, 0.8, 0.8, 0.3, 0.3, 0.3], dtype=np.float64)
+    )
+    lugre_sigma2_nm_s_per_rad: np.ndarray = field(
+        default_factory=lambda: np.array([0.4, 0.4, 0.4, 0.15, 0.15, 0.15], dtype=np.float64)
+    )
+    lugre_fc_nm: np.ndarray = field(
+        default_factory=lambda: np.array([5.0, 5.0, 5.0, 1.0, 1.0, 1.0], dtype=np.float64)
+    )
+    lugre_fs_nm: np.ndarray = field(
+        default_factory=lambda: np.array([6.5, 6.5, 6.5, 1.3, 1.3, 1.3], dtype=np.float64)
+    )
+    lugre_vs_radps: np.ndarray = field(
+        default_factory=lambda: np.array([0.02, 0.02, 0.02, 0.02, 0.02, 0.02], dtype=np.float64)
+    )
     # Y-axis integral action (default off = historical behavior: pure kp_y/
     # kd_y PD, ki_y implicitly 0). Added 2026-08-01 to address the -45 deg
     # base-rotation Y-drift failure (AGENTS.md sec 3): diagnosis (see
@@ -308,6 +380,57 @@ class CartesianImpedanceConfig:
                 else np.array([0.4, 0.4, 0.4, 0.15, 0.15, 0.15], dtype=np.float64)
             ),
             friction_ff_qd_deadband=float(ctrl.get("friction_ff_qd_deadband", 0.05)),
+            friction_model=(
+                "lugre" if str(ctrl.get("friction_model", "static")).lower() == "lugre" else "static"
+            ),
+            lugre_sigma0_nm_per_rad=(
+                np.array(
+                    [float(ctrl["lugre_sigma0_nm_per_rad"][name]) for name in JOINT_NAME_ORDER],
+                    dtype=np.float64,
+                )
+                if "lugre_sigma0_nm_per_rad" in ctrl
+                else np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float64)
+            ),
+            lugre_sigma1_nm_s_per_rad=(
+                np.array(
+                    [float(ctrl["lugre_sigma1_nm_s_per_rad"][name]) for name in JOINT_NAME_ORDER],
+                    dtype=np.float64,
+                )
+                if "lugre_sigma1_nm_s_per_rad" in ctrl
+                else np.array([0.8, 0.8, 0.8, 0.3, 0.3, 0.3], dtype=np.float64)
+            ),
+            lugre_sigma2_nm_s_per_rad=(
+                np.array(
+                    [float(ctrl["lugre_sigma2_nm_s_per_rad"][name]) for name in JOINT_NAME_ORDER],
+                    dtype=np.float64,
+                )
+                if "lugre_sigma2_nm_s_per_rad" in ctrl
+                else np.array([0.4, 0.4, 0.4, 0.15, 0.15, 0.15], dtype=np.float64)
+            ),
+            lugre_fc_nm=(
+                np.array(
+                    [float(ctrl["lugre_fc_nm"][name]) for name in JOINT_NAME_ORDER],
+                    dtype=np.float64,
+                )
+                if "lugre_fc_nm" in ctrl
+                else np.array([5.0, 5.0, 5.0, 1.0, 1.0, 1.0], dtype=np.float64)
+            ),
+            lugre_fs_nm=(
+                np.array(
+                    [float(ctrl["lugre_fs_nm"][name]) for name in JOINT_NAME_ORDER],
+                    dtype=np.float64,
+                )
+                if "lugre_fs_nm" in ctrl
+                else np.array([6.5, 6.5, 6.5, 1.3, 1.3, 1.3], dtype=np.float64)
+            ),
+            lugre_vs_radps=(
+                np.array(
+                    [float(ctrl["lugre_vs_radps"][name]) for name in JOINT_NAME_ORDER],
+                    dtype=np.float64,
+                )
+                if "lugre_vs_radps" in ctrl
+                else np.array([0.02, 0.02, 0.02, 0.02, 0.02, 0.02], dtype=np.float64)
+            ),
             y_integral_action=bool(ctrl.get("y_integral_action", False)),
             ki_y=float(gains.get("ki_y", 0.0)),
             y_integral_limit_m_s=float(ctrl.get("y_integral_limit_m_s", 0.02)),
@@ -347,6 +470,8 @@ class CartesianImpedanceOutput:
     posture_reanchored: bool = False
     wrist_orientation_task_active: bool = False
     friction_feedforward_active: bool = False
+    friction_model_used: str = "static"
+    friction_z: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
     y_integral_action_active: bool = False
     y_integral_value: float = 0.0
 
@@ -379,6 +504,13 @@ class XAxisCartesianImpedanceController:
         self._posture_reanchored = False
         self._x_des_at_anchor = 0.0
         self._y_integral = 0.0
+        # LuGre bristle-deflection state, one scalar per joint. Genuinely
+        # stateful (integrated over time), same lifecycle class as
+        # _q_rest/_quat0/_y_integral: zeroed here and in reset_from_state(),
+        # but deliberately NOT touched by set_gains() -- a gain change must
+        # never wipe accumulated stiction state mid-episode (matches
+        # set_gains()'s own documented contract).
+        self._friction_z = np.zeros(6, dtype=np.float64)
 
     def reset_from_state(self, state: dict[str, Any]) -> None:
         st = as_impedance_robot_state(state)
@@ -392,6 +524,7 @@ class XAxisCartesianImpedanceController:
         self._posture_reanchored = False
         self._x_des_at_anchor = float(np.asarray(st["ee_pos"], dtype=np.float64).reshape(3)[0])
         self._y_integral = 0.0
+        self._friction_z = np.zeros(6, dtype=np.float64)
         self._initialized = True
 
     @property
@@ -436,6 +569,37 @@ class XAxisCartesianImpedanceController:
         log_frac = (np.log(cond) - np.log(cond_low)) / (np.log(cond_high) - np.log(cond_low))
         log_frac = float(np.clip(log_frac, 0.0, 1.0))
         return eps_far + log_frac * (eps_near - eps_far)
+
+    def _lugre_step(self, qd: np.ndarray, dt: float) -> np.ndarray:
+        """One explicit-Euler update of the LuGre bristle-deflection state.
+
+        Implements the plan's equations exactly
+        (docs/hardware/LUGRE_FRICTION_MODEL_PLAN.md sec 1/3.2):
+
+            dz/dt = qd - |qd| * z / g(qd)
+            tau_friction = sigma0 * z + sigma1 * dz/dt + sigma2 * qd
+            g(qd) = Fc + (Fs - Fc) * exp(-(qd/vs)^2)
+
+        Mutates ``self._friction_z`` in place (persistent per-joint state,
+        see reset_from_state()/__init__()). Numerical-stability note (plan
+        sec 3.2): explicit Euler on this ODE is only conditionally stable;
+        at 500 Hz (dt=0.002s) with physically realistic qd this is expected
+        to be fine, but the sim-side validation sweep must check for a
+        growing, non-decaying z trace at hold, or a |qd| guard trip that
+        wasn't there under the static model -- not special-cased here
+        speculatively.
+        """
+        sigma0 = np.asarray(self.cfg.lugre_sigma0_nm_per_rad, dtype=np.float64).reshape(6)
+        sigma1 = np.asarray(self.cfg.lugre_sigma1_nm_s_per_rad, dtype=np.float64).reshape(6)
+        sigma2 = np.asarray(self.cfg.lugre_sigma2_nm_s_per_rad, dtype=np.float64).reshape(6)
+        fc = np.asarray(self.cfg.lugre_fc_nm, dtype=np.float64).reshape(6)
+        fs = np.asarray(self.cfg.lugre_fs_nm, dtype=np.float64).reshape(6)
+        vs = np.maximum(np.asarray(self.cfg.lugre_vs_radps, dtype=np.float64).reshape(6), 1e-9)
+        g = fc + (fs - fc) * np.exp(-((qd / vs) ** 2))
+        g_safe = np.maximum(g, 1e-9)
+        z_dot = qd - np.abs(qd) * self._friction_z / g_safe
+        self._friction_z = self._friction_z + dt * z_dot
+        return sigma0 * self._friction_z + sigma1 * z_dot + sigma2 * qd
 
     def _backtrack_task_scale(
         self,
@@ -629,12 +793,23 @@ class XAxisCartesianImpedanceController:
             tau_orient_wrist = (J_rot.T @ m_wrist) * WRIST_ORIENTATION_MASK
 
         use_friction_feedforward = bool(self.cfg.friction_feedforward)
+        friction_model_used = str(self.cfg.friction_model) if use_friction_feedforward else "static"
         tau_friction_ff = np.zeros(6, dtype=np.float64)
         if use_friction_feedforward:
-            coulomb = np.asarray(self.cfg.friction_ff_coulomb_nm, dtype=np.float64).reshape(6)
-            viscous = np.asarray(self.cfg.friction_ff_viscous, dtype=np.float64).reshape(6)
-            deadband = max(float(self.cfg.friction_ff_qd_deadband), 1e-9)
-            tau_friction_ff = coulomb * np.tanh(qd / deadband) + viscous * qd
+            if self.cfg.friction_model == "lugre":
+                # dt_s is optional on the state contract (AGENTS.md sec 2);
+                # fall back to the 500 Hz direct_torque loop period, this
+                # controller's primary real-hardware cadence, matching the
+                # same fallback already used by y_integral_action above.
+                dt = float(st.get("dt_s", 1.0 / 500.0))
+                if not np.isfinite(dt) or dt <= 0.0:
+                    dt = 1.0 / 500.0
+                tau_friction_ff = self._lugre_step(qd, dt)
+            else:
+                coulomb = np.asarray(self.cfg.friction_ff_coulomb_nm, dtype=np.float64).reshape(6)
+                viscous = np.asarray(self.cfg.friction_ff_viscous, dtype=np.float64).reshape(6)
+                deadband = max(float(self.cfg.friction_ff_qd_deadband), 1e-9)
+                tau_friction_ff = coulomb * np.tanh(qd / deadband) + viscous * qd
 
         g = np.zeros(6, dtype=np.float64)
         if "gravity_torque" in st and st["gravity_torque"] is not None:
@@ -697,6 +872,8 @@ class XAxisCartesianImpedanceController:
             posture_reanchored=bool(self._posture_reanchored),
             wrist_orientation_task_active=use_wrist_orientation_task,
             friction_feedforward_active=use_friction_feedforward,
+            friction_model_used=friction_model_used,
+            friction_z=self._friction_z.copy(),
             y_integral_action_active=use_y_integral,
             y_integral_value=float(self._y_integral),
         )

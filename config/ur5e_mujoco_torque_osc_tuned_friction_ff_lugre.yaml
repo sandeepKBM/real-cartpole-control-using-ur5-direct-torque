@@ -1,0 +1,183 @@
+# config/ur5e_mujoco_torque_osc_tuned_friction_ff.yaml (unmodified) with friction_model: lugre
+# instead of the static tanh/viscous law (controller_core/x_axis_cartesian_impedance.py's
+# CartesianImpedanceConfig -- see docs/hardware/LUGRE_FRICTION_MODEL_PLAN.md for the full design).
+#
+# Why: real UR5e hardware (2026-08-01) hit a stick-slip breakaway failure that the static
+# friction_feedforward model does NOT close -- three consecutive real attempts (both
+# ..._wrist_orient_fixed.yaml and ..._wrist_orient_friction_ff.yaml, dx=-0.05m and dx=-0.20m)
+# tripped the TCP-acceleration guard within ~0.2-0.4s, achieving only ~0.05-0.09% of commanded
+# displacement, with torque building steadily then a genuine acceleration transient right as the
+# arm broke free -- a classic stick-slip breakaway signature. friction_feedforward (static) did
+# NOT help; if anything the trip happened slightly earlier with it active. This makes sense:
+# tanh(qd/deadband) is a pure function of instantaneous qd, so it contributes almost nothing at
+# the breakaway moment itself (qd~=0) -- it has no memory of "how long has this joint been stuck."
+# LuGre's bristle-deflection state z is built to fill exactly that gap.
+#
+# Placeholder parameter values, reasoning (no authoritative UR5e-class LuGre table exists in the
+# literature, confirmed by the plan doc's own search pass -- these are order-of-magnitude
+# engineering estimates, NOT a calibrated fit, same discipline already used for the static
+# model's own friction_ff_coulomb_nm/friction_ff_viscous defaults):
+#   - lugre_fc_nm: identical to friction_ff_coulomb_nm (same physical quantity -- the Coulomb/
+#     kinetic friction floor the Stribeck curve settles to).
+#   - lugre_sigma2_nm_s_per_rad: identical to friction_ff_viscous (same role: viscous coefficient).
+#   - lugre_fs_nm: 1.3x lugre_fc_nm per joint -- a modest, explicitly-a-guess breakaway multiplier
+#     (Fs must be > Fc; 1.3-1.5x was suggested as a defensible starting point, 1.3x chosen here).
+#   - lugre_sigma0_nm_per_rad: 1.0 uniformly. This implementation follows the plan's literal ODE
+#     (dz/dt = qd - |qd|*z/g(qd), g in Nm -- NOT divided by sigma0 the way textbook LuGre
+#     normalizes it), under which z is bounded within roughly +/-g(qd) (i.e. +/-Fs at low speed)
+#     REGARDLESS of sigma0 -- sigma0 alone then sets the resulting torque scale of sigma0*z. A
+#     standalone numeric check (before picking this value) confirmed sigma0=1.0 keeps that
+#     steady-state torque comparable in magnitude to Fc/Fs themselves (the same physical scale as
+#     the static model); sigma0=100 on the same z trajectory would produce an unphysical ~15 Nm
+#     jump. This deviates from "typical published large sigma0" literature values on purpose --
+#     those apply to the textbook-normalized form, not this plan's literal one.
+#   - lugre_sigma1_nm_s_per_rad: 2x the matching sigma2/viscous value -- a modest, bounded addition
+#     on top of the dominant sigma0*z term, not independently identified (plan sec 4: sigma1
+#     "typically needs either a dedicated stick-slip test or is left at a small value and tuned
+#     qualitatively" -- no such tuning pass was run here).
+#   - lugre_vs_radps: 0.02 rad/s, within the plan's own cited Stribeck-velocity sweep range
+#     (0.01-0.2 rad/s, plan sec 4 item 2).
+#
+# NOT YET VALIDATED beyond the sim smoke test documented in
+# docs/status/lugre_friction_feedforward_2026-08-01.md as of authoring -- and NOT real-hardware
+# ready even if that smoke test looks clean (no real parameter calibration has happened, plan
+# sec 4; sim can only validate "does this feedforward degrade tracking/safety against sim's
+# static-friction plant," never "does it correctly cancel dynamic friction," per the plan's own
+# sec 5 non-goal). Do not run this on real hardware without a separate, deliberate decision.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  friction_feedforward: true
+  friction_model: "lugre"
+  friction_ff_qd_deadband: 0.05
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 5.0
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  lugre_sigma0_nm_per_rad:
+    shoulder_pan_joint: 1.0
+    shoulder_lift_joint: 1.0
+    elbow_joint: 1.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  lugre_sigma1_nm_s_per_rad:
+    shoulder_pan_joint: 0.8
+    shoulder_lift_joint: 0.8
+    elbow_joint: 0.8
+    wrist_1_joint: 0.3
+    wrist_2_joint: 0.3
+    wrist_3_joint: 0.3
+  lugre_sigma2_nm_s_per_rad:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  lugre_fc_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 5.0
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  lugre_fs_nm:
+    shoulder_pan_joint: 6.5
+    shoulder_lift_joint: 6.5
+    elbow_joint: 6.5
+    wrist_1_joint: 1.3
+    wrist_2_joint: 1.3
+    wrist_3_joint: 1.3
+  lugre_vs_radps:
+    shoulder_pan_joint: 0.02
+    shoulder_lift_joint: 0.02
+    elbow_joint: 0.02
+    wrist_1_joint: 0.02
+    wrist_2_joint: 0.02
+    wrist_3_joint: 0.02
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
