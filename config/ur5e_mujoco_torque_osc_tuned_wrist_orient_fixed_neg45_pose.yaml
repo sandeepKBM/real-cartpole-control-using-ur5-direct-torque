@@ -1,0 +1,121 @@
+# wrist_orient_fixed baseline, with max_abs_orthogonal_drift_m raised
+# specifically for the -45deg base-rotation clearance pose
+# (hardware.poses.HEIGHT_ALPHA_0_5_CLEARANCE_Q). Use ONLY when running the
+# transport from that pose -- this is not a general-purpose relaxation and
+# must not be used as the default config for the un-rotated pose or any
+# other pose.
+#
+# Why: docs/status/neg45_y_axis_diagnosis_and_fix_2026-08-01.md found, after
+# instrumenting the actual per-cycle trace, that the Y-drift trip at this
+# pose is NOT geometric backtracking (task_backtrack_scale==1.0 throughout),
+# NOT torque saturation (never exceeds ~4.7% of headroom), and NOT fixable
+# by any P/D/I gain on the Y axis without forcing a genuine 45-55%
+# steady-state X-tracking failure instead -- a real structural authority
+# trade-off, not a tuning gap. Separately, with the guard disabled purely to
+# observe the natural trajectory, the Y excursion was shown to be a bounded,
+# roughly-linear-in-dx, self-correcting TRANSIENT, not an instability:
+#
+#   dx (m)  move-phase max|Y-drift| (m)
+#   0.01    0.0059
+#   0.02    0.0135
+#   0.03    0.0217-0.0234
+#   0.04    0.0299-0.0300  (right at the old 0.03m threshold)
+#   0.06    0.0423 (peak, natural/unguarded) -> decays to 0.0058 by end of hold
+#
+# max_abs_orthogonal_drift_m raised from 0.03 to 0.05 -- real margin (~18%)
+# above the largest VALIDATED peak (0.0423m at dx=0.06m), not an arbitrary
+# round number. Deliberately NOT raised further: at the observed growth
+# rate, a genuinely larger, unvalidated excursion (e.g. dx=0.10m+) would
+# still exceed 0.05m and correctly trip -- this is a bounded, evidence-scoped
+# increase, not a blanket loosening of the guard. controller_core/safety.py's
+# own class default (0.03) is UNCHANGED; this override lives only in this
+# one named config, applied only when the caller also selects this pose.
+#
+# Explicitly NOT validated: (1) any displacement beyond dx=0.06m at this
+# pose -- do not assume this config makes larger moves safe, the sweep below
+# will still show large_displacements failing for dx>0.06m as expected;
+# (2) real hardware -- the real robot's dose-response at this exact pose is
+# already documented to differ from sim in an unexplained way (AGENTS.md:
+# real trip at dx=0.20m vs sim onset dx=0.05-0.06m), so this must be
+# re-validated on the real arm, starting small, before being trusted there.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+    kp_rot_wrist: 0.0
+    kd_rot_wrist: 10.0
+  wrist_orientation_task: true
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.05
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
