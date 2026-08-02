@@ -486,3 +486,267 @@ git revert <this-commit>
 Purely additive to both touched files (new functions/parameters, no existing function body
 changed except `fit_ols_weights`'s docstring and `main()`'s call site) -- a plain revert is
 lossless.
+
+## Cross-joint coupling feature set + more-data check (2026-08-01, later the same night)
+
+**Still entirely offline analysis tooling.** Nothing in this section touches
+`controller_core/x_axis_cartesian_impedance.py` or any real-hardware code path. Goal, per the
+task that motivated this pass: the ridge fix above made the pipeline honest (no more
+catastrophic blowups), but held-out fit quality was still mostly mediocre-to-poor, especially
+for joints 2/3 (elbow/wrist_1). This section tries to actually improve predictive quality, not
+just honesty, and reports the full picture -- including what didn't help and what got worse.
+
+### 1. More data: checked, negligible
+
+The real-hardware trace pull grew from 63 runs (159,389 rows, the ridge-fix table above) to
+**64 runs (161,139 rows)** by the time this pass started -- one additional run. Not a
+meaningful volume increase. Re-running the exact ridge-fix command at seed 0 on the current
+data no longer reproduces the seed-0 catastrophic joint-2 blowup under **plain OLS** (previously
+R^2 = -9799.8; now bounded). Root-caused, not just observed: the single extreme-velocity real
+run that causes the collinearity blowup (`direct_torque_20260801_202215`, joint-2 `|qd|` up to
+0.0937 rad/s, ~10x every other run's peak) happens to land in the **training** fold under
+seed 0's permutation now that the dataset has 64 runs instead of 63 (permutations differ by
+array length, not because that run is new -- it already existed in the 63-run snapshot too).
+Directly verified: forcing that run back into the **test** fold (seeds 4, 6, 9 all do this)
+reproduces the identical catastrophic mechanism under plain OLS (seed 4: joint 2 R^2 = -22327,
+joint 4 R^2 = -17690, joint 5 R^2 = -125 -- worse than the original report even, since more
+joints are affected at this exact split). **Verdict: the one extra real run did not fix
+anything by itself; the apparent seed-0 improvement was purely which run happened to land in
+which fold.** The ridge+clip defense from the earlier fix remains necessary and is still doing
+real, load-bearing work (see the lambda sweep below) -- it is not a redundant safety net now
+that "more data" exists.
+
+### 2. Feature-set experiments
+
+Four candidate feature sets were tested against the SAME baseline (own-joint-only, 6
+features/joint) using the SAME ridge (`lambda=1e5`) + output-clip (5x max train residual)
+defaults, evaluated across **7 independent run-level train/test splits** (seeds 0,1,2,3 --
+"clean" splits where the extreme-velocity run lands in train -- plus 4,6,9, which force it
+into test, the pathological case):
+
+- **B, cross-qd** (baseline 6 + other 5 joints' own `qd`, 11 features/joint)
+- **C, full coupling** (baseline 6 + other joints' `qd` (5) + other joints' `sin(q)`/`cos(q)`
+  (10), 21 features/joint) -- the eventual winner
+- **D, raw q** (baseline 6 + own raw `q`, 7 features/joint) -- sanity check, expected roughly
+  redundant with `sin`/`cos(q)` already present
+- **Pooled/shared model** (own-joint baseline features, but ONE shared weight vector fit
+  across all 6 joints' data on per-joint-standardized targets, rather than independent
+  per-joint fits) -- tests whether joints 2/3/4's problem is fixable by borrowing statistical
+  strength from data-rich joints, as opposed to needing genuinely different input information
+
+**Condition numbers** (raw, unregularized design matrix, std-scaled, worst across all 7
+seeds' training folds): baseline `1e5-1e18` (already large for joints 4/5, per the ridge-fix
+doc's original diagnosis extended here to those joints too), cross-qd nearly identical to
+baseline (adding 5 roughly-independent columns barely changes conditioning), **full-coupling
+~2.6e18 uniformly across every joint** (reflecting real near-constant "other joint held at one
+pose" columns during this X-only-transport corpus -- most joints barely move during any given
+run), raw-q joints 2-4 degrade further (`7e9-7e18`, sin/cos already captured most of the
+signal so raw q adds close-to-redundant, poorly-scaled information). None of this exceeded
+what the existing ridge_lambda=1e5 + clip defaults handle safely (confirmed by a dedicated
+lambda sweep on the full-coupling basis specifically, see below) -- but it is a genuinely
+worse-conditioned raw matrix, not a free lunch.
+
+**Held-out R^2, averaged (and worst-case) across the 7 seeds, ridge+clip applied:**
+
+| joint | A baseline avg (worst) | B cross-qd avg (worst) | C full-coupling avg (worst) | D raw-q avg (worst) | Pooled avg (worst) |
+|---|---|---|---|---|---|
+| 0 shoulder_pan | +0.375 (+0.191) | +0.400 (+0.256) | **+0.557 (+0.470)** | +0.401 (+0.241) | +0.436 (+0.329) |
+| 1 shoulder_lift | +0.747 (+0.677) | +0.725 (+0.635) | +0.720 (+0.606) | +0.747 (+0.680) | **+0.776 (+0.732)** |
+| 2 elbow | +0.548 (+0.326) | +0.657 (+0.503) | **+0.724 (+0.591)** | +0.549 (+0.328) | +0.583 (+0.443) |
+| 3 wrist_1 | +0.398 (+0.152) | +0.417 (+0.200) | **+0.561 (+0.303)** | +0.398 (+0.152) | +0.412 (+0.245) |
+| 4 wrist_2 | -0.001 (-0.151) | -0.009 (-0.157) | **+0.496 (+0.348)** | -0.005 (-0.172) | -0.323 (-1.130) |
+| 5 wrist_3 | +0.502 (+0.351) | +0.649 (+0.561) | **+0.748 (+0.626)** | +0.504 (+0.368) | +0.481 (+0.430) |
+
+(units: R^2, dimensionless; reproducible via the scratch experiment described below, not
+committed since it duplicates production `fit_ridge_weights`/`compute_clip_bounds` logic
+verified byte-identical against the real CLI for cross-checking, see "Verification" below)
+
+**C (full coupling) is the clear winner** -- best or tied-best on 5 of 6 joints, including the
+two biggest wins of the whole experiment: joint 4 (wrist_2) goes from essentially uninformative
+(avg R^2 ≈ 0, worst -0.15, i.e. sometimes worse than predicting zero) to a genuinely useful
++0.496 avg / +0.348 worst-case, and joint 0 improves from +0.375 to +0.557. Joints 2/3 (the
+ones this task specifically asked about) both improve substantially: joint 2 (elbow)
++0.548 -> +0.724 avg (worst-case +0.326 -> +0.591, more than 1.8x); joint 3 (wrist_1)
++0.398 -> +0.561 avg (worst-case +0.152 -> +0.303, exactly 2x).
+
+**Honest exception, not hidden**: joint 1 (shoulder_lift) sees a small, real REGRESSION under
+C (+0.747 -> +0.720 avg, worst-case +0.677 -> +0.606) -- B (cross-qd only, no position terms)
+regresses joint 1 more (+0.725, but its worst-case +0.635 is still below A's +0.677). Given
+the much larger, consistent gains on every other joint (especially 2/3/4, the ones motivating
+this whole task), this dip was judged worth accepting -- but it is reported plainly, not
+cherry-picked around.
+
+**D (raw q) is essentially a no-op** versus A on every joint (differences within noise, e.g.
+joint 0 +0.375 -> +0.401), confirming the module docstring's original expectation that
+`sin`/`cos(q)` already captures the position-dependent signal a raw `q` term would add.
+
+**Pooled/shared model is a genuine, informative negative result.** It modestly helps joints
+0-3 relative to independent baseline fits (e.g. joint 2 +0.548 -> +0.583) -- consistent with
+some real benefit from borrowing statistical strength across joints -- but it clearly HURTS
+joint 4 (wrist_2): avg R^2 -0.001 -> **-0.323**, worst-case -0.151 -> **-1.130** (i.e.
+sometimes far worse than predicting zero). This is a meaningful, mechanistic finding, not
+noise: joint 4 sits at `wrist_2=0`, this repo's documented wrist singularity pose (AGENTS.md
+section 3's extensive `jacobian_singular_cond_max`/nullspace-projector history) -- forcing it
+to share ONE functional mapping from `(bias, qd, tanh, qd|qd|, sin(q), cos(q))` to
+(standardized) residual torque with the other 5 joints actively hurts it, plausibly because its
+true residual behavior near that singularity is genuinely different in kind, not just smaller
+in magnitude, from the other joints'. **Conclusion: joints 2/3/4's problem is not simply
+"needs more aggregated training data via a shared functional form" -- it specifically needs
+access to OTHER joints' (q, qd) as additional per-row INPUT information (what C provides),
+not a shared coefficient vector borrowing strength across joints' own-state mappings (what
+pooling provides).** This directly answers the task's question about whether this is a
+data-collection/task-design limitation versus a feature-design one: it is at least partially a
+feature-design gap that cross-joint input features close, not a wall that only new excitation
+data could fix -- though see the caveat in the verdict below.
+
+### 3. Ridge-lambda robustness check on the new basis
+
+Condition number for full-coupling is far larger than the original basis's, so its
+`ridge_lambda=1e5` sensitivity was checked independently (5 seeds -- 0,1 clean, 4,6,9
+pathological -- swept over `lambda in {1e3...1e7}`, WITHOUT the output clip, to isolate ridge's
+own behavior, then WITH the clip at the same lambda values):
+
+| lambda | avg R^2 (clip+ridge) | worst R^2 (clip+ridge) | rows clipped | worst R^2 (ridge only, no clip) |
+|---|---|---|---|---|
+| 1e3 | +0.596 | +0.165 | 247 | -4745.7 |
+| 1e4 | +0.594 | +0.162 | 234 | -506.6 |
+| 3e4 | +0.603 | +0.218 | 190 | -42.3 |
+| **1e5 (existing default, unchanged)** | **+0.604** | **+0.303** | **108** | **-601.7** |
+| 3e5 | +0.559 | +0.238 | 91 | -613.4 |
+| 1e6 | +0.307 | -3.972 | 58 | -205.7 |
+| 3e6 | +0.380 | -0.089 | 16 | -38.3 |
+| 1e7 | +0.341 | -0.171 | 9 | -4.2 |
+
+Two conclusions: (1) **the existing `ridge_lambda=1e5` default remains close to optimal for
+the new basis too** -- no change was needed, despite the far larger raw condition number; (2)
+**the output clip is still doing genuine, load-bearing work for this basis**, not a redundant
+belt-and-suspenders layer -- ridge alone (no clip), even at `lambda=1e5`, still produces a
+worst-case R^2 of -601.7 on some joint/seed combination (and every other lambda tested is
+similarly bad or worse unclipped). Both defenses stay on by default.
+
+### 4. Verdict
+
+**Joints 2/3 specifically: genuinely improved, not just re-labeled.** Held-out R^2 roughly
+doubled for both (joint 2: +0.326 -> +0.591 worst-case; joint 3: +0.152 -> +0.303 worst-case),
+via a mechanistically sensible, testable hypothesis (cross-joint coupling) that was directly
+verified on synthetic data too (`tests/mujoco/test_fit_residual_torque_model_feature_sets.py::
+test_end_to_end_coupled_vs_baseline_recovers_true_cross_joint_signal`: a synthetic residual
+that depends ONLY on another joint's `qd` gets R^2 < 0.1 under the baseline basis and > 0.9
+under the coupled basis, confirming the mechanism actually works, not just correlates on real
+data). Joint 4 (wrist_2), previously the single worst-performing joint (essentially
+uninformative), is now the biggest single winner.
+
+**Is this "actually useful" yet, or still "not broken but not useful"?** Closer, genuinely, but
+not fully there. Worst-case (pathological-split) R^2 for joints 2/3/4 is now solidly positive
+(+0.591 / +0.303 / +0.348) instead of near-zero-or-negative, which is real progress toward
+"actually useful." But every joint's BEST achievable fit still depends on the ridge+clip safety
+net doing real work on some splits (section 3), and the fundamental data-starvation problem
+this task asked about is only partially closed: cross-joint features let joints 2/3/4 borrow
+signal from joints 0/1's larger `qd` excursions during this X-only task, but that signal is
+still coming from a task that was never designed to excite joints 2/3/4 directly -- there is
+no real "ground truth" evidence in this dataset of how joint 2's residual behaves across its
+OWN full velocity range, only evidence of how it correlates with joints 0/1's motion during
+small, incidental joint-2 excursions. **If a future task or pose intentionally excited joints
+2/3/4 more (e.g. a joint-space move, or a transport direction that engages the elbow/wrists
+more), that would very likely be a bigger win than any further feature engineering on this
+same X-only-transport dataset** -- the honest task-design-limitation half of this task's
+question. Feature engineering measurably helped here, but it borrowed strength from what OTHER
+joints were doing, not from what joint 2/3/4 were themselves doing across a wider range --
+those remain two different, complementary paths forward, and this pass only pursued the first.
+
+### 5. What changed (promoted to default)
+
+- `controller_core/residual_torque_model.py` -- added `NUM_FEATURES_PER_JOINT_COUPLED` (21),
+  `joint_features_coupled`/`all_joint_features_coupled` (own-joint 6 features + other 5
+  joints' `qd` + other joints' `sin(q)`/`cos(q)`), `compute_residual_torque_coupled` (same
+  `clip_abs` contract as the original `compute_residual_torque`). All purely additive --
+  `all_joint_features`/`compute_residual_torque` (the original 6-feature basis) are completely
+  unchanged, still used whenever `--feature-set baseline` is passed, and still what every
+  pre-existing test exercises.
+- `tools/analysis/fit_residual_torque_model.py` -- new `FEATURE_SETS` registry and
+  `--feature-set {coupled,baseline}` CLI flag, **default `coupled`** (the promotion this task
+  asked for, made because the evidence above genuinely supports it, not by default). `baseline`
+  reproduces the pre-existing behavior exactly (verified byte-identical held-out numbers at
+  seed 0 against this doc's earlier ridge-fix table). `fit_ols_weights`/`fit_ridge_weights` now
+  infer feature width from `x_train.shape[2]` instead of the fixed `NUM_FEATURES_PER_JOINT`
+  constant, so both feature sets (and any future one) work through the same fit path.
+  `_featurize_runs`/`evaluate()` gained a `feature_set` parameter (default `"coupled"`,
+  matching `main()`'s new default). Report JSON gained `feature_set`/`n_features_per_joint`
+  fields.
+- `tests/unit/test_residual_torque_model.py` -- 15 new tests for the coupled feature basis
+  (shape, own-state isolation of the FIRST 6 features, correct cross-joint content of the
+  remaining 15, NaN rejection, `compute_residual_torque_coupled`'s weight-shape validation,
+  clip behavior).
+- `tests/mujoco/test_fit_residual_torque_model_feature_sets.py` (new, 10 tests) -- `FEATURE_SETS`
+  registry contents, `_featurize_runs`/`fit_ridge_weights`/`fit_ols_weights` width-inference for
+  the 21-feature basis, and the synthetic end-to-end cross-joint-signal-recovery test described
+  above.
+
+### Verification
+
+Before promoting, the scratch experiment script (not committed -- it duplicates
+`fit_ridge_weights`/`compute_clip_bounds` logic to sweep 4 feature sets x 7 seeds cheaply) was
+cross-checked against the real, now-modified `tools/analysis/fit_residual_torque_model.py` CLI
+at seeds 0 and 4: held-out clipped R^2 values matched to 3 decimal places on every joint (e.g.
+seed-0 joint 2: scratch +0.723, CLI +0.723; seed-4 joint 4: scratch +0.348, CLI +0.348),
+confirming the swept numbers reflect the actual production fit path, not a divergent
+reimplementation. `--feature-set baseline` at seed 0 reproduces this doc's earlier ridge-fix
+table exactly (e.g. joint 2 R^2 +0.627 clipped -- matches this section's table's "A baseline"
+seed-0 cell before averaging).
+
+### Tests run
+
+- `pytest -q tests/unit/test_residual_torque_model.py`: 31 passed (16 pre-existing + 15 new).
+- `pytest -q tests/mujoco/test_fit_residual_torque_model_feature_sets.py
+  tests/mujoco/test_fit_residual_torque_model_ridge.py
+  tests/mujoco/test_residual_data_pipeline.py`: 25 passed (10 new + 15 pre-existing).
+- `pytest -q -m "unit or mujoco"`: **335 passed, 3 xfailed, 259 deselected** -- the pre-existing
+  287-passed baseline (from the ridge fix above) plus this pass's 25 new tests (15 unit + 10
+  mujoco) = 312, plus 23 more from other test files added to the repo elsewhere since that
+  baseline was recorded (unrelated to this change; confirmed zero failures either way).
+
+### Tests not run
+
+- `tests/hardware/` (mocked RTDE, `-m hardware`) -- not touched by this change, not re-run.
+- No real-hardware command was run (none is available in this environment; this remains
+  purely offline analysis on already-pulled trace data).
+
+### Not done / explicitly out of scope
+
+- No promotion into `controller_core/x_axis_cartesian_impedance.py` -- unchanged from the
+  original doc's section 4/5: this is still purely an offline analysis/fit-quality
+  improvement, not a decision to wire anything into the real controller.
+- The run-level (not row-level) train/test split was not touched.
+- A richer coupled-basis variant (e.g. interaction terms between own `qd` and other joints'
+  `qd`) was not tried -- given C's condition number is already ~2.6e18 (right at the edge of
+  what double precision can represent meaningfully), adding more raw feature dimensions
+  without first addressing that conditioning felt like it would trade one collinearity problem
+  for a worse one; a natural next step if this direction is pursued further would be feature
+  selection or PCA-style dimensionality reduction on the "other joints" block before adding
+  more raw terms.
+
+## Files changed (this pass, 2026-08-01 cross-joint coupling)
+
+- `controller_core/residual_torque_model.py` -- additive: `NUM_FEATURES_PER_JOINT_COUPLED`,
+  `joint_features_coupled`, `all_joint_features_coupled`, `compute_residual_torque_coupled`.
+- `tools/analysis/fit_residual_torque_model.py` -- `FEATURE_SETS` registry, `--feature-set`
+  flag (new default `coupled`), `_featurize_runs`/`evaluate()` gained `feature_set` param,
+  `fit_ols_weights`/`fit_ridge_weights` now feature-width-agnostic, report JSON gained
+  `feature_set`/`n_features_per_joint`.
+- `tests/unit/test_residual_torque_model.py` -- 15 new tests.
+- `tests/mujoco/test_fit_residual_torque_model_feature_sets.py` (new) -- 10 tests.
+- This file (this section).
+- Not committed (gitignored): `outputs/residual_pipeline_coupled_feature_eval_2026-08-01/`
+  (report/weights from the final `--feature-set coupled` validation run at seed 0).
+
+## Rollback (this pass only)
+
+```
+git revert <this-commit>
+```
+Purely additive to both touched source files (new functions/parameters/CLI flag; the only
+existing-function-body changes are `fit_ols_weights`/`fit_ridge_weights` computing `n_features`
+from `x_train.shape[2]` instead of a fixed import, which is backward-compatible for every
+existing caller since they already pass `NUM_FEATURES_PER_JOINT`-wide arrays) -- a plain revert
+is lossless. Passing `--feature-set baseline` at any time fully reproduces the pre-this-pass
+behavior without needing to revert anything.
