@@ -87,6 +87,8 @@ def run_x_transport(
     residual_observer_async: bool = False,
     trajectory_profile: str = "min_jerk_move_hold",
     target_accel_mps2: float | None = None,
+    telemetry_gap_bridge: bool = False,
+    telemetry_gap_bridge_max_cycles: int = 2,
 ) -> XTransportResult:
     mode = normalize_control_mode(control_mode)
     if start_q_rad is not None:
@@ -222,6 +224,8 @@ def run_x_transport(
         trajectory_profile=trajectory_profile,
         target_accel_mps2=target_accel_mps2,
         residual_observer_async=residual_observer_async,
+        telemetry_gap_bridge=telemetry_gap_bridge,
+        telemetry_gap_bridge_max_cycles=telemetry_gap_bridge_max_cycles,
     )
     return XTransportResult(
         ok=raw_dt.ok,

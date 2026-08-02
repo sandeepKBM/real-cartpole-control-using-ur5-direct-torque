@@ -388,6 +388,40 @@ def parse_args() -> argparse.Namespace:
             "Ignored if --disable-residual-observer is also passed."
         ),
     )
+    p.add_argument(
+        "--telemetry-gap-bridge",
+        action="store_true",
+        help=(
+            "direct_torque only. Opt-in, default off. Bridges an isolated "
+            "single/double-cycle duplicate RTDE read (a frozen tcp_pose/q, "
+            "seen on real hardware in a notable fraction of cycles in two "
+            "2026-08-02 runs, unrelated to this process's own loop timing) for the "
+            "CartesianMoveMonitor speed/accel guard ONLY, using a forward-"
+            "dynamics prediction from the last known-good state instead of "
+            "the frozen raw reading -- fixes the spurious speed/accel spike "
+            "a naive finite-difference produces across such a gap. NEVER "
+            "feeds the torque-control path (the controller still reads live "
+            "RTDE state every cycle, unchanged) and NEVER weakens "
+            "StaleStateMonitor's existing 5-consecutive-frozen-cycle e-stop, "
+            "which remains the real backstop for a genuine stall -- see "
+            "hardware/telemetry_gap_bridge.py's module docstring for the "
+            "full design and scope. Requires residual observer enabled and "
+            "synchronous (fails fast if --disable-residual-observer or "
+            "--residual-observer-async is also passed)."
+        ),
+    )
+    p.add_argument(
+        "--telemetry-gap-bridge-max-cycles",
+        type=int,
+        default=2,
+        help=(
+            "Max consecutive duplicate cycles the bridge will predict through "
+            "before deferring to the raw (stale) reading -- beyond this, "
+            "StaleStateMonitor's own e-stop is the backstop. Default 2, "
+            "matching the isolated single-cycle freezes observed on real "
+            "hardware so far. Only meaningful with --telemetry-gap-bridge."
+        ),
+    )
     return p.parse_args()
 
 
@@ -482,6 +516,8 @@ def main() -> int:
             accel_gap_cycles_override=move_limit_overrides.get("accel_gap_cycles"),
             enable_residual_observer=not bool(args.disable_residual_observer),
             residual_observer_async=bool(args.residual_observer_async),
+            telemetry_gap_bridge=bool(args.telemetry_gap_bridge),
+            telemetry_gap_bridge_max_cycles=int(args.telemetry_gap_bridge_max_cycles),
             speed_lowpass_alpha_override=move_limit_overrides.get("speed_lowpass_alpha"),
             speed_limit_gap_cycles_override=move_limit_overrides.get("speed_limit_gap_cycles"),
             speed_limit_lowpass_alpha_override=move_limit_overrides.get("speed_limit_lowpass_alpha"),

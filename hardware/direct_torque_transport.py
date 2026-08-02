@@ -42,6 +42,7 @@ from .safety import (
     UR5eSafetyLimits,
     is_robot_safety_normal,
 )
+from .telemetry_gap_bridge import TelemetryGapBridge
 from .timing import TimingTracker, monotonic_ns
 from .transport_common import impedance_safety_config_from_section, max_abs_qd_from_trace
 
@@ -167,6 +168,8 @@ def run_x_transport_direct_torque(
     residual_qdd_gap_cycles: int = 1,
     residual_qdd_lowpass_alpha: float = 1.0,
     residual_observer_async: bool = False,
+    telemetry_gap_bridge: bool = False,
+    telemetry_gap_bridge_max_cycles: int = 2,
 ) -> DirectTorqueTransportResult:
     if not motion_opt_in:
         raise ValueError("motion_opt_in must be True for a live direct-torque transport")
@@ -186,6 +189,20 @@ def run_x_transport_direct_torque(
             "coriolis_feedforward requires dynamics_source in {'local', 'local_pinocchio'} "
             "(rtde path not implemented)"
         )
+    if telemetry_gap_bridge and not enable_residual_observer:
+        # The bridge reuses the same dynamics-provider machinery as the
+        # residual observer (a dedicated PinocchioUR5eDynamics instance,
+        # independent of dynamics_source -- see the residual_dynamics
+        # construction below) to forward-predict through a detected RTDE
+        # duplicate. See hardware/telemetry_gap_bridge.py's module docstring
+        # for the full design and scope.
+        raise ValueError("telemetry_gap_bridge requires enable_residual_observer=True")
+    if telemetry_gap_bridge and residual_observer_async:
+        # The bridge needs a synchronous qdd prediction available within the
+        # same cycle it guards; residual_observer_async defers that
+        # computation to a worker process and only merges results back after
+        # the loop exits, which cannot feed a same-cycle safety check.
+        raise ValueError("telemetry_gap_bridge requires residual_observer_async=False")
     if dynamics_source == "local":
         local_dynamics = LocalPinocchioDynamics()
     elif dynamics_source == "local_pinocchio":
@@ -264,6 +281,19 @@ def run_x_transport_direct_torque(
             )
             residual_dynamics = None
             residual_accel_estimator = None
+
+    # Telemetry-gap bridge (2026-08-02, direct_torque only -- see
+    # hardware/telemetry_gap_bridge.py's module docstring for the full
+    # design/scope). Opt-in, default off. Reuses residual_dynamics above
+    # rather than constructing its own provider -- if that construction
+    # failed above (diagnostic dependency missing/broken), the bridge
+    # degrades to a no-op the same way the residual observer itself does,
+    # rather than blocking real motion over it.
+    gap_bridge = (
+        TelemetryGapBridge(max_bridge_cycles=telemetry_gap_bridge_max_cycles)
+        if (telemetry_gap_bridge and residual_dynamics is not None)
+        else None
+    )
 
     link.connect()
     state0 = link.read_state()
@@ -558,10 +588,35 @@ def run_x_transport_direct_torque(
                 estop.trip(termination_reason)
                 break
 
+            # Telemetry-gap bridge -- feeds ONLY this guard check, never the
+            # controller above (which already computed tau from the raw
+            # link_state this cycle, unchanged). See
+            # hardware/telemetry_gap_bridge.py's module docstring.
+            guard_q, guard_qd, guard_tcp_pose = link_state.q, link_state.qd, link_state.tcp_pose
+            telemetry_bridged = False
+            if gap_bridge is not None:
+                t_bridge = monotonic_ns()
+                bridge_coriolis = residual_dynamics.coriolis(link_state.q, link_state.qd)
+                bridge_result = gap_bridge.process(
+                    q=link_state.q,
+                    qd=link_state.qd,
+                    tcp_pose=link_state.tcp_pose,
+                    robot_timestamp_s=link_state.robot_timestamp_s,
+                    tau_applied=tau,
+                    mass_matrix=mass_matrix,
+                    coriolis_term=bridge_coriolis,
+                    jacobian=jacobian,
+                    dt_s=real_dt_s,
+                )
+                guard_q, guard_qd, guard_tcp_pose = bridge_result.q, bridge_result.qd, bridge_result.tcp_pose
+                telemetry_bridged = bridge_result.bridged
+                if phases is not None:
+                    phases.record("telemetry_gap_bridge_ns", monotonic_ns() - t_bridge)
+
             move_decision = move_monitor.check(
-                q=link_state.q,
-                qd=link_state.qd,
-                tcp_pose=link_state.tcp_pose,
+                q=guard_q,
+                qd=guard_qd,
+                tcp_pose=guard_tcp_pose,
                 target_tcp_pose=np.concatenate(([target_x], state0.tcp_pose[1:6])),
                 orientation_error_rad=float(output.orientation_error_norm),
                 axis_target_moving=bool(t_s <= move_duration_s),
@@ -720,6 +775,12 @@ def run_x_transport_direct_torque(
                     "lateness_ms": lateness_ns / 1e6,
                 }
             )
+            if gap_bridge is not None:
+                # Only added to the row shape when the bridge is actually
+                # enabled -- keeps every existing golden-trace/exact-equality
+                # test byte-identical at the (default) telemetry_gap_bridge=False
+                # setting. See hardware/telemetry_gap_bridge.py.
+                trace_rows[-1]["telemetry_gap_bridged"] = bool(telemetry_bridged)
             if phases is not None:
                 phases.record("trace_append_ns", monotonic_ns() - t_trace_append)
             steps += 1
@@ -810,6 +871,7 @@ def run_x_transport_direct_torque(
         "joint_limit_guard_ok": True,
         "torque_saturation_percentage": 0.0,
         "dynamics_source": dynamics_source,
+        "telemetry_gap_bridge_active": gap_bridge is not None,
         "timing": tracker.summary(),
     }
     if phases is not None:
