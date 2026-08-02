@@ -137,7 +137,7 @@ sim + real trace analysis, no code changes):
   but flags that larger orientation excursions can still bring the real arm physically close to
   the singularity, worth monitoring if accel is pushed further.
 
-## 6. Open, unexplained — `-X` acceleration transient at `0.015/8s`, plus a likely second overlapping mechanism
+## 6. RESOLVED — `-X` acceleration transient at `0.015/8s` (both mechanisms now accounted for)
 
 Three real trials at the identical command (`-0.015/8s`), three different outcomes — rules out
 a fixed trajectory-shape event (the scurve acceleration zero-crossing at `t=T/2=4.0s` was a live
@@ -158,13 +158,36 @@ breakaway (falling tau, flat/converged `x_error` in trials 1-2, not diverging). 
 read after the third trial**: this doesn't look like one mechanism with noisy timing — trial 3's
 signature (speed trip, moderate orientation buildup) matches the same `+X`
 orientation-growth mechanism from §4, while trials 1-2 (accel trip, wildly different orientation
-levels, no consistent timing) don't fit that pattern at all. Most likely **two distinct real
-mechanisms both active near this `-X` magnitude**, with which one trips first varying run to
-run — consistent with a genuine physical effect with real run-to-run stochasticity (e.g.
-stick-slip has exactly this character), not a deterministic trajectory-shape or guard-noise
-artifact. The accel-transient piece (trials 1-2) remains unexplained; the speed-trip piece
-(trial 3) is plausibly just the already-understood §4 mechanism showing up in this direction
-too.
+levels, no consistent timing) don't fit that pattern at all.
+
+**Resolved by a deeper follow-up investigation**
+(`docs/status/neg_x_accel_transient_deeper_investigation_2026-08-01.md`), reading every field
+across the full traces (not just aggregates near the trip), plus a sim reproduction attempt:
+- **Trial 2**: real correlate found — 107/919 cycles (11.6%) show exact byte-identical duplicate
+  consecutive `tcp_pose` telemetry frames, dense right up to the trip. This is RTDE telemetry
+  staleness (an already-documented failure class, AGENTS.md §4, 2026-07-28) synthesizing a
+  spurious acceleration via finite-differencing of frozen readings, while the real underlying
+  motion was slow and unremarkable (0.006 rad orientation error, 3% achieved). Trial 1 has zero
+  duplicate frames; trial 3 has 2, not concentrated near its trip — confirms this is
+  trial-2-specific, not a shared mechanism.
+- **Trial 1**: reclassified, not left unexplained — its orientation-error magnitude/growth shape
+  closely matches trial 3's already-understood §4 mechanism. Sim reproduction of the identical
+  scenario shows the same qualitative signature (different magnitude/timing, a known sim-vs-real
+  gap for this failure class) and, as expected, zero telemetry artifacts — sim cannot reproduce
+  trial 2's mechanism at all, supporting that trials 1 and 2 are genuinely different phenomena.
+
+**Net result: no new unexplained hazard remains.** All three `-X` trials are now accounted for
+by two already-understood, already-documented causes (the §4 orientation-growth mechanism, and
+RTDE telemetry staleness) — not a new, mysterious real-hardware risk. `-0.01` remains the
+practical `-X` ceiling for this pose/config (untested combinations above that, not a fixed hard
+limit).
+
+**Side finding from the same investigation, not yet acted on**: `mujoco.coriolis_feedforward:
+true` (set in `config/ur5e_mujoco_torque_osc_tuned_split_base_wrist.yaml` via inheritance) never
+actually took effect on any of the three real trials — `tau_coriolis` was exactly zero
+throughout all of them. Traced to `hardware/direct_torque_transport.py` only honoring an
+explicit `--coriolis-feedforward` CLI flag, never the config key, unlike the sim path. A real
+config-vs-implementation gap, flagged for a maintainer decision, not fixed.
 
 ## 7. Negative/deprioritized results (real findings, not gaps in follow-through)
 
