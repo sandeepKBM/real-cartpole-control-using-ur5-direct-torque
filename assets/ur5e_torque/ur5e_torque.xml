@@ -91,7 +91,24 @@
         <geom class="collision" size="0.06 0.06" pos="0 0 -0.04"/>
         <body name="upper_arm_link" pos="0 0.138 0" quat="1 0 1 0">
           <inertial mass="8.393" pos="0 0 0.2125" diaginertia="0.133886 0.133886 0.0151074"/>
-          <joint name="shoulder_lift_joint" class="size3"/>
+          <!-- frictionloss overridden from the size3 class default (5.0) to 6.1:
+               real-hardware calibration (2026-08-02, direct_torque_20260802_190759).
+               shoulder_lift's commanded tau_applied held a flat, noise-free
+               (-6.084) Nm plateau (std 0.011 Nm over a 1.5s window) while
+               qdd_measured stayed essentially exactly zero; at qd~0 (coriolis
+               negligible) this makes tau_applied itself a direct, model-independent
+               measurement of the real static friction magnitude actively holding
+               the joint, no dynamics inversion needed. This is a LOWER BOUND on
+               real Fs (the joint may not have been driven to its exact breakaway
+               edge), so 6.1 (a small margin above the 6.084 measurement, not a
+               speculative multiplier) is used rather than the raw measured value.
+               shoulder_pan/elbow are NOT changed: their own measured plateau
+               torques (1.776, 3.131 Nm) were BELOW the existing 5.0 Nm class
+               default, which only establishes a lower bound the current guess
+               already satisfies; this evidence cannot justify raising or
+               lowering their value. See
+               docs/status/friction_calibration_from_qdd_residual_2026-08-02.md. -->
+          <joint name="shoulder_lift_joint" class="size3" frictionloss="6.1"/>
           <geom mesh="upperarm_0" material="linkgray" class="visual"/>
           <geom mesh="upperarm_1" material="black" class="visual"/>
           <geom mesh="upperarm_2" material="jointgray" class="visual"/>

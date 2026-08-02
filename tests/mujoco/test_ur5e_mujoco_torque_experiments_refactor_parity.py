@@ -21,6 +21,20 @@ see that file's header and
 docs/status/disable_global_singular_scale_validation_2026-07-30.md). The values
 captured before that fix reflected a real bug (controller frozen for most of the
 move), not correct behavior.
+
+Values refreshed again 2026-08-02: assets/ur5e_torque/ur5e_torque.xml's
+shoulder_lift_joint frictionloss was raised from the size3 class default (5.0)
+to a per-joint override of 6.1 Nm, calibrated from real hardware
+(direct_torque_20260802_190759 -- see the joint override's own comment in the
+MJCF and docs/status/friction_calibration_from_qdd_residual_2026-08-02.md).
+Another real, intentional physics change, same direction as the original
+2026-07-31 friction addition: this short move is now measurably MORE friction-
+limited than before (achieved_x_delta_m drops from ~0.00668 m to ~0.00597 m
+against the same 0.01 m target; move_hold_quality_score drops from ~0.297 to
+~0.260), consistent with shoulder_lift's real friction being higher than the
+prior guessed value. Re-derived the same way as before: re-running the exact
+command below against the updated model (--seed 0, deterministic); the run
+still completes cleanly (termination_reason=duration_complete, steps=250).
 """
 
 from __future__ import annotations
@@ -37,22 +51,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED = {
     "termination_reason": "duration_complete",
     "steps": 250,
-    "achieved_x_delta_m": pytest.approx(0.006677818892950525, abs=1e-12),
-    "final_x_error_m": pytest.approx(0.0033221811070494756, abs=1e-12),
-    "max_abs_orientation_error_rad": pytest.approx(0.008667602130849907, abs=1e-12),
-    "max_abs_qd_radps": pytest.approx(0.03594456180001037, abs=1e-12),
-    "max_abs_tau_applied_nm": pytest.approx(6.643184104836119, abs=1e-9),
-    "move_hold_quality_score": pytest.approx(0.2966448644866346, abs=1e-9),
+    "achieved_x_delta_m": pytest.approx(0.005970857523244166, abs=1e-12),
+    "final_x_error_m": pytest.approx(0.004029142476755834, abs=1e-12),
+    "max_abs_orientation_error_rad": pytest.approx(0.008152865816715961, abs=1e-12),
+    "max_abs_qd_radps": pytest.approx(0.027042468700935088, abs=1e-12),
+    "max_abs_tau_applied_nm": pytest.approx(7.391871524274896, abs=1e-9),
+    "move_hold_quality_score": pytest.approx(0.26035062959126415, abs=1e-9),
 }
 EXPECTED_FINAL_Q = [
-    8.401498293147879e-05,
-    -1.5758197122204896,
-    -0.0040320048044671375,
-    -1.5715194862259532,
-    -4.27446080881236e-05,
-    0.0010956729274157373,
+    9.80952040400223e-05,
+    -1.5746777397379663,
+    -0.004687563462239802,
+    -1.5716519920858645,
+    -3.1410851253714584e-05,
+    0.0012532920412614116,
 ]
-EXPECTED_FINAL_EE_POS = [0.006677818892950299, -0.2339994396976498, 1.0799738266265693]
+EXPECTED_FINAL_EE_POS = [0.005970857523243941, -0.23399941536403127, 1.0799779953822959]
 
 
 def test_controller_rollout_matches_pre_refactor_golden_values(tmp_path: Path) -> None:
