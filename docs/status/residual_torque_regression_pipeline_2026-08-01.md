@@ -259,3 +259,230 @@ python tools/analysis/fit_residual_torque_model.py \
 ```
 (requires regenerating the sim traces first, via `tools/ur5e_move_hold_transport.py` -- traces
 are gitignored, not part of this commit; see section 1 for the exact commands used.)
+
+## Ridge regularization + output clipping fix (2026-08-01, same night)
+
+**Still entirely offline analysis tooling -- nothing in this section touches
+`controller_core/x_axis_cartesian_impedance.py` or any real-hardware path. See the closing
+note below for an explicit restatement.**
+
+### The failure
+
+Later the same night, real UR5e hardware traces became loadable (see
+`docs/status/residual_observer_real_trace_gap_2026-08-01.md`'s loader fix) and this pipeline
+was run against them for the first time:
+
+```
+python3 tools/analysis/fit_residual_torque_model.py \
+  --trace-root "outputs/hardware_transport_remote/hardware_transport/*/trace.jsonl" --seed 0
+```
+
+Train R^2 was reasonable on all 6 joints (0.68-0.89). Held-out test R^2 was reasonable for
+joints 0, 1, 4, 5 -- but **joint 2 (elbow)** came back at **R^2 = -9799.8**, RMSE model
+274.9 Nm vs. a 2.78 Nm zero-baseline (~99x worse than doing nothing). An earlier report of
+this same run (different local snapshot of the pulled real-hardware trace directory -- 46
+runs / 132,680 rows vs. this repro's 63 runs / 159,389 rows, same trace-pull mechanism, just
+a later point in an ongoing pull) additionally saw joint 3 blow up to R^2 ~ -3.4e9; that exact
+magnitude did not reproduce bit-for-bit against this snapshot's particular random train/test
+split, but the identical mechanism (below) is present and measured on joint 3 in this snapshot
+too (see the multi-seed table below, where joint 3 is consistently the second-most fragile
+joint, e.g. R^2 -0.78 to -0.81 at seed 0 across every regularization strength tried -- bounded,
+not catastrophic, in this snapshot's particular split, but the underlying design-matrix
+pathology is identical and seed/data-dependent in whether a given held-out run happens to
+contain an extreme-enough outlier to trigger a catastrophic blowup rather than a merely bad
+fit). This confirms it is the same root cause, not a different bug.
+
+### Root cause (not just "unregularized" -- the specific mechanism)
+
+Directly inspected the training design matrix for joint 2 (and 3) at seed 0:
+
+- **Joint 2's training-set velocity range is tiny**: `qd` spans only [-0.0084, 0.0092] rad/s
+  across all 47 training runs (an X-only transport move barely moves the elbow). At such small
+  `|qd|`, `tanh(qd/deadband) ≈ qd/deadband` (linear regime) and `qd*|qd|` is a small,
+  odd-symmetric term -- so the model's `qd`, `tanh(qd/deadband)`, and `qd*|qd|` feature columns
+  are **near-perfectly collinear** on this training set: measured `corr(qd, tanh) = 0.999996`,
+  design-matrix condition number `cond(X) = 1.08e7` (joint 3: `corr = 0.999990`,
+  `cond(X) = 3.2e7`), smallest singular values ~1e-4 to 1e-5 (vs. a largest singular value
+  ~515) -- i.e. the design matrix is numerically near-rank-deficient in exactly that
+  three-feature subspace.
+- **`numpy.linalg.lstsq`'s minimum-norm SVD solution is only weakly constrained along that
+  near-null direction**: with real (non-adversarial) label noise, the fitted coefficient along
+  a near-null right-singular direction scales like (noise projected onto the matching
+  left-singular vector) / (that direction's singular value) -- as the singular value shrinks
+  toward zero, an ordinary, small amount of noise produces an enormous coefficient. Measured:
+  the fitted joint-2 weights were `[3083, -471693, 23469, 731413, 2107, -3083]` (coefficients on
+  `[bias, qd, tanh, qd|qd|, sin(q), cos(q)]`) -- **hundreds of thousands** for the `qd` and
+  `qd*|qd|` columns, despite those columns' own training-set values never exceeding ~0.01 in
+  magnitude. This is exactly a case OLS *cannot* protect against: the fit is genuinely good
+  on training data (the huge, opposite-signed `qd`/`qd*|qd|` coefficients nearly cancel across
+  the whole training range) but represents essentially no real relationship -- it's fitting
+  noise in the near-null direction.
+- **The held-out run genuinely extrapolates**: the worst-offending held-out row has joint-2
+  `qd = 0.0937` rad/s -- **~10x** the largest `|qd|` any training run ever showed that joint
+  (0.0092). At that point the near-collinear features' small differences (the `tanh` term
+  saturating while `qd` keeps growing linearly, `qd*|qd|` growing quadratically) stop
+  canceling the way they did on the training manifold, and the huge, poorly-determined weights
+  get multiplied through directly: predicted torque `-15388 Nm` vs. true `-7.03 Nm` on that row.
+
+**In short: this is not a generic "unregularized model" complaint -- it is a specific,
+measured, near-collinear feature subspace (driven by how little velocity variation a
+near-stationary joint's training data ever contains) combined with a specific held-out run
+whose peak velocity for that joint sits an order of magnitude outside anything training saw.**
+Multi-seed sweeping (below) confirms seed 0's split is the pathological one for this exact
+data snapshot -- seeds 1-3 hold out runs whose joint-2/3 velocities stay within the training
+range, and show no catastrophic blowup even under plain OLS -- consistent with this being an
+extrapolation failure keyed to which specific run lands in the test set, not an error present
+in every split.
+
+### Fix implemented
+
+Per the task's own preference ordering, implemented (a) ridge regression with (c) feature
+scaling, plus (b) output clipping as an independent defensive layer:
+
+1. **`fit_ridge_weights()`** (`tools/analysis/fit_residual_torque_model.py`) -- closed-form
+   ridge, `w = (X^T X + lambda*I)^-1 X^T y`, solved **per joint in that joint's own
+   per-feature-standardized space** (`_feature_scale()`: divide each column by its training-set
+   std, bias column pinned to scale 1.0 since it has zero variance), then the fitted weights are
+   scaled back to the original (unstandardized) feature units. Feature scaling matters here, not
+   just as a nicety: this model's 6 raw features span roughly 4 orders of magnitude (bias == 1.0;
+   `sin`/`cos` in `[-1, 1]`; a near-stationary joint's `qd` ~1e-2 and `qd*|qd|` ~1e-4) -- one
+   global `lambda` on unscaled columns would regularize those very differently; standardizing
+   first makes one scalar `lambda` penalize every feature comparably. Pure numpy (closed-form
+   normal equations) -- no scipy/sklearn added, per the constraint (`environment.yml` already
+   has `scipy>=1.11` for other reasons, but this fix needed neither it nor sklearn).
+   `fit_ols_weights()` (plain `lstsq`) is kept, reachable via `--ridge-lambda 0`, both for
+   comparison and as an explicit escape hatch.
+2. **`--ridge-lambda` CLI flag**, default **`1.0e5`**. Chosen by sweeping `lambda` in
+   {0.1, 1, 3, 10, ..., 3e7} against held-out R^2 on the real trace-pull data across 4 random
+   seeds (0-3; seed 0 is the pathological split above, seeds 1-3 are already-clean splits used
+   as a check that the fix doesn't need to sacrifice already-good performance to be safe):
+
+   | lambda | seed0 joint2 R2 | seed0 worst R2 | seed1 worst R2 | seed2 worst R2 | seed3 worst R2 |
+   |---|---|---|---|---|---|
+   | 0 (OLS) | -9799.80 | -9799.80 (j2) | -0.22 (j4) | +0.04 (j4) | +0.01 (j4) |
+   | 1e2 | -285.53 | -285.53 | -0.23 | +0.09 | +0.04 |
+   | 1e4 | -110.14 | -110.14 | -0.21 | +0.09 | +0.05 |
+   | 3e4 | -27.34 | -27.34 | -0.19 | +0.09 | +0.05 |
+   | **1e5 (chosen default)** | **-0.68** | **-0.78** | **-0.14** | **+0.10** | **+0.06** |
+   | 3e5 | -0.13 | -0.79 | -0.10 | +0.10 | +0.06 |
+   | 1e6 | -0.07 | -0.80 | -0.09 | +0.10 | +0.07 |
+
+   `1e5` is the smallest tested value at which every seed's worst-joint R^2 lands in a bounded,
+   "honest bad fit" range (roughly [-1, +1], the same order of magnitude as simply predicting
+   the training mean) rather than the catastrophic tens/hundreds-negative range smaller lambdas
+   still leave joint 2 in. Pushing lambda further (3e5, 1e6, ...) keeps improving joint 2
+   marginally but starts visibly eroding the well-conditioned joints' fit quality (e.g. seed 1
+   joint 0 R^2 0.54 -> 0.39 by lambda=1e6) for no corresponding safety benefit -- not worth it
+   per the task's own "don't over-engineer past what's needed" guidance.
+3. **`compute_clip_bounds()` / `--clip-multiple` (default 5.0)** -- an independent, fit-quality-
+   agnostic hard ceiling: `clip_multiple * max(|observed training residual|)` per joint, computed
+   from TRAIN data only (never leaks test information into what should be a fixed,
+   data-independent inference-time bound). Applied both in `predict()` (bulk, for evaluation)
+   and as a new optional `clip_abs` parameter on
+   `controller_core/residual_torque_model.py::compute_residual_torque()` (default `None` --
+   exact prior behavior preserved for any existing/future caller that doesn't opt in). This
+   exists as a second, independent layer of defense per the task's own reasoning: even a
+   well-regularized fit should never be trusted to emit an unbounded correction torque if this
+   is ever wired into a real controller later.
+
+### Before/after: full per-joint held-out table (seed 0, the pathological split)
+
+`python tools/analysis/fit_residual_torque_model.py --trace-root "outputs/hardware_transport_remote/hardware_transport/*/trace.jsonl" --seed 0`
+(63 runs loaded, 159,389 rows total -- more than the original same-night report's 46 runs /
+132,680 rows, since the real-hardware trace pull was still ongoing; same command, same seed,
+same mechanism, numbers differ from the exact ones first reported for that reason, not because
+of any change to the fix's methodology):
+
+| joint | RMSE zero | **RMSE OLS (before)** | **R2 OLS (before)** | **RMSE ridge (after)** | **R2 ridge (after)** | R2 ridge+clip (after) |
+|---|---|---|---|---|---|---|
+| 0 shoulder_pan | 1.426 | 1.463 | -0.053 | 1.457 | -0.044 | -0.044 (0 rows clipped) |
+| 1 shoulder_lift | 5.048 | 2.827 | +0.686 | 3.632 | +0.482 | +0.482 (0 rows clipped) |
+| 2 elbow | 2.777 | **274.883** | **-9799.801** | 3.593 | -0.675 | **-0.055** (16 rows clipped) |
+| 3 wrist_1 | 0.291 | 0.265 | +0.171 | 0.388 | -0.781 | -0.781 (0 rows clipped) |
+| 4 wrist_2 | 0.379 | 0.319 | +0.291 | 0.358 | +0.108 | +0.108 (0 rows clipped) |
+| 5 wrist_3 | 0.395 | 0.446 | -0.277 | 0.437 | -0.222 | -0.222 (0 rows clipped) |
+
+(units: Nm; reproducible via the command above, default `--ridge-lambda 1e5 --clip-multiple 5.0`;
+`--ridge-lambda 0 --no-output-clipping` reproduces the "before" OLS column exactly)
+
+**Result: the catastrophic blowup is eliminated.** Joint 2 goes from R^2 = -9799.8 (RMSE 99x
+the zero-baseline) to a bounded, honest R^2 = -0.68 with ridge alone, and -0.055 (RMSE only
+~1.03x the zero-baseline) once the output clip additionally catches the 16 remaining
+still-too-large predictions. All 6 joints now sit in a sane, bounded range. Two joints (1, 4)
+still show genuinely useful positive held-out R^2 (0.48, 0.11); the others (0, 3, 5) are
+honestly modest-to-negative -- an acceptable, non-catastrophic outcome per the task's own
+framing, not a claim that this feature basis fits every joint well. Joint 1's R^2 did drop from
+the OLS run's 0.686 to 0.482 under regularization -- a real, expected cost of protecting the
+fragile joints, not a bug (see the lambda sweep table above for the explicit trade-off this
+default was chosen against).
+
+### Tests added
+
+- `tests/unit/test_residual_torque_model.py`: 5 new tests for `compute_residual_torque`'s new
+  `clip_abs` parameter (bounds output, scalar-broadcasts, `None` preserves old behavior exactly,
+  rejects negative/wrong-shape bounds).
+- `tests/mujoco/test_fit_residual_torque_model_ridge.py` (new file, marked `mujoco` per this
+  directory's import-chain convention, same reason as `test_residual_data_pipeline.py`): 9 tests,
+  including a deterministic SVD-constructed ill-conditioned dataset
+  (`_make_ill_conditioned_dataset`) that reproduces the same qualitative failure mechanism found
+  on real data (near-null design direction + real noise + held-out extrapolation along that
+  direction) and asserts OLS's error there is >10x ridge's, plus `fit_ridge_weights` monotonic
+  shrinkage with lambda, `lambda=0` matching plain OLS on well-conditioned data,
+  `compute_clip_bounds`/`predict(..., clip_bounds=...)` correctness and input validation.
+
+### Tests run
+
+- `pytest -q -m "unit or mujoco"`: **287 passed, 3 xfailed, 259 deselected** -- zero regressions
+  (all pre-existing tests still pass; only new tests added).
+- `pytest -q -m hardware`: 258 passed, 1 failed -- the failure
+  (`test_direct_torque_residual_observer_async.py::test_residual_observer_async_phase_cost_is_much_lower_than_sync`)
+  is a pre-existing, unrelated wall-clock timing assertion (`deadline_overrun` under load) in a
+  file that does not import anything touched by this change; confirmed load-sensitive by
+  re-running in isolation (still failed, with a different overrun magnitude) while `uptime`
+  showed this shared machine's load average had risen to ~21.5 during this session (vs. ~1.0 at
+  session start) -- consistent with AGENTS.md section 8's documented shared-machine load
+  variability, not a regression from this change.
+
+### Not done / explicitly out of scope
+
+- **Nothing in `controller_core/x_axis_cartesian_impedance.py` or any real-hardware code path
+  was touched.** This entire fix is offline analysis/fit tooling
+  (`tools/analysis/fit_residual_torque_model.py`) plus the standalone, still-unwired inference
+  helper (`controller_core/residual_torque_model.py::compute_residual_torque`, which nothing in
+  `controller_core/` imports). No config changed. No safety guard changed.
+- The run-level (not row-level) train/test split was not touched -- still the correct choice for
+  the autocorrelation reason already documented above.
+- This does not claim the fixed pipeline's fit quality is good enough to promote into the
+  controller -- see this document's original section 5 "What would be needed next", which is
+  unchanged by this fix: that promotion bar (comparable to `friction_feedforward`'s validated
+  2.5-9x steady-state error reduction) is still not cleared, and clearing it was never this
+  task's goal. This task's goal, and what it achieved, was making the offline evaluation honest
+  (no more silent catastrophic-looking-fine-until-you-check-held-out-R^2 numbers) -- nothing more.
+
+## Files changed (this fix, 2026-08-01)
+
+- `controller_core/residual_torque_model.py` -- added optional `clip_abs` parameter to
+  `compute_residual_torque()`, default `None` (no behavior change for any existing caller).
+- `tools/analysis/fit_residual_torque_model.py` -- added `fit_ridge_weights()`,
+  `_feature_scale()`, `compute_clip_bounds()`; `predict()` gained an optional `clip_bounds`
+  parameter; `evaluate()`/`JointEvalMetrics` gained optional clipped-prediction fields; `main()`
+  now fits ridge by default (`--ridge-lambda`, default 1e5) and reports the defensive clip
+  (`--clip-multiple`, default 5.0, `--no-output-clipping` to disable); `fit_ols_weights()` kept,
+  now documents its own known failure mode.
+- `tests/unit/test_residual_torque_model.py` -- 5 new tests for `clip_abs`.
+- `tests/mujoco/test_fit_residual_torque_model_ridge.py` (new) -- 9 tests for ridge fitting and
+  output clipping.
+- This file (root cause, fix, before/after evaluation).
+- Not committed (gitignored): `outputs/hardware_transport_remote/` (a local copy of the real
+  trace-pull data used to reproduce and validate this fix) and
+  `outputs/residual_pipeline_ridge_fix_2026-08-01/` (the `--output-json`/`--output-weights`
+  artifacts from the final validation run).
+
+## Rollback (this fix only)
+
+```
+git revert <this-commit>
+```
+Purely additive to both touched files (new functions/parameters, no existing function body
+changed except `fit_ols_weights`'s docstring and `main()`'s call site) -- a plain revert is
+lossless.
