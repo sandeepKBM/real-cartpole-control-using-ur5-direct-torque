@@ -106,6 +106,52 @@ def test_compute_residual_torque_rejects_wrong_weight_shape():
         compute_residual_torque(np.zeros((NUM_JOINTS, 5)), q, qd)
 
 
+def test_compute_residual_torque_clip_abs_bounds_output():
+    # Large weights that would otherwise produce an enormous output.
+    weights = np.full((NUM_JOINTS, NUM_FEATURES_PER_JOINT), 0.0)
+    weights[:, 0] = 1000.0  # bias-only, so output == 1000.0 for every joint before clipping
+    q = np.zeros(NUM_JOINTS)
+    qd = np.zeros(NUM_JOINTS)
+    clip_abs = np.full(NUM_JOINTS, 5.0)
+    out = compute_residual_torque(weights, q, qd, clip_abs=clip_abs)
+    np.testing.assert_allclose(out, np.full(NUM_JOINTS, 5.0))
+
+
+def test_compute_residual_torque_clip_abs_scalar_applies_to_all_joints():
+    weights = np.zeros((NUM_JOINTS, NUM_FEATURES_PER_JOINT))
+    weights[:, 0] = np.array([1.0, -100.0, 3.0, -0.5, 200.0, 0.0])
+    q = np.zeros(NUM_JOINTS)
+    qd = np.zeros(NUM_JOINTS)
+    out = compute_residual_torque(weights, q, qd, clip_abs=10.0)
+    np.testing.assert_allclose(out, np.array([1.0, -10.0, 3.0, -0.5, 10.0, 0.0]))
+
+
+def test_compute_residual_torque_clip_abs_none_is_unchanged_default():
+    rng = np.random.default_rng(1)
+    weights = rng.uniform(-1.0, 1.0, size=(NUM_JOINTS, NUM_FEATURES_PER_JOINT))
+    q = rng.uniform(-1.0, 1.0, size=NUM_JOINTS)
+    qd = rng.uniform(-1.0, 1.0, size=NUM_JOINTS)
+    out_default = compute_residual_torque(weights, q, qd)
+    out_explicit_none = compute_residual_torque(weights, q, qd, clip_abs=None)
+    np.testing.assert_allclose(out_default, out_explicit_none)
+
+
+def test_compute_residual_torque_rejects_negative_clip_abs():
+    weights = np.zeros((NUM_JOINTS, NUM_FEATURES_PER_JOINT))
+    q = np.zeros(NUM_JOINTS)
+    qd = np.zeros(NUM_JOINTS)
+    with pytest.raises(ValueError):
+        compute_residual_torque(weights, q, qd, clip_abs=-1.0)
+
+
+def test_compute_residual_torque_rejects_wrong_clip_abs_shape():
+    weights = np.zeros((NUM_JOINTS, NUM_FEATURES_PER_JOINT))
+    q = np.zeros(NUM_JOINTS)
+    qd = np.zeros(NUM_JOINTS)
+    with pytest.raises(ValueError):
+        compute_residual_torque(weights, q, qd, clip_abs=np.ones(5))
+
+
 def test_compute_residual_torque_output_shape_is_fixed():
     # Deterministic-cost real-time constraint: output is always exactly
     # (NUM_JOINTS,) regardless of input values (no data-dependent branching

@@ -112,6 +112,7 @@ def compute_residual_torque(
     qd: np.ndarray,
     *,
     deadband: float = DEFAULT_DEADBAND,
+    clip_abs: np.ndarray | float | None = None,
 ) -> np.ndarray:
     """Per-joint residual torque correction, ``(NUM_JOINTS,)``.
 
@@ -124,6 +125,18 @@ def compute_residual_torque(
     worst-case flop count does not depend on the weights' values, matching
     the deadline-monitor-compatible "bounded, data-independent worst-case
     cost" requirement in the module docstring.
+
+    ``clip_abs`` (added 2026-08-01, defensive measure motivated by a real
+    catastrophic-extrapolation failure of the unregularized OLS fit on
+    joints 2/3 of real held-out UR5e data -- see
+    ``docs/status/residual_torque_regression_pipeline_2026-08-01.md``): an
+    optional per-joint (``(NUM_JOINTS,)``) or scalar hard bound. When given,
+    the returned torque is elementwise-clipped to ``[-clip_abs, +clip_abs]``
+    *after* the dot product -- a cheap, fixed-cost safety net so a
+    poorly-conditioned or out-of-distribution fit can never inject an
+    unbounded correction, regardless of how good or bad the underlying
+    regression is. Default ``None`` preserves the exact prior (unclipped)
+    behavior -- no existing caller or test is affected.
     """
     weights = np.asarray(weights, dtype=np.float64)
     if weights.shape != (NUM_JOINTS, NUM_FEATURES_PER_JOINT):
@@ -132,4 +145,12 @@ def compute_residual_torque(
         )
     features = all_joint_features(q, qd, deadband=deadband)  # (6, 6)
     # Row-wise dot product: tau_residual_j = weights[j] . features[j]
-    return np.einsum("jf,jf->j", weights, features)
+    tau = np.einsum("jf,jf->j", weights, features)
+    if clip_abs is not None:
+        clip_abs = np.asarray(clip_abs, dtype=np.float64)
+        if clip_abs.shape not in ((), (NUM_JOINTS,)):
+            raise ValueError(f"clip_abs must be scalar or shape ({NUM_JOINTS},); got {clip_abs.shape}")
+        if np.any(clip_abs < 0.0):
+            raise ValueError("clip_abs must be >= 0")
+        tau = np.clip(tau, -clip_abs, clip_abs)
+    return tau
