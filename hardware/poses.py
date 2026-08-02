@@ -72,6 +72,29 @@ HANGING_LOWER_Q = np.array(
 HANGING_ALPHA_0_5_Q = (0.5 * HANGING_ORIGIN_Q + 0.5 * HANGING_LOWER_Q).astype(np.float64)
 
 
+# hanging_alpha=0.5 with the same real-lab base-rotation (shoulder_pan = -45 deg) applied to
+# HEIGHT_ALPHA_0_5_Q above -- built purely by mirroring that exact pattern onto this family's
+# own alpha=0.5 midpoint (HANGING_ALPHA_0_5_Q), the point this family's own first-pass gain
+# tuning and rigor sweep already anchor to (see the "hanging_alpha=0.5" comment above and
+# docs/status/hanging_pose_transport_family_2026-08-01.md sec 3), analogous to how
+# HEIGHT_ALPHA_0_5_CLEARANCE_Q anchors to the old family's own validated height_alpha=0.5
+# point rather than one of its raw endpoints.
+#
+# UNLIKE HEIGHT_ALPHA_0_5_CLEARANCE_Q, this constant is NOT a real-hardware default and has
+# NEVER been visually confirmed for wall/base clearance in the physical lab -- the hanging
+# posture's swept volume near the base is a different shape from the old "tall" family's, and
+# clearance for THIS specific rotated shape has never been checked. Added 2026-08-02 purely to
+# characterize whether rotating shoulder_pan reintroduces the old family's real-hardware
+# "-45 deg base-rotation Y-drift coupling" problem (AGENTS.md sec 3) on this structurally
+# different, singularity-avoiding pose family. See
+# docs/status/hanging_pose_clearance_variant_2026-08-02.md for the cond(J) sweep and rigor-
+# sweep investigation this constant was built for. Do NOT treat this as real-hardware-ready;
+# it requires its own dedicated visual clearance check before ever being commanded live,
+# exactly like every other pose in this project's history.
+HANGING_ALPHA_0_5_CLEARANCE_Q = HANGING_ALPHA_0_5_Q.copy()
+HANGING_ALPHA_0_5_CLEARANCE_Q[0] = -0.7853981633974483
+
+
 def q_for_hanging_height_alpha(alpha: float) -> np.ndarray:
     """Interpolate between the hanging-family origin (0) and lower (1) joint poses.
 

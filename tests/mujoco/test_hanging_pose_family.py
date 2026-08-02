@@ -81,6 +81,48 @@ def test_hanging_family_endpoints_reach_expected_site_height() -> None:
     assert 0.4 < z_low < 0.7
 
 
+def test_hanging_alpha_0_5_clearance_stays_well_conditioned() -> None:
+    """The -45deg base-rotation clearance variant (hardware/poses.py::
+    HANGING_ALPHA_0_5_CLEARANCE_Q, added 2026-08-02) must stay just as well-conditioned as
+    the un-rotated family -- shoulder_pan rotates the whole kinematic chain about the base
+    Z axis, a rigid-body symmetry that should leave cond(full 6x6 J) exactly unchanged. This
+    locks that claim down as a regression test, mirroring
+    test_hanging_family_cond_j_stays_well_conditioned_across_full_range above. See
+    docs/status/hanging_pose_clearance_variant_2026-08-02.md for the full investigation --
+    cond(J) staying low here does NOT mean the rotated pose is problem-free: a rigor sweep at
+    this pose found a real Y-drift/orientation coupling (X-Y authority tradeoff, same failure
+    family as the old pose family's own -45deg finding) that this static kinematic check
+    cannot see.
+    """
+    from hardware.poses import HANGING_ALPHA_0_5_CLEARANCE_Q, HANGING_ALPHA_0_5_Q
+
+    model, data, site_id, joint_ids, _ = load_model(SCENE_PATH)
+    cond_rotated = np.linalg.cond(_full_jacobian(model, data, site_id, joint_ids, HANGING_ALPHA_0_5_CLEARANCE_Q))
+    cond_unrotated = np.linalg.cond(_full_jacobian(model, data, site_id, joint_ids, HANGING_ALPHA_0_5_Q))
+    assert np.isfinite(cond_rotated)
+    assert cond_rotated < COND_BOUND
+    # Rotation-invariance: shoulder_pan should not change cond(J) at all for this kinematic
+    # chain (verified 2026-08-02: exact match to float precision).
+    assert abs(cond_rotated - cond_unrotated) < 1e-6
+
+
+def test_hanging_clearance_rotation_invariant_across_full_range() -> None:
+    """cond(J) sweep across the whole hanging-family range with shoulder_pan forced to -45deg
+    at every point -- mirrors the un-rotated 21-point sweep above. Confirms the rotation-
+    invariance property holds everywhere on the segment, not just at the alpha=0.5 anchor
+    HANGING_ALPHA_0_5_CLEARANCE_Q was built from.
+    """
+    model, data, site_id, joint_ids, _ = load_model(SCENE_PATH)
+    for alpha in np.linspace(0.0, 1.0, 21):
+        q_unrotated = q_for_hanging_height_alpha(float(alpha))
+        q_rotated = q_unrotated.copy()
+        q_rotated[0] = -0.7853981633974483
+        cond_unrotated = np.linalg.cond(_full_jacobian(model, data, site_id, joint_ids, q_unrotated))
+        cond_rotated = np.linalg.cond(_full_jacobian(model, data, site_id, joint_ids, q_rotated))
+        assert cond_rotated < COND_BOUND, f"cond(J)={cond_rotated} exceeds {COND_BOUND} at alpha={alpha} (rotated)"
+        assert abs(cond_rotated - cond_unrotated) < 1e-6, f"rotation changed cond(J) at alpha={alpha}"
+
+
 def test_old_family_is_still_singular_unchanged_baseline() -> None:
     """Confirms the motivating claim on the SAME model this session used, and that the old
     family's constants (checked elsewhere) were never touched: ACTIVE_ORIGIN_Q remains at

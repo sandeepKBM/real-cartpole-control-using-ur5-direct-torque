@@ -63,3 +63,31 @@ def test_hanging_height_alpha_rejects_out_of_range() -> None:
         q_for_hanging_height_alpha(-0.01)
     with pytest.raises(ValueError):
         q_for_hanging_height_alpha(1.01)
+
+
+# --- Hanging-family -45deg base-rotation clearance variant (added 2026-08-02) ------
+
+
+def test_hanging_alpha_0_5_clearance_matches_pattern() -> None:
+    """Mirrors HEIGHT_ALPHA_0_5_CLEARANCE_Q's own construction exactly: same pose as the
+    family's alpha=0.5 anchor, only shoulder_pan overridden to -45 deg."""
+    from hardware.poses import HANGING_ALPHA_0_5_CLEARANCE_Q, HANGING_ALPHA_0_5_Q
+
+    expected = HANGING_ALPHA_0_5_Q.copy()
+    expected[0] = -0.7853981633974483
+    np.testing.assert_allclose(HANGING_ALPHA_0_5_CLEARANCE_Q, expected)
+    # All non-shoulder_pan joints must be untouched from the un-rotated midpoint.
+    np.testing.assert_allclose(HANGING_ALPHA_0_5_CLEARANCE_Q[1:], HANGING_ALPHA_0_5_Q[1:])
+
+
+def test_hanging_alpha_0_5_clearance_does_not_mutate_existing_constants() -> None:
+    """Purely additive: HANGING_ALPHA_0_5_Q/HANGING_ORIGIN_Q/HANGING_LOWER_Q unchanged."""
+    from hardware.poses import HANGING_ALPHA_0_5_Q, HANGING_LOWER_Q, HANGING_ORIGIN_Q
+
+    np.testing.assert_allclose(
+        HANGING_ORIGIN_Q, [0.0, -1.791994, 0.812668, -1.288057, 1.5707963267948966, 0.0]
+    )
+    np.testing.assert_allclose(
+        HANGING_LOWER_Q, [0.0, -1.491612, 1.990426, -2.630057, 1.5707963267948966, 0.0]
+    )
+    np.testing.assert_allclose(HANGING_ALPHA_0_5_Q, 0.5 * HANGING_ORIGIN_Q + 0.5 * HANGING_LOWER_Q)

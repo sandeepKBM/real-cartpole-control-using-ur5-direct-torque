@@ -66,6 +66,18 @@ HANGING_LOWER_Q = np.array(
     [0.0, -1.491612, 1.990426, -2.630057, 1.5707963267948966, 0.0], dtype=np.float64
 )
 
+# hanging_alpha=0.5 with the same real-lab -45 deg shoulder_pan base rotation applied to
+# HEIGHT_ALPHA_0_5_CLEARANCE_Q elsewhere in this file's own duplicate constants (added
+# 2026-08-02, mirrored from hardware/poses.py::HANGING_ALPHA_0_5_CLEARANCE_Q -- see that
+# file's comment and docs/status/hanging_pose_clearance_variant_2026-08-02.md for the
+# cond(J)/rigor-sweep investigation this constant was built for). Same caveats as
+# HANGING_ORIGIN_Q/HANGING_LOWER_Q above: not wired into this env's observation/reset logic,
+# added only to keep the two files' pose constants in sync. NOT real-hardware-ready -- no
+# physical clearance check has ever been done for this rotated hanging posture.
+HANGING_ALPHA_0_5_Q = 0.5 * HANGING_ORIGIN_Q + 0.5 * HANGING_LOWER_Q
+HANGING_ALPHA_0_5_CLEARANCE_Q = HANGING_ALPHA_0_5_Q.copy()
+HANGING_ALPHA_0_5_CLEARANCE_Q[0] = -0.7853981633974483
+
 OBS_DIM = 47
 ACTION_DIM = len(GAIN_FIELDS)
 RESIDUAL_ACTION_DIM = 6
