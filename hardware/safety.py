@@ -520,6 +520,40 @@ class CartesianMoveLimits:
     speed_max_consecutive_violations: int = 1
     speed_hard_multiple: float = 5.0
 
+    # Severity-scaled ("variable") consecutive-violation tolerance (added
+    # 2026-08-02). The graduated-tolerance mechanism above applies ONE flat
+    # cycle count to any violation between 1x the base threshold and
+    # hard_multiple -- a reading just barely over threshold and one nearly
+    # at the hard ceiling get the same tolerance. This adds real gradation:
+    # more cycles tolerated near 1x (closer to a plausible noisy-but-real
+    # signal), fewer as the reading approaches hard_multiple (closer to a
+    # genuine severe event, where waiting longer is the wrong tradeoff --
+    # real oscillations amplify with more cycles, they don't self-correct).
+    # Three tiers by ratio = observed_value / base_threshold:
+    #   ratio < tier1_multiple            -> tier1_cycles (most tolerant)
+    #   tier1_multiple <= ratio < tier2   -> tier2_cycles
+    #   tier2_multiple <= ratio < hard    -> tier3_cycles (least tolerant)
+    #   ratio >= hard_multiple            -> UNCHANGED instant trip (this
+    #     function/these fields never touch that path -- validated against
+    #     a real catastrophic single-cycle event, direct_torque_20260728_162206,
+    #     per accel_hard_multiple's own docstring above; loosening it is not
+    #     what this mechanism is for).
+    # Disabled (default) reproduces the flat accel_max_consecutive_violations/
+    # speed_max_consecutive_violations behavior exactly -- opt-in only, same
+    # convention as every other guard-tuning field in this class.
+    accel_variable_tolerance: bool = False
+    accel_tier1_multiple: float = 2.0
+    accel_tier1_cycles: int = 10
+    accel_tier2_multiple: float = 3.5
+    accel_tier2_cycles: int = 5
+    accel_tier3_cycles: int = 2
+    speed_variable_tolerance: bool = False
+    speed_tier1_multiple: float = 2.0
+    speed_tier1_cycles: int = 10
+    speed_tier2_multiple: float = 3.5
+    speed_tier2_cycles: int = 5
+    speed_tier3_cycles: int = 2
+
     def validate(self) -> None:
         for name in (
             "max_off_axis_drift_m",
@@ -550,6 +584,19 @@ class CartesianMoveLimits:
             raise ValueError("speed_max_consecutive_violations must be >= 1")
         if not np.isfinite(self.speed_hard_multiple) or self.speed_hard_multiple < 1.0:
             raise ValueError("speed_hard_multiple must be >= 1.0")
+        for prefix, hard_multiple in (("accel", self.accel_hard_multiple), ("speed", self.speed_hard_multiple)):
+            tier1_mult = float(getattr(self, f"{prefix}_tier1_multiple"))
+            tier2_mult = float(getattr(self, f"{prefix}_tier2_multiple"))
+            tier1_cycles = int(getattr(self, f"{prefix}_tier1_cycles"))
+            tier2_cycles = int(getattr(self, f"{prefix}_tier2_cycles"))
+            tier3_cycles = int(getattr(self, f"{prefix}_tier3_cycles"))
+            if not (1.0 < tier1_mult < tier2_mult < hard_multiple):
+                raise ValueError(
+                    f"{prefix}_tier1_multiple < {prefix}_tier2_multiple < {prefix}_hard_multiple "
+                    f"must hold, all > 1.0 (got {tier1_mult}, {tier2_mult}, {hard_multiple})"
+                )
+            if tier1_cycles < 1 or tier2_cycles < 1 or tier3_cycles < 1:
+                raise ValueError(f"{prefix}_tier{{1,2,3}}_cycles must all be >= 1")
 
     @classmethod
     def from_impedance_safety_config(cls, safety_cfg) -> "CartesianMoveLimits":
@@ -618,6 +665,33 @@ def is_likely_ursim(robot_ip: str) -> bool:
     if ip.startswith("127."):
         return True
     return False
+
+
+def _variable_tolerance_cycles(
+    ratio: float,
+    *,
+    enabled: bool,
+    base_cycles: int,
+    tier1_multiple: float,
+    tier1_cycles: int,
+    tier2_multiple: float,
+    tier2_cycles: int,
+    tier3_cycles: int,
+) -> int:
+    """Severity-scaled consecutive-violation tolerance for the graduated
+    accel/speed checks. ``ratio`` is the observed value divided by the base
+    threshold (> 1.0 means a violation; the caller has already excluded the
+    hard-multiple instant-trip case before calling this). Disabled
+    (``enabled=False``) returns ``base_cycles`` unchanged -- reproduces
+    today's flat tolerance exactly. See CartesianMoveLimits'
+    accel_variable_tolerance docstring for the full rationale."""
+    if not enabled:
+        return base_cycles
+    if ratio < tier1_multiple:
+        return tier1_cycles
+    if ratio < tier2_multiple:
+        return tier2_cycles
+    return tier3_cycles
 
 
 class CartesianMoveMonitor:
@@ -814,7 +888,17 @@ class CartesianMoveMonitor:
                 self._speed_consecutive_violations = 0
             else:
                 self._speed_consecutive_violations += 1
-                if self._speed_consecutive_violations >= self.limits.speed_max_consecutive_violations:
+                speed_tolerance = _variable_tolerance_cycles(
+                    speed_mps_for_limit / self.limits.max_tcp_speed_mps,
+                    enabled=self.limits.speed_variable_tolerance,
+                    base_cycles=self.limits.speed_max_consecutive_violations,
+                    tier1_multiple=self.limits.speed_tier1_multiple,
+                    tier1_cycles=self.limits.speed_tier1_cycles,
+                    tier2_multiple=self.limits.speed_tier2_multiple,
+                    tier2_cycles=self.limits.speed_tier2_cycles,
+                    tier3_cycles=self.limits.speed_tier3_cycles,
+                )
+                if self._speed_consecutive_violations >= speed_tolerance:
                     decision.add(
                         f"TCP speed {speed_mps_for_limit:.4f} m/s > {self.limits.max_tcp_speed_mps} m/s "
                         f"for {self._speed_consecutive_violations} consecutive cycles"
@@ -854,7 +938,17 @@ class CartesianMoveMonitor:
                         self._accel_consecutive_violations = 0
                     else:
                         self._accel_consecutive_violations += 1
-                        if self._accel_consecutive_violations >= self.limits.accel_max_consecutive_violations:
+                        accel_tolerance = _variable_tolerance_cycles(
+                            accel_mps2 / self.limits.max_tcp_accel_mps2,
+                            enabled=self.limits.accel_variable_tolerance,
+                            base_cycles=self.limits.accel_max_consecutive_violations,
+                            tier1_multiple=self.limits.accel_tier1_multiple,
+                            tier1_cycles=self.limits.accel_tier1_cycles,
+                            tier2_multiple=self.limits.accel_tier2_multiple,
+                            tier2_cycles=self.limits.accel_tier2_cycles,
+                            tier3_cycles=self.limits.accel_tier3_cycles,
+                        )
+                        if self._accel_consecutive_violations >= accel_tolerance:
                             decision.add(
                                 f"TCP acceleration {accel_mps2:.4f} m/s^2 > {self.limits.max_tcp_accel_mps2} m/s^2 "
                                 f"for {self._accel_consecutive_violations} consecutive cycles"
