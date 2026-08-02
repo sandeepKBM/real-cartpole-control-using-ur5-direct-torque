@@ -1,0 +1,117 @@
+# First-pass gain config for the new "hanging"/elbow-down transport pose family
+# (hardware/poses.py::HANGING_ORIGIN_Q/HANGING_LOWER_Q/q_for_hanging_height_alpha, added
+# 2026-08-01). See docs/status/hanging_pose_transport_family_2026-08-01.md for the full
+# design rationale, cond(J) sweep, and validation results.
+#
+# Why this exists: the ENTIRE canonical q_for_height_alpha(alpha) pose family (every
+# config with home_qpos near [0,-pi/2,0,-pi/2,0,0] or its interpolated relatives) sits at
+# wrist_2=0, a genuine UR-family kinematic singularity, for its whole range
+# (cond(full 6x6 J) 1e16-2.5e17 measured). `split_base_wrist_task`
+# (config/ur5e_mujoco_torque_osc_tuned_split_base_wrist.yaml) works around the
+# *consequence* of that in the controller; this config instead uses a pose family that
+# avoids the singularity by construction (wrist_2 held at +pi/2 throughout -- cond(full
+# 6x6 J) measured 7.04-15.41 across the whole hanging-family range).
+#
+# Gains: byte-identical to config/ur5e_mujoco_torque_osc_tuned.yaml's `controller.gains`
+# and structural flags (task_space_inertia_shaping, nullspace_posture,
+# posture_reanchor_on_settle, lambda_regularization, jacobian_singular_cond_max) -- this is
+# an intentional, direct starting point per the task instructions, NOT a retuned config.
+# Since the new pose is never near a singularity, `jacobian_singular_cond_max: 1.0e18`
+# (the already-promoted global default, see that config's own header) is a no-op here
+# either way. `home_qpos` is the only substantive change: the old family's
+# [0,-pi/2,0,-pi/2,0,0] active-origin pose is replaced with
+# hardware/poses.py::HANGING_ALPHA_0_5_Q (the hanging family's own alpha=0.5 midpoint,
+# mirroring how the old family's own height_alpha=0.5 pose anchors its rigor-sweep
+# validation).
+#
+# No `friction_feedforward` -- deliberately left off so this config's rigor-sweep results
+# are a direct, apples-to-apples comparison against config/ur5e_mujoco_torque_osc_tuned.yaml's
+# own already-documented, friction-model-era height_alpha=0.5 result (19/38, AGENTS.md
+# sec 3's "Real joint friction added to the sim model" note) -- both configs share the
+# identical friction-affected plant model (assets/ur5e_torque/ur5e_torque.xml) and
+# identical controller-side compensation (none). See the status doc for the actual
+# comparison and an honest discussion of whether adding friction_feedforward here would
+# help (it has not been tried in this pass).
+#
+# Sim-only. Not real-hardware validated. Do not use with real hardware without a fresh,
+# dedicated physical clearance check for this genuinely different arm posture -- flagged
+# explicitly and prominently in the status doc above.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  # hardware/poses.py::HANGING_ALPHA_0_5_Q -- the hanging pose family's alpha=0.5 midpoint.
+  home_qpos: [0.0, -1.641803, 1.401547, -1.959057, 1.5707963267948966, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
