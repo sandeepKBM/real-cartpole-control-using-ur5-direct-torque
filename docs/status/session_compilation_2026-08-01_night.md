@@ -324,8 +324,9 @@ At `height_alpha=0.5`, zero-degree pose, `config/ur5e_mujoco_torque_osc_tuned_sp
    with ~3x more margin before onset. New evidence this coupling is a base-rotation
    controller-architecture property, not something inseparable from the old family's wrist
    singularity as previously assumed.
-8. Full-range rigor sweep for the hanging-pose family (only `alpha=0.5` fully characterized) —
-   **dispatched, in progress**.
+8. **Full-range rigor sweep — done, real nuanced result, see §14.** Overall slightly ahead of
+   the old family (96.1% vs 94.7%), but NOT uniform — `alpha=0.2` is a real regression (89.5% vs
+   100%). The `alpha=0.5` headline number does not generalize; check the specific alpha.
 9. Whether the hanging pose needs `split_base_wrist_task` at all, since it doesn't sit at the
    singularity to begin with — **dispatched, in progress**.
 
@@ -354,3 +355,29 @@ only, mirrored into `rl_gain_scheduling/gain_scheduling_env.py`.
   family's documented sim onset of `~0.05-0.06m`) — a real, if partial, improvement, not a fix.
 - **Not real-hardware-ready** — no physical clearance check has been done for this rotated
   hanging posture, same rule as every pose change in this project.
+
+## 14. Hanging-pose full-range rigor sweep — real, not uniform advantage
+
+(`docs/status/hanging_pose_full_range_sweep_2026-08-02.md`) Standard 4-category sweep at
+`height_alpha ∈ {0.1, 0.2, 0.3, 0.5}`, `friction_feedforward` config, current friction-modeled
+plant:
+
+| alpha | hanging | old family |
+|---|---|---|
+| 0.1 | 38/38 (100%) | 38/38 (100%) |
+| 0.2 | **34/38 (89.5%)** | **38/38 (100%)** |
+| 0.3 | 38/38 (100%) | 35/38 (92.1%) |
+| 0.5 | 36/38 (94.7%) | 33/38 (86.8%) |
+| **sum** | **146/152 (96.1%)** | **144/152 (94.7%)** |
+
+Overall slight edge to the hanging family, but **`alpha=0.2` is a real regression** — driven
+entirely by `large_displacements` (4/8 vs 8/8), a genuine `|Z-Z0|>0.03m` guard trip at
+`dx≥0.15m`. Confirmed unrelated to conditioning (`cond(J)` stayed `11.9-15.3` throughout the
+failing run, same healthy range as everywhere else) — a real, alpha-specific reach/Z-hold limit
+of this particular pose family, not a re-emergence of the wrist singularity.
+
+**Singularity-avoidance itself held at every alpha checked** (`cond(J)` `8.9-37.2` across the
+whole range, extracted from real closed-loop traces including the one failing run — vs. the old
+family's `1e16-2.5e17` everywhere). But **the `alpha=0.5` headline number (94.7%) does not
+generalize uniformly** — anyone adopting this pose family for a different `height_alpha` should
+check that specific alpha's own number, not assume `alpha=0.5`'s result carries.
