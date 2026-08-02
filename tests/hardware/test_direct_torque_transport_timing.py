@@ -44,7 +44,7 @@ class _FastMockLink:
 
     @staticmethod
     def compose_robot_state(
-        link_state, *, jacobian, mass_matrix, time_s, target_x, target_x_vel, dt_s=None
+        link_state, *, jacobian, mass_matrix, time_s, target_x, target_x_vel, dt_s=None, target_x_accel=None
     ):
         from hardware.direct_torque_link import UR5eDirectTorqueLink
 
@@ -56,6 +56,7 @@ class _FastMockLink:
             target_x=target_x,
             target_x_vel=target_x_vel,
             dt_s=dt_s,
+            target_x_accel=target_x_accel,
         )
 
     def build_robot_state(self, link_state, *, time_s, target_x, target_x_vel, dt_s=None):

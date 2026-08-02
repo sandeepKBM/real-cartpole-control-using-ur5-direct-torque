@@ -79,6 +79,26 @@ def test_as_impedance_robot_state_omits_dt_s_when_absent() -> None:
     assert "dt_s" not in normalized
 
 
+def test_as_impedance_robot_state_passes_through_target_x_accel() -> None:
+    """target_x_accel (2026-08-01, acceleration_feedforward's reference
+    input) must survive as_impedance_robot_state()'s normalization -- the
+    same silent-drop bug class already found and fixed once for dt_s above."""
+    J = np.eye(6)
+    quat = np.array([1.0, 0.0, 0.0, 0.0])
+    raw = _state(0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, quat, 0, 0, 0, np.zeros(6), np.zeros(6), 0.0, J)
+    raw["target_x_accel"] = 0.75
+    normalized = as_impedance_robot_state(raw)
+    assert normalized["target_x_accel"] == 0.75
+
+
+def test_as_impedance_robot_state_omits_target_x_accel_when_absent() -> None:
+    J = np.eye(6)
+    quat = np.array([1.0, 0.0, 0.0, 0.0])
+    raw = _state(0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, quat, 0, 0, 0, np.zeros(6), np.zeros(6), 0.0, J)
+    normalized = as_impedance_robot_state(raw)
+    assert "target_x_accel" not in normalized
+
+
 def _assert_outputs_identical(a, b) -> None:
     for field in dataclasses.fields(a):
         av = getattr(a, field.name)

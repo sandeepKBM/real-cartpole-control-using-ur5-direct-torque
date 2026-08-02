@@ -20,7 +20,7 @@ from controller_core.x_axis_cartesian_impedance import (
     CartesianImpedanceConfig,
     XAxisCartesianImpedanceController,
 )
-from simulation.ur5e_mujoco_torque import accel_duration_displacement, x_profile_target
+from simulation.ur5e_mujoco_torque import accel_duration_displacement, x_profile_accel, x_profile_target
 from transport_metrics import compute_valid_move_hold_metrics, summarize_move_hold_trace
 
 from .direct_torque_link import UR5eDirectTorqueLink
@@ -462,6 +462,14 @@ def run_x_transport_direct_torque(
                 move_duration_s=move_duration_s,
                 target_accel_mps2=target_accel_mps2,
             )
+            target_x_accel = x_profile_accel(
+                trajectory_profile,
+                float(target_x_delta_m),
+                t_s,
+                duration_s,
+                move_duration_s=move_duration_s,
+                target_accel_mps2=target_accel_mps2,
+            )
 
             t_jac = monotonic_ns()
             tau_coriolis = np.zeros(6, dtype=np.float64)
@@ -492,6 +500,7 @@ def run_x_transport_direct_torque(
                 target_x=target_x,
                 target_x_vel=target_x_vel,
                 dt_s=real_dt_s,
+                target_x_accel=target_x_accel,
             )
             if phases is not None:
                 phases.record("build_state_ns", monotonic_ns() - t_build)

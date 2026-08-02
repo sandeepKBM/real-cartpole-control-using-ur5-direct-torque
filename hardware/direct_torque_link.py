@@ -176,6 +176,7 @@ class UR5eDirectTorqueLink:
         target_x: float,
         target_x_vel: float,
         dt_s: float | None = None,
+        target_x_accel: float | None = None,
     ) -> dict[str, np.ndarray | float | bool | None]:
         """Map RTDE telemetry + pre-fetched dynamics into controller_core RobotState.
 
@@ -184,6 +185,11 @@ class UR5eDirectTorqueLink:
         control-loop cycles) -- optional and additive; omitted (``None``)
         callers get byte-identical dicts to before this parameter existed.
         See ``controller_core/state_types.py``'s ``RobotState.dt_s`` docstring.
+
+        ``target_x_accel`` is the analogous optional/additive reference
+        acceleration (see ``simulation/ur5e_mujoco_torque.py::x_profile_accel``
+        and ``CartesianImpedanceConfig.acceleration_feedforward``) -- same
+        None-by-default, byte-identical-dict-when-omitted contract as ``dt_s``.
         """
         tcp = np.asarray(link_state.tcp_pose, dtype=np.float64).reshape(6)
         ee_pos = tcp[:3].copy()
@@ -203,6 +209,7 @@ class UR5eDirectTorqueLink:
             "mass_matrix": mass_matrix,
             "target_x": float(target_x),
             "target_x_vel": float(target_x_vel),
+            "target_x_accel": float(target_x_accel) if target_x_accel is not None else None,
             "transport_axis_index": 0,
             "dt_s": float(dt_s) if dt_s is not None else None,
         }
@@ -215,6 +222,7 @@ class UR5eDirectTorqueLink:
         target_x: float,
         target_x_vel: float,
         dt_s: float | None = None,
+        target_x_accel: float | None = None,
     ) -> dict[str, np.ndarray | float | bool | None]:
         """Map RTDE telemetry into the controller_core RobotState contract."""
         return self.compose_robot_state(
@@ -225,6 +233,7 @@ class UR5eDirectTorqueLink:
             target_x=target_x,
             target_x_vel=target_x_vel,
             dt_s=dt_s,
+            target_x_accel=target_x_accel,
         )
 
     def move_j(

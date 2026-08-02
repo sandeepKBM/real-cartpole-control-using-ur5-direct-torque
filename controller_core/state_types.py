@@ -28,6 +28,11 @@ class RobotState(TypedDict, total=False):
         ``[w, x, y, z]`` in the world frame.
       - ``target_x`` (float): commanded world-X target for the end effector.
       - ``target_x_vel`` (float): optional desired world-X target velocity.
+      - ``target_x_accel`` (float): optional desired world-X target
+        acceleration (reference feedforward -- see
+        ``simulation/ur5e_mujoco_torque.py::x_profile_accel`` and
+        ``CartesianImpedanceConfig.acceleration_feedforward``). Not consumed
+        unless that flag is on; absent unless the adapter supplies it.
       - ``target_axis`` (float): optional transport-axis target used when a
         controller exposes a selected world-axis target rather than X-only.
       - ``target_axis_vel`` (float): optional transport-axis target velocity.
@@ -76,6 +81,7 @@ class RobotState(TypedDict, total=False):
     ee_ang_vel: np.ndarray
     target_x: float
     target_x_vel: float
+    target_x_accel: float
     target_axis: float
     target_axis_vel: float
     target_ee_pos: np.ndarray
@@ -173,6 +179,8 @@ def as_robot_state(raw: dict[str, Any], num_joints: int = 6) -> RobotState:
         state["jacobian"] = _asarray_2d(raw["jacobian"], "jacobian", 6, num_joints)
     if "target_x_vel" in raw and raw["target_x_vel"] is not None:
         state["target_x_vel"] = float(raw["target_x_vel"])
+    if "target_x_accel" in raw and raw["target_x_accel"] is not None:
+        state["target_x_accel"] = float(raw["target_x_accel"])
     if "target_axis" in raw and raw["target_axis"] is not None:
         state["target_axis"] = float(raw["target_axis"])
     if "target_axis_vel" in raw and raw["target_axis_vel"] is not None:
@@ -226,6 +234,8 @@ def as_impedance_robot_state(raw: dict[str, Any], num_joints: int = 6) -> RobotS
     }
     if "target_x_vel" in raw and raw["target_x_vel"] is not None:
         state["target_x_vel"] = float(raw["target_x_vel"])
+    if "target_x_accel" in raw and raw["target_x_accel"] is not None:
+        state["target_x_accel"] = float(raw["target_x_accel"])
     if "target_axis" in raw and raw["target_axis"] is not None:
         state["target_axis"] = float(raw["target_axis"])
     if "target_axis_vel" in raw and raw["target_axis_vel"] is not None:
