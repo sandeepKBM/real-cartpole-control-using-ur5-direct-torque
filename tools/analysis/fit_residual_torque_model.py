@@ -18,9 +18,19 @@ What this script does, end to end:
    between train and test and give a falsely optimistic score. Splitting by
    whole run is the honest choice at this data volume, even though it means
    the test set is only a few runs.
-3. Featurize with ``controller_core.residual_torque_model.all_joint_features``
-   -- the SAME function the deterministic-cost inference path would use, so
-   the fit and any future real-time evaluation can never silently diverge.
+3. Featurize with one of :data:`FEATURE_SETS` (``--feature-set``, default
+   ``coupled`` since 2026-08-01) -- the SAME feature functions the
+   deterministic-cost inference path (``controller_core.residual_torque_model``)
+   would use, so the fit and any future real-time evaluation can never
+   silently diverge. ``coupled`` (default) uses
+   ``all_joint_features_coupled`` (own-joint 6 features plus every other
+   joint's qd/sin(q)/cos(q), 21 features/joint) -- promoted to default after
+   measurably improving held-out R^2, averaged across 7 independent
+   real-hardware run-level splits, on 5 of the 6 joints (several
+   substantially; one joint, shoulder_lift, saw a small real dip -- see the
+   status doc's "Cross-joint coupling feature set" section for the honest
+   full table). ``baseline`` reproduces the
+   original own-joint-only ``all_joint_features`` (6 features/joint) exactly.
 4. Fit one ridge-regularized (L2, closed-form normal equations, per-feature
    standardized) weight vector per joint by default -- ``--ridge-lambda 0``
    reproduces the original plain-OLS behavior (``numpy.linalg.lstsq``) for
@@ -61,9 +71,25 @@ if str(REPO_ROOT) not in sys.path:
 
 from controller_core.residual_torque_model import (  # noqa: E402
     NUM_FEATURES_PER_JOINT,
+    NUM_FEATURES_PER_JOINT_COUPLED,
     NUM_JOINTS,
     all_joint_features,
+    all_joint_features_coupled,
 )
+
+# Feature-set registry (added 2026-08-01, see docs/status/
+# residual_torque_regression_pipeline_2026-08-01.md's "Cross-joint coupling feature set"
+# section): "coupled" is the new default, chosen because it improved held-out R^2, averaged
+# across 7 independent real-hardware run-level train/test splits, on 5 of the 6 joints versus
+# "baseline" (the original own-joint-only 6-feature basis) -- several substantially. Joint 1
+# (shoulder_lift) saw a small, real dip (avg R^2 +0.747 -> +0.720); reported honestly, not
+# hidden, and judged worth accepting given the much larger gains elsewhere (see the status
+# doc for the full table). "baseline" is kept as an explicit, easy opt-out -- same pattern as
+# --ridge-lambda 0 reproducing the pre-ridge-fix plain-OLS behavior.
+FEATURE_SETS = {
+    "coupled": (all_joint_features_coupled, NUM_FEATURES_PER_JOINT_COUPLED),
+    "baseline": (all_joint_features, NUM_FEATURES_PER_JOINT),
+}
 from tools.analysis.residual_data import ResidualDataset, ResidualDatasetRun, build_dataset  # noqa: E402
 
 
@@ -106,28 +132,39 @@ def _split_runs(
 
 
 def _featurize_runs(
-    runs: list[ResidualDatasetRun], *, deadband: float
+    runs: list[ResidualDatasetRun], *, deadband: float, feature_set: str = "coupled"
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Returns (X, y): X shape (N, NUM_JOINTS, NUM_FEATURES_PER_JOINT), y shape (N, NUM_JOINTS)."""
+    """Returns (X, y): X shape (N, NUM_JOINTS, n_features), y shape (N, NUM_JOINTS).
+
+    ``feature_set`` selects among :data:`FEATURE_SETS` (added 2026-08-01) -- "coupled"
+    (default) uses :func:`controller_core.residual_torque_model.all_joint_features_coupled`
+    (21 features/joint, includes other joints' qd/q); "baseline" reproduces the original
+    own-joint-only 6-feature basis exactly.
+    """
+    if feature_set not in FEATURE_SETS:
+        raise ValueError(f"feature_set must be one of {sorted(FEATURE_SETS)}; got {feature_set!r}")
+    feature_fn, n_features = FEATURE_SETS[feature_set]
     if not runs:
         return (
-            np.zeros((0, NUM_JOINTS, NUM_FEATURES_PER_JOINT)),
+            np.zeros((0, NUM_JOINTS, n_features)),
             np.zeros((0, NUM_JOINTS)),
         )
     x_chunks = []
     y_chunks = []
     for run in runs:
         n = run.q.shape[0]
-        feats = np.empty((n, NUM_JOINTS, NUM_FEATURES_PER_JOINT), dtype=np.float64)
+        feats = np.empty((n, NUM_JOINTS, n_features), dtype=np.float64)
         for i in range(n):
-            feats[i] = all_joint_features(run.q[i], run.qd[i], deadband=deadband)
+            feats[i] = feature_fn(run.q[i], run.qd[i], deadband=deadband)
         x_chunks.append(feats)
         y_chunks.append(run.tau_residual)
     return np.concatenate(x_chunks, axis=0), np.concatenate(y_chunks, axis=0)
 
 
 def fit_ols_weights(x_train: np.ndarray, y_train: np.ndarray) -> np.ndarray:
-    """Ordinary least squares, one joint at a time. Returns (NUM_JOINTS, NUM_FEATURES_PER_JOINT).
+    """Ordinary least squares, one joint at a time. Returns (NUM_JOINTS, n_features), where
+    ``n_features = x_train.shape[2]`` (feature-set-agnostic since 2026-08-01 -- works for both
+    the "baseline" 6-feature and "coupled" 21-feature bases in :data:`FEATURE_SETS`).
 
     **Known failure mode (found 2026-08-01 fitting real UR5e data, see
     ``docs/status/residual_torque_regression_pipeline_2026-08-01.md``): joints that spend
@@ -147,11 +184,12 @@ def fit_ols_weights(x_train: np.ndarray, y_train: np.ndarray) -> np.ndarray:
     :func:`main` -- this function is kept for explicit ``--ridge-lambda 0`` opt-out / comparison,
     not as the recommended default.**
     """
-    weights = np.zeros((NUM_JOINTS, NUM_FEATURES_PER_JOINT), dtype=np.float64)
+    n_features = x_train.shape[2]
+    weights = np.zeros((NUM_JOINTS, n_features), dtype=np.float64)
     for j in range(NUM_JOINTS):
         design = x_train[:, j, :]
         target = y_train[:, j]
-        if design.shape[0] < NUM_FEATURES_PER_JOINT:
+        if design.shape[0] < n_features:
             # Not enough rows to fit this joint's features; leave weights at zero
             # (falls back to the zero-residual baseline for this joint only).
             continue
@@ -191,12 +229,13 @@ def fit_ridge_weights(x_train: np.ndarray, y_train: np.ndarray, *, ridge_lambda:
     """
     if ridge_lambda < 0.0:
         raise ValueError(f"ridge_lambda must be >= 0; got {ridge_lambda}")
-    weights = np.zeros((NUM_JOINTS, NUM_FEATURES_PER_JOINT), dtype=np.float64)
-    identity = np.eye(NUM_FEATURES_PER_JOINT, dtype=np.float64)
+    n_features = x_train.shape[2]
+    weights = np.zeros((NUM_JOINTS, n_features), dtype=np.float64)
+    identity = np.eye(n_features, dtype=np.float64)
     for j in range(NUM_JOINTS):
         design = x_train[:, j, :]
         target = y_train[:, j]
-        if design.shape[0] < NUM_FEATURES_PER_JOINT:
+        if design.shape[0] < n_features:
             continue
         scale = _feature_scale(design)
         design_scaled = design / scale
@@ -275,8 +314,9 @@ def evaluate(
     *,
     deadband: float,
     clip_bounds: np.ndarray | None = None,
+    feature_set: str = "coupled",
 ) -> list[JointEvalMetrics]:
-    x, y = _featurize_runs(runs, deadband=deadband)
+    x, y = _featurize_runs(runs, deadband=deadband, feature_set=feature_set)
     if x.shape[0] == 0:
         return []
     y_pred = predict(weights, x)
@@ -346,6 +386,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lowpass-alpha", type=float, default=1.0, help="Passed to JointAccelEstimator.")
     p.add_argument("--deadband", type=float, default=0.05, help="tanh deadband, rad/s (feature basis).")
     p.add_argument(
+        "--feature-set",
+        choices=sorted(FEATURE_SETS),
+        default="coupled",
+        help=(
+            "Per-joint feature basis (added 2026-08-01). 'coupled' (default): own-joint 6 "
+            "features plus every OTHER joint's qd/sin(q)/cos(q) (21 features/joint total) -- "
+            "promoted to default after measurably improving held-out R^2, averaged across 7 "
+            "independent real-hardware run-level splits, on 5 of the 6 joints (one, "
+            "shoulder_lift, saw a small real dip), see "
+            "docs/status/residual_torque_regression_pipeline_2026-08-01.md. 'baseline': the "
+            "original own-joint-only 6-feature basis, kept as an explicit opt-out."
+        ),
+    )
+    p.add_argument(
         "--ridge-lambda",
         type=float,
         default=1.0e5,
@@ -401,7 +455,10 @@ def main() -> int:
     for r in test_runs:
         print(f"  held out: {r.label} ({r.source_path})")
 
-    x_train, y_train = _featurize_runs(train_runs, deadband=args.deadband)
+    n_features = FEATURE_SETS[args.feature_set][1]
+    print(f"Feature set: {args.feature_set} ({n_features} features/joint)")
+
+    x_train, y_train = _featurize_runs(train_runs, deadband=args.deadband, feature_set=args.feature_set)
     if args.ridge_lambda > 0.0:
         weights = fit_ridge_weights(x_train, y_train, ridge_lambda=args.ridge_lambda)
         print(f"\nFit method: ridge (lambda={args.ridge_lambda:g}, standardized-feature closed form)")
@@ -418,8 +475,12 @@ def main() -> int:
             + ", ".join(f"j{j}={clip_bounds[j]:.3f}" for j in range(NUM_JOINTS))
         )
 
-    train_metrics = evaluate(train_runs, weights, deadband=args.deadband, clip_bounds=clip_bounds)
-    test_metrics = evaluate(test_runs, weights, deadband=args.deadband, clip_bounds=clip_bounds)
+    train_metrics = evaluate(
+        train_runs, weights, deadband=args.deadband, clip_bounds=clip_bounds, feature_set=args.feature_set
+    )
+    test_metrics = evaluate(
+        test_runs, weights, deadband=args.deadband, clip_bounds=clip_bounds, feature_set=args.feature_set
+    )
 
     print("\n=== Train-set fit (in-sample; expect this to look better than test) ===")
     for m in train_metrics:
@@ -454,6 +515,8 @@ def main() -> int:
         "lowpass_alpha": args.lowpass_alpha,
         "deadband": args.deadband,
         "seed": args.seed,
+        "feature_set": args.feature_set,
+        "n_features_per_joint": n_features,
         "ridge_lambda": args.ridge_lambda,
         "clip_multiple": args.clip_multiple if clip_bounds is not None else None,
         "clip_bounds": clip_bounds.tolist() if clip_bounds is not None else None,
