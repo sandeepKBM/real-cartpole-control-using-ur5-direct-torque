@@ -24,6 +24,7 @@ ros2_ws/log/
 
 # Python caches and bytecode
 .venv/
+.venv-hardware/
 **/__pycache__/
 *.pyc
 *.pyo
