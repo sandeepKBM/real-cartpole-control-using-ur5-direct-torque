@@ -60,6 +60,7 @@ authoritative real-hardware record):
 | `direct_torque_20260801_202215` | −0.015 | 8.0s | −0.0632 / −0.1528m (41%) | TCP-**accel** trip (0.5112) | 5.31–5.32 |
 | `direct_torque_20260801_202639` | −0.015 | 8.0s | −0.0045 / −0.1528m (3%) | TCP-**accel** trip (0.7042, different timing/magnitude) | 7.56–7.82 |
 | `direct_torque_20260801_203354` | +0.02 | 8.0s | 0.0639 / 0.2037m (31%) | TCP-speed trip (0.0510) | 7.81–16.4 |
+| `direct_torque_20260801_204446` | −0.015 | 8.0s | −0.0496 / −0.1528m (32%) | TCP-**speed** trip (0.0514, 3rd `-0.015` trial, different guard than trials 1-2) | 5.65–7.83 |
 
 **Bottom line: the singularity-conditioning mechanism is fixed, confirmed on real hardware
 every single time it's been tested tonight** (`jacobian_cond` stayed in the single-to-low-double
@@ -136,28 +137,34 @@ sim + real trace analysis, no code changes):
   but flags that larger orientation excursions can still bring the real arm physically close to
   the singularity, worth monitoring if accel is pushed further.
 
-## 6. Open, unexplained — `-X` acceleration transient at `0.015/8s`
+## 6. Open, unexplained — `-X` acceleration transient at `0.015/8s`, plus a likely second overlapping mechanism
 
-Two real trials at the identical command (`-0.015/8s`), both tripped via TCP-**accel** (not
-speed), but with genuinely different signatures — rules out a fixed trajectory-shape event (the
-scurve acceleration zero-crossing at `t=T/2=4.0s` was a live hypothesis, directly refuted by
-trial 2 tripping at `t=1.84s`, nowhere near that point):
+Three real trials at the identical command (`-0.015/8s`), three different outcomes — rules out
+a fixed trajectory-shape event (the scurve acceleration zero-crossing at `t=T/2=4.0s` was a live
+hypothesis, directly refuted by trial 2 tripping at `t=1.84s`, nowhere near that point):
 
-| | trial 1 (`_202215`) | trial 2 (`_202639`) |
-|---|---|---|
-| trip time | t=3.93s | t=1.84s |
-| peak accel | 0.5112 | 0.7042 |
-| orientation error at trip | 0.083-0.085 rad | 0.0053-0.006 rad |
-| `jacobian_cond` | 5.31-5.32 (low, stable) | 7.56-7.82 (low, stable) |
-| `tau_controller` | falling | falling |
+| | trial 1 (`_202215`) | trial 2 (`_202639`) | trial 3 (`_204446`) |
+|---|---|---|---|
+| guard | accel | accel | **speed** |
+| trip time | t=3.93s | t=1.84s | t=3.50s |
+| achieved | 41% | 3% | 32% |
+| peak value | 0.5112 | 0.7042 | 0.0514 |
+| orientation error at trip | 0.083-0.085 rad | 0.0053-0.006 rad | 0.066 rad |
+| `jacobian_cond` | 5.31-5.32 (low, stable) | 7.56-7.82 (low, stable) | 5.65-7.83 (low, stable) |
+| `tau_controller` | falling | falling | (not re-checked) |
 
-Both rule out the singularity (low stable `jacobian_cond`) and friction breakaway (falling tau,
-not climbing; flat/converged `x_error`, not diverging). Neither matches the `+X`
-orientation-growth mechanism either (trial 2's orientation error is negligible). **Currently
-unexplained** — looks like a genuine but irregular real mechanical/electrical transient not
-predicted by any state variable tracked so far, surviving the already-validated noise-robust
-accel-guard smoothing (gap=5, alpha=0.2, the same combination proven to eliminate 30/30 spurious
-trips in a prior real backtest). Not yet root-caused.
+All three rule out the singularity (low, stable `jacobian_cond` every time) and friction
+breakaway (falling tau, flat/converged `x_error` in trials 1-2, not diverging). **Revised
+read after the third trial**: this doesn't look like one mechanism with noisy timing — trial 3's
+signature (speed trip, moderate orientation buildup) matches the same `+X`
+orientation-growth mechanism from §4, while trials 1-2 (accel trip, wildly different orientation
+levels, no consistent timing) don't fit that pattern at all. Most likely **two distinct real
+mechanisms both active near this `-X` magnitude**, with which one trips first varying run to
+run — consistent with a genuine physical effect with real run-to-run stochasticity (e.g.
+stick-slip has exactly this character), not a deterministic trajectory-shape or guard-noise
+artifact. The accel-transient piece (trials 1-2) remains unexplained; the speed-trip piece
+(trial 3) is plausibly just the already-understood §4 mechanism showing up in this direction
+too.
 
 ## 7. Negative/deprioritized results (real findings, not gaps in follow-through)
 
@@ -211,9 +218,12 @@ At `height_alpha=0.5`, zero-degree pose, `config/ur5e_mujoco_torque_osc_tuned_sp
   orientation error more room to grow before the same guard catches it, rather than helping the
   arm "get there gently."
 - **`-X`**: clean at `accel=0.01` (implied by symmetry, not directly tested — only `+0.01` was
-  actually run). Fails at `accel=0.015, move_duration=8.0s` via the unexplained transient in §6,
-  twice, with different signatures both times.
-- Singularity-conditioning: fixed and validated in **every** real run tonight, pass or fail.
+  actually run). Fails at `accel=0.015, move_duration=8.0s` in all 3 trials tonight, via two
+  likely-distinct real mechanisms (§6) — an unexplained accel transient (2/3 trials) and the
+  already-understood §4 orientation-growth speed trip (1/3 trials). `-X` ceiling for this
+  pose/config is `accel=0.01`, same as `+X`'s effective ceiling once §4's exposure-time finding
+  is accounted for.
+- Singularity-conditioning: fixed and validated in **every real run tonight, 9/9, pass or fail.**
 
 ## 10. Suggested next steps (not decided, for discussion)
 
@@ -221,8 +231,9 @@ At `height_alpha=0.5`, zero-degree pose, `config/ur5e_mujoco_torque_osc_tuned_sp
    (`direct_torque_20260801_203354`): worse than `4.0s`, confirming the exposure-time
    hypothesis (see §9). `+X` ceiling for this pose/config is now `accel=0.015` at any tested
    duration; `0.02` fails regardless of duration.
-2. A third `-X` `0.015/8s` trial, to see if a pattern emerges across three data points for §6's
-   unexplained transient, or accept `-0.01` as the practical `-X` ceiling for now and move on.
+2. ~~A third `-X` `0.015/8s` trial~~ — **done** (`direct_torque_20260801_204446`): revealed a
+   likely second, distinct mechanism rather than resolving the first (see §6's revised read).
+   `-0.01` is the practical `-X` ceiling for now.
 3. Once the acceleration-feedforward agent reports, real-hardware test it (small, careful first
    step per this session's own established discipline) — motivated by the general jitter/tracking-lag
    discussion, not by either open failure mode specifically.
