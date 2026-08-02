@@ -63,10 +63,11 @@ class _MockDTLink:
         self._tcp_x += float(tau_nm[0]) * 1e-6
 
     @staticmethod
-    def compose_robot_state(link_state, *, jacobian, mass_matrix, time_s, target_x, target_x_vel, dt_s=None):
+    def compose_robot_state(link_state, *, jacobian, mass_matrix, time_s, target_x, target_x_vel, dt_s=None, target_x_accel=None):
         return UR5eDirectTorqueLink.compose_robot_state(
             link_state, jacobian=jacobian, mass_matrix=mass_matrix,
             time_s=time_s, target_x=target_x, target_x_vel=target_x_vel, dt_s=dt_s,
+            target_x_accel=target_x_accel,
         )
 
     def build_robot_state(self, link_state, *, time_s, target_x, target_x_vel, dt_s=None):

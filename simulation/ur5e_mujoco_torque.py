@@ -213,6 +213,7 @@ class MujocoUR5eState:
     mass_matrix: np.ndarray | None = None
     target_x: float = 0.0
     target_x_vel: float = 0.0
+    target_x_accel: float = 0.0
     target_axis: float | None = None
     target_axis_vel: float | None = None
     target_ee_pos: np.ndarray | None = None
@@ -234,6 +235,7 @@ class MujocoUR5eState:
             "jacobian": np.asarray(self.jacobian, dtype=np.float64).reshape(6, 6),
             "target_x": float(self.target_x),
             "target_x_vel": float(self.target_x_vel),
+            "target_x_accel": float(self.target_x_accel),
             "hold_current_pose": bool(self.hold_current_pose),
             "transport_axis_index": int(self.transport_axis_index),
         }
@@ -372,6 +374,7 @@ def build_mujoco_state(
     dt_s: float,
     target_x: float,
     target_x_vel: float = 0.0,
+    target_x_accel: float = 0.0,
     target_axis: float | None = None,
     target_axis_vel: float | None = None,
     target_ee_pos: np.ndarray | None = None,
@@ -430,6 +433,7 @@ def build_mujoco_state(
         mass_matrix=mass_matrix,
         target_x=float(target_x),
         target_x_vel=float(target_x_vel),
+        target_x_accel=float(target_x_accel),
         target_axis=None if target_axis is None else float(target_axis),
         target_axis_vel=None if target_axis_vel is None else float(target_axis_vel),
         target_ee_pos=None if target_ee_pos is None else np.asarray(target_ee_pos, dtype=np.float64).reshape(3),
@@ -840,6 +844,89 @@ def x_profile_target(
         x_rel = coeff * (t_clamped - (move_duration_s / (2.0 * np.pi)) * np.sin(omega * t_clamped))
         x_vel = accel * (1.0 - np.cos(omega * t_clamped))
         return float(x0 + x_rel), float(x_vel)
+    raise ValueError(f"Unsupported trajectory profile: {profile!r}")
+
+
+def x_profile_accel(
+    profile: str,
+    target_x_delta: float,
+    t_s: float,
+    duration_s: float,
+    move_duration_s: float | None = None,
+    target_accel_mps2: float | None = None,
+) -> float:
+    """Closed-form reference X acceleration for the same trajectory family as
+    ``x_profile_target`` above -- added 2026-08-01 for
+    ``controller_core.x_axis_cartesian_impedance.CartesianImpedanceConfig``'s
+    ``acceleration_feedforward`` flag (see
+    docs/status/acceleration_feedforward_2026-08-01.md).
+
+    Deliberately a SEPARATE function rather than a third return value on
+    ``x_profile_target`` itself: that function has ~15 existing call sites
+    (this repo's sim experiment engine, ``hardware/position_transport.py``,
+    ``rl_gain_scheduling/gain_scheduling_env.py``, three test files) that all
+    unpack exactly ``x, v = x_profile_target(...)`` -- widening that tuple
+    would force an unrelated edit at every one of them for a feature only two
+    call sites (the sim experiment engine, ``hardware/direct_torque_transport.py``)
+    actually need today. Same argument order as ``x_profile_target`` minus
+    ``x0`` (acceleration has no position offset).
+
+    Defined as the exact time-derivative of the VELOCITY ``x_profile_target``
+    returns, not a fresh re-derivation from the position formula -- for
+    ``min_jerk``/``min_jerk_move_hold`` those are the same thing (the shipped
+    position/velocity closed forms are self-consistent). For
+    ``accel_duration_scurve`` they are NOT: the shipped ``x_vel`` there is
+    ``accel*(1-cos(omega*t))`` (omega = 2*pi/move_duration_s), whose own
+    closed-form time-derivative is ``accel*omega*sin(omega*t)`` -- not the
+    literal ``accel*sin(2*pi*t/T)`` this repo's other comments describe (that
+    simpler form is the derivative of a DIFFERENT, un-shipped velocity
+    profile; it differs from the one actually driving ``kd_x`` by a constant
+    factor of ``move_duration_s/(2*pi)``). This function returns the
+    derivative of the velocity the controller actually tracks, since that is
+    what a feedforward term must be consistent with -- not the docstring
+    paraphrase, and not the position formula's own (also inconsistent with
+    ``x_vel`` by the same factor) true derivative. Nothing about
+    ``x_profile_target`` itself is changed here.
+    """
+    duration_s = max(float(duration_s), 1.0e-9)
+    t_s = float(t_s)
+    target_x_delta = float(target_x_delta)
+    if profile in ("step", "ramp"):
+        return 0.0
+    if profile == "min_jerk":
+        if not (0.0 <= t_s < duration_s):
+            return 0.0
+        a = float(np.clip(t_s / duration_s, 0.0, 1.0))
+        d2s_da2 = 60.0 * a - 180.0 * a**2 + 120.0 * a**3
+        return float(target_x_delta * d2s_da2 / (duration_s * duration_s))
+    if profile == "min_jerk_move_hold":
+        if move_duration_s is None:
+            raise ValueError("min_jerk_move_hold requires move_duration_s")
+        move_duration_s = max(float(move_duration_s), 1.0e-9)
+        if move_duration_s > duration_s:
+            raise ValueError("move_duration_s must not exceed duration_s for min_jerk_move_hold")
+        if not (0.0 <= t_s < move_duration_s):
+            return 0.0
+        move_a = float(np.clip(t_s / move_duration_s, 0.0, 1.0))
+        d2s_da2 = 60.0 * move_a - 180.0 * move_a**2 + 120.0 * move_a**3
+        return float(target_x_delta * d2s_da2 / (move_duration_s * move_duration_s))
+    if profile in ("accel_duration_triangular", "accel_duration_scurve"):
+        if target_accel_mps2 is None:
+            raise ValueError(f"{profile} requires target_accel_mps2")
+        if move_duration_s is None:
+            raise ValueError(f"{profile} requires move_duration_s")
+        move_duration_s = max(float(move_duration_s), 1.0e-9)
+        if move_duration_s > duration_s:
+            raise ValueError(f"move_duration_s must not exceed duration_s for {profile}")
+        accel = float(target_accel_mps2)
+        if t_s > move_duration_s:
+            return 0.0
+        t_clamped = float(np.clip(t_s, 0.0, move_duration_s))
+        if profile == "accel_duration_triangular":
+            half_t = move_duration_s / 2.0
+            return float(accel if t_clamped <= half_t else -accel)
+        omega = 2.0 * np.pi / move_duration_s
+        return float(accel * omega * np.sin(omega * t_clamped))
     raise ValueError(f"Unsupported trajectory profile: {profile!r}")
 
 

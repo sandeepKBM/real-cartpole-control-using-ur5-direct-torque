@@ -42,6 +42,7 @@ from simulation.ur5e_mujoco_torque import (  # noqa: E402
     load_model,
     resolve_start_q,
     write_trace_plot,
+    x_profile_accel,
     x_profile_target,
 )
 from transport_metrics import compute_valid_move_hold_metrics, controller_gain_summary, summarize_move_hold_trace, summarize_residual_torque_trace, summarize_transport_trace  # noqa: E402
@@ -902,6 +903,14 @@ def run() -> int:
                 move_duration_s=move_duration_s if trajectory_profile in _MOVE_DURATION_PROFILES else None,
                 target_accel_mps2=float(args.target_accel) if trajectory_profile in _ACCEL_DURATION_PROFILES else None,
             )
+            target_x_accel_now = x_profile_accel(
+                trajectory_profile,
+                float(target_x_delta),
+                float(data.time),
+                float(args.duration),
+                move_duration_s=move_duration_s if trajectory_profile in _MOVE_DURATION_PROFILES else None,
+                target_accel_mps2=float(args.target_accel) if trajectory_profile in _ACCEL_DURATION_PROFILES else None,
+            )
             target_ee_pos = np.array([target_x_now, state0.ee_pos[1], state0.ee_pos[2]], dtype=np.float64)
             target_ee_vel = np.array([target_x_vel_now, 0.0, 0.0], dtype=np.float64)
             prev_tau = (
@@ -918,6 +927,7 @@ def run() -> int:
                 dt_s=dt,
                 target_x=float(target_x_now),
                 target_x_vel=float(target_x_vel_now),
+                target_x_accel=float(target_x_accel_now),
                 target_axis=float(target_ee_pos[int(args.transport_axis_index)]),
                 target_axis_vel=float(target_ee_vel[int(args.transport_axis_index)]),
                 target_ee_pos=target_ee_pos,
@@ -994,6 +1004,7 @@ def run() -> int:
                     dt_s=dt,
                     target_x=float(target_x_now),
                     target_x_vel=float(target_x_vel_now),
+                    target_x_accel=float(target_x_accel_now),
                     target_axis=float(target_ee_pos[int(args.transport_axis_index)]),
                     target_axis_vel=float(target_ee_vel[int(args.transport_axis_index)]),
                     target_ee_pos=target_ee_pos,
@@ -1039,6 +1050,7 @@ def run() -> int:
                     "ee_ang_vel": post_state.ee_ang_vel.tolist(),
                     "target_x": float(target_x_now),
                     "target_x_vel": float(target_x_vel_now),
+                    "target_x_accel": float(target_x_accel_now),
                     "target_ee_pos": target_ee_pos.tolist(),
                     "target_ee_vel": target_ee_vel.tolist(),
                     "actuator_force": np.asarray(data.actuator_force[:6], dtype=np.float64).tolist(),
@@ -1082,6 +1094,8 @@ def run() -> int:
                     "tau_damping": controller_output.get("tau_damping"),
                     "tau_friction_ff": controller_output.get("tau_friction_ff"),
                     "friction_z": controller_output.get("friction_z"),
+                    "wrench_accel_ff": controller_output.get("wrench_accel_ff"),
+                    "acceleration_feedforward_active": controller_output.get("acceleration_feedforward_active"),
                     "jacobian_pre_step": pre_state.jacobian.tolist(),
                     "termination_reason": termination_reason,
                     "control_effort_l2": control_effort,
@@ -1107,6 +1121,7 @@ def run() -> int:
                 dt_s=dt,
                 target_x=float(target_x_now),
                 target_x_vel=float(target_x_vel_now),
+                target_x_accel=float(target_x_accel_now),
                 target_axis=float(target_ee_pos[int(args.transport_axis_index)]),
                 target_axis_vel=float(target_ee_vel[int(args.transport_axis_index)]),
                 target_ee_pos=target_ee_pos,
@@ -1209,6 +1224,7 @@ def run() -> int:
                 "ee_ang_vel": post_state.ee_ang_vel.tolist(),
                 "target_x": float(target_x_now),
                 "target_x_vel": float(target_x_vel_now),
+                "target_x_accel": float(target_x_accel_now),
                 "target_ee_pos": target_ee_pos.tolist(),
                 "target_ee_vel": target_ee_vel.tolist(),
                 "actuator_force": np.asarray(data.actuator_force[:6], dtype=np.float64).tolist(),
@@ -1252,6 +1268,8 @@ def run() -> int:
                 "tau_damping": controller_output.get("tau_damping"),
                 "tau_friction_ff": controller_output.get("tau_friction_ff"),
                 "friction_z": controller_output.get("friction_z"),
+                "wrench_accel_ff": controller_output.get("wrench_accel_ff"),
+                "acceleration_feedforward_active": controller_output.get("acceleration_feedforward_active"),
                 "jacobian_pre_step": pre_state.jacobian.tolist(),
                 "termination_reason": "",
                 "control_effort_l2": control_effort,

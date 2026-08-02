@@ -56,6 +56,23 @@ def test_as_robot_state_omits_dt_s_when_absent() -> None:
     assert "dt_s" not in state
 
 
+def test_as_robot_state_passes_through_target_x_accel() -> None:
+    """target_x_accel (the reference acceleration feedforward, 2026-08-01)
+    must survive as_robot_state()'s normalization -- the same silent-drop bug
+    class already found and fixed once for dt_s above: a field present in the
+    raw dict but missing from the function's explicit optional-key whitelist
+    is dropped before any controller code can see it."""
+    raw = _baseline_state()
+    raw["target_x_accel"] = 0.35
+    state = as_robot_state(raw)
+    assert state["target_x_accel"] == 0.35
+
+
+def test_as_robot_state_omits_target_x_accel_when_absent() -> None:
+    state = as_robot_state(_baseline_state())
+    assert "target_x_accel" not in state
+
+
 def test_controller_returns_positive_fx_when_target_is_ahead() -> None:
     ctrl = XAxisController(XAxisControllerConfig(kp_x=200.0, kd_x=40.0, fx_max_n=50.0))
     state = as_robot_state(_baseline_state(target_x=0.1, x_now=0.0))

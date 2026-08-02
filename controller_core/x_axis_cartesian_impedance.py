@@ -371,6 +371,42 @@ class CartesianImpedanceConfig:
     # coincidentally equal output -- verified byte-identical in
     # tests/unit/test_split_base_wrist_task.py.
     split_base_wrist_task: bool = False
+    # Acceleration feedforward (default off = historical behavior: pure PD on
+    # position+velocity error, Fx = kp_x*x_err + kd_x*(x_vel_des - vx)).
+    # Added 2026-08-01 (see docs/status/acceleration_feedforward_2026-08-01.md):
+    # a pure PD law only ever reacts to tracking error that has already
+    # appeared, which is part of why real hardware traces show tracking lag
+    # and per-cycle jitter rather than smooth motion. The trajectory
+    # generators for `accel_duration_triangular`/`accel_duration_scurve` (and,
+    # via a closed-form second derivative, `min_jerk`/`min_jerk_move_hold`)
+    # already know the reference acceleration analytically
+    # (simulation/ur5e_mujoco_torque.py::x_profile_accel) -- this flag adds a
+    # mass-weighted feedforward term built from that reference directly onto
+    # the task wrench, alongside (not instead of) the existing PD term:
+    #
+    #   wrench_task[axis] += Lambda_diag[axis] * target_<axis>_accel
+    #
+    # where Lambda_diag is the diagonal of the SAME task-space inertia matrix
+    # Lambda = (J_task M^-1 J_task^T + eps I)^-1 this file already builds for
+    # task_space_inertia_shaping/nullspace_posture (reused, not recomputed --
+    # this flag alone is now also a trigger for that block to run). Only the
+    # X axis has a real reference today (target_x_accel, threaded through
+    # RobotState/as_impedance_robot_state); target_y_accel/target_z_accel
+    # default to 0.0 via a plain dict lookup so wiring them up later (no
+    # trajectory generator produces them yet -- tonight's real use is X-only)
+    # is a one-line addition here, not a redesign.
+    #
+    # Deliberately a graceful no-op, not a hard error, when the state doesn't
+    # actually carry a real mass matrix (mass_matrix_provided False -- e.g. a
+    # caller/dynamics_source that never supplies one): falling back to the
+    # existing shaping/nullspace code's identity-matrix M fallback here would
+    # silently feed a fake ~1kg effective mass into the feedforward term,
+    # which is exactly the "silently produce wrong torques" failure mode this
+    # flag must not have. `acceleration_feedforward_active` in the output
+    # reports whether the term was actually applied this cycle so a caller
+    # (or a run record) can tell a genuine no-op apart from a working
+    # feedforward that happens to see zero commanded acceleration.
+    acceleration_feedforward: bool = False
 
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianImpedanceConfig":
@@ -491,6 +527,7 @@ class CartesianImpedanceConfig:
             ki_y=float(gains.get("ki_y", 0.0)),
             y_integral_limit_m_s=float(ctrl.get("y_integral_limit_m_s", 0.02)),
             split_base_wrist_task=bool(ctrl.get("split_base_wrist_task", False)),
+            acceleration_feedforward=bool(ctrl.get("acceleration_feedforward", False)),
         )
 
 
@@ -532,6 +569,8 @@ class CartesianImpedanceOutput:
     y_integral_action_active: bool = False
     y_integral_value: float = 0.0
     split_base_wrist_task_active: bool = False
+    acceleration_feedforward_active: bool = False
+    wrench_accel_ff: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
 
 
 class XAxisCartesianImpedanceController:
@@ -811,13 +850,18 @@ class XAxisCartesianImpedanceController:
         use_shaping = bool(self.cfg.task_space_inertia_shaping)
         use_nullspace = bool(self.cfg.nullspace_posture)
         use_adaptive_eps = bool(self.cfg.lambda_adaptive_regularization)
+        use_accel_ff = bool(self.cfg.acceleration_feedforward)
         mass_matrix_provided = "mass_matrix" in st and st["mass_matrix"] is not None
         lambda_mat: np.ndarray | None = None
         lambda_mat_nullspace: np.ndarray | None = None
         m_inv: np.ndarray | None = None
         eps_wrench = max(float(self.cfg.lambda_regularization), 0.0)
         eps_effective = eps_wrench
-        if use_shaping or use_nullspace:
+        # acceleration_feedforward alone is also a trigger for this block (not
+        # just task_space_inertia_shaping/nullspace_posture): it needs the
+        # same Lambda = (J_task M^-1 J_task^T + eps I)^-1 this block already
+        # builds for those two flags, reused rather than recomputed.
+        if use_shaping or use_nullspace or use_accel_ff:
             if mass_matrix_provided:
                 m_mat = np.asarray(st["mass_matrix"], dtype=np.float64).reshape(6, 6)
             else:
@@ -839,6 +883,31 @@ class XAxisCartesianImpedanceController:
                 lambda_mat_nullspace = np.linalg.inv(a_mat + eps_effective * eye_task)
             else:
                 lambda_mat_nullspace = lambda_mat
+
+        # Acceleration feedforward: mass-weighted addition to the task wrench,
+        # built from Lambda's own diagonal (the wrench-shaping lambda_mat,
+        # NOT lambda_mat_nullspace -- same distinction the wrench-shaping vs.
+        # nullspace-projector split above already makes). Graceful no-op
+        # (accel_ff_active stays False, wrench_task unchanged) unless a real
+        # mass_matrix was supplied this cycle -- see acceleration_feedforward's
+        # docstring above for why an identity-matrix fallback here would be
+        # the wrong kind of "silent."
+        accel_ff_active = False
+        wrench_accel_ff = np.zeros(3, dtype=np.float64)
+        if use_accel_ff and mass_matrix_provided and lambda_mat is not None:
+            lambda_diag = np.diag(lambda_mat)
+            target_x_accel = float(st.get("target_x_accel", 0.0))
+            target_y_accel = float(st.get("target_y_accel", 0.0))
+            target_z_accel = float(st.get("target_z_accel", 0.0))
+            accel_ff_vec = np.zeros(wrench_task.shape[0], dtype=np.float64)
+            accel_ff_vec[0] = lambda_diag[0] * target_x_accel
+            if wrench_task.shape[0] >= 2:
+                accel_ff_vec[1] = lambda_diag[1] * target_y_accel
+            if wrench_task.shape[0] >= 3:
+                accel_ff_vec[2] = lambda_diag[2] * target_z_accel
+            wrench_task = wrench_task + accel_ff_vec
+            wrench_accel_ff = accel_ff_vec[:3].copy()
+            accel_ff_active = True
 
         singular_scale = 1.0
         if cond_task > self.cfg.jacobian_singular_cond_max > 0.0:
@@ -968,4 +1037,6 @@ class XAxisCartesianImpedanceController:
             y_integral_action_active=use_y_integral,
             y_integral_value=float(self._y_integral),
             split_base_wrist_task_active=use_split_base_wrist,
+            acceleration_feedforward_active=accel_ff_active,
+            wrench_accel_ff=wrench_accel_ff,
         )

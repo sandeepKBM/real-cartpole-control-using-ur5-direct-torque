@@ -193,6 +193,45 @@ def test_build_mujoco_state_dt_s_survives_to_impedance_normalization() -> None:
     assert normalized["dt_s"] == dt_s
 
 
+def test_build_mujoco_state_target_x_accel_survives_to_impedance_normalization() -> None:
+    """Same end-to-end plumbing check as dt_s above, for target_x_accel
+    (2026-08-01, docs/status/acceleration_feedforward_2026-08-01.md): confirm
+    build_mujoco_state()'s MujocoUR5eState carries a nonzero target_x_accel
+    all the way through MujocoUR5eState.as_robot_state() AND
+    as_impedance_robot_state() (the function XAxisCartesianImpedanceController
+    .compute() calls internally) -- not just visual code inspection."""
+    from controller_core.state_types import as_impedance_robot_state
+
+    model, data, site_id, joint_ids, _ = load_model(SCENE_PATH)
+    mujoco.mj_forward(model, data)
+    ee_pos = np.asarray(data.site_xpos[site_id], dtype=np.float64).copy()
+    ee_rot = np.asarray(data.site_xmat[site_id], dtype=np.float64).reshape(3, 3).copy()
+    quat = rotmat_to_quat(ee_rot)
+    target_x_accel = 0.42
+    state = build_mujoco_state(
+        model,
+        data,
+        site_id=site_id,
+        joint_ids=joint_ids,
+        time_s=float(data.time),
+        dt_s=float(model.opt.timestep),
+        target_x=float(ee_pos[0]),
+        target_x_accel=target_x_accel,
+        target_ee_pos=ee_pos.copy(),
+        reference_quat=quat.copy(),
+        hold_current_pose=True,
+        transport_axis_index=0,
+        gravity_compensation=True,
+    )
+    assert state.target_x_accel == target_x_accel
+
+    robot_state = state.as_robot_state()
+    assert robot_state["target_x_accel"] == target_x_accel
+
+    normalized = as_impedance_robot_state(robot_state)
+    assert normalized["target_x_accel"] == target_x_accel
+
+
 def test_shape_torque_clips_and_reports_saturation() -> None:
     model, data, site_id, joint_ids, _ = load_model(SCENE_PATH)
     ctrl_cfg = _load_controller_cfg()
