@@ -49,6 +49,23 @@ from transport_metrics import (  # noqa: E402
 ACTIVE_ORIGIN_Q = np.array([0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0], dtype=np.float64)
 LOWER_B_Q = np.array([0.0, -0.1, -2.4, -0.4, 0.0, 0.0], dtype=np.float64)
 
+# "Hanging"/elbow-down alternative pose family (added 2026-08-01, mirrored from
+# hardware/poses.py -- these two files' pose constants must move together, per the
+# 2026-08-01 finding that they had already silently diverged once for the original
+# ACTIVE_ORIGIN_Q/LOWER_B_Q pair). Unlike the pair above, wrist_2 is held at +pi/2
+# throughout instead of 0, avoiding the UR wrist-gimbal-lock singularity across the whole
+# range (cond(full 6x6 J) measured 7.04-15.41 vs. 1e16-2.5e17 for the pair above -- see
+# docs/status/hanging_pose_transport_family_2026-08-01.md). Not wired into this env's
+# observation/reset logic -- added only so the two files' pose constants stay in sync;
+# using it in gain-scheduling RL training is explicitly out of scope for this addition
+# (this repo has six documented RL gain-scheduling failures, see docs/CURRENT_STATUS.md).
+HANGING_ORIGIN_Q = np.array(
+    [0.0, -1.791994, 0.812668, -1.288057, 1.5707963267948966, 0.0], dtype=np.float64
+)
+HANGING_LOWER_Q = np.array(
+    [0.0, -1.491612, 1.990426, -2.630057, 1.5707963267948966, 0.0], dtype=np.float64
+)
+
 OBS_DIM = 47
 ACTION_DIM = len(GAIN_FIELDS)
 RESIDUAL_ACTION_DIM = 6

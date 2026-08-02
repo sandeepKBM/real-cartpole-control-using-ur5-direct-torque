@@ -33,3 +33,62 @@ def q_for_height_alpha(alpha: float) -> np.ndarray:
     if not 0.0 <= alpha <= 1.0:
         raise ValueError(f"height_alpha must be in [0, 1]; got {alpha}")
     return ((1.0 - alpha) * ACTIVE_ORIGIN_Q + alpha * LOWER_B_Q).astype(np.float64)
+
+
+# --- "Hanging"/elbow-down transport pose family (added 2026-08-01) -----------------
+#
+# ACTIVE_ORIGIN_Q/LOWER_B_Q/q_for_height_alpha above sit at wrist_2=0 across their ENTIRE
+# range (a genuine UR-family kinematic singularity; cond(full 6x6 J) measured 1e16-2.5e17
+# throughout -- see docs/status/hanging_pose_transport_family_2026-08-01.md and the
+# 2026-08-01 night session docs this follows from). This family is a from-scratch,
+# additive alternative that avoids that singularity across its whole range by construction
+# (wrist_2 held at +pi/2 throughout, never 0) instead of routing around its consequences in
+# the controller (contrast with `split_base_wrist_task` in
+# controller_core/x_axis_cartesian_impedance.py, a controller-side workaround for the SAME
+# singularity that leaves ACTIVE_ORIGIN_Q/LOWER_B_Q unchanged).
+#
+# Design: elbow-down / "hanging" shape (shoulder_lift steeply negative, elbow bent well
+# away from both 0 -- fully extended -- and +-pi -- fully folded; wrist_2 fixed at +pi/2)
+# rather than the old family's near-fully-extended-arm shape. Found by a numeric grid
+# search over (shoulder_lift, elbow, wrist_1) at wrist_2=+-pi/2 for cond(full 6x6 J) < 50
+# and 0.3 <= site z <= 1.3 m, then each endpoint refined (scipy Nelder-Mead) to match
+# ACTIVE_ORIGIN_Q's/LOWER_B_Q's own site-frame Z heights as closely as practical.
+#
+# HANGING_ORIGIN_Q ("tall" end, alpha=0): site pos (x,y,z) = (-0.138, -0.134, 1.044) m,
+# cond(full 6x6 J) = 15.41, gravity-comp torque max |tau| = 9.04 Nm.
+HANGING_ORIGIN_Q = np.array(
+    [0.0, -1.791994, 0.812668, -1.288057, 1.5707963267948966, 0.0],
+    dtype=np.float64,
+)
+# HANGING_LOWER_Q ("low" end, alpha=1): site pos (x,y,z) = (-0.409, -0.134, 0.537) m,
+# cond(full 6x6 J) = 7.04, gravity-comp torque max |tau| = 16.81 Nm.
+HANGING_LOWER_Q = np.array(
+    [0.0, -1.491612, 1.990426, -2.630057, 1.5707963267948966, 0.0],
+    dtype=np.float64,
+)
+
+# hanging_alpha=0.5 -- the pose used for this family's first-pass gain tuning and rigor
+# sweep (mirrors how HEIGHT_ALPHA_0_5_Q anchors the old family's own validation).
+HANGING_ALPHA_0_5_Q = (0.5 * HANGING_ORIGIN_Q + 0.5 * HANGING_LOWER_Q).astype(np.float64)
+
+
+def q_for_hanging_height_alpha(alpha: float) -> np.ndarray:
+    """Interpolate between the hanging-family origin (0) and lower (1) joint poses.
+
+    Full cond(full 6x6 J) sweep across this range (21-point linear interpolation, measured
+    2026-08-01): min 7.04, max 15.41 -- three to sixteen orders of magnitude better than the
+    1e16-2.5e17 measured across ``q_for_height_alpha``'s whole range, and comfortably below
+    the ``jacobian_singular_cond_max`` thresholds this repo treats as "well conditioned"
+    elsewhere (e.g. the ~7.8 base-only sub-Jacobian in
+    docs/status/split_base_wrist_impedance_2026-08-01.md). See
+    docs/status/hanging_pose_transport_family_2026-08-01.md for the full sweep table,
+    reachability verification, and gain-tuning/validation results.
+
+    NOT a drop-in replacement for ``q_for_height_alpha`` -- sim-only, no real-hardware or
+    physical-clearance validation exists for this pose family yet. Do not use on real
+    hardware without a dedicated visual clearance check first (see that status doc).
+    """
+    alpha = float(alpha)
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"hanging_height_alpha must be in [0, 1]; got {alpha}")
+    return ((1.0 - alpha) * HANGING_ORIGIN_Q + alpha * HANGING_LOWER_Q).astype(np.float64)
