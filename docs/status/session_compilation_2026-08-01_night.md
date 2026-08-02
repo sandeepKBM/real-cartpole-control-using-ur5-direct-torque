@@ -327,8 +327,33 @@ At `height_alpha=0.5`, zero-degree pose, `config/ur5e_mujoco_torque_osc_tuned_sp
 8. **Full-range rigor sweep — done, real nuanced result, see §14.** Overall slightly ahead of
    the old family (96.1% vs 94.7%), but NOT uniform — `alpha=0.2` is a real regression (89.5% vs
    100%). The `alpha=0.5` headline number does not generalize; check the specific alpha.
-9. Whether the hanging pose needs `split_base_wrist_task` at all, since it doesn't sit at the
-   singularity to begin with — **dispatched, in progress**.
+9. **Whether the hanging pose needs `split_base_wrist_task` — done, clean negative result, see
+   §15.** It doesn't; the flag actively regresses one category there.
+
+## 15. Hanging pose does NOT need `split_base_wrist_task` — recommend against it there
+
+(`docs/status/hanging_pose_split_base_wrist_interaction_2026-08-02.md`) A/B at `alpha=0.5`:
+`36/38` plain vs. `34/38` with the flag — it **regresses** `large_displacements`
+(`dx=0.20m`, `8/8→6/8`) via a genuine `|Z-Z0|>0.03m` trip. Root cause: the flag zeroes the
+wrist columns of the translation-task Jacobian — useless dead weight near the OLD singular pose
+(hence the fix there), but at the hanging pose those columns are well-conditioned and genuinely
+contribute real Z-holding authority. Removing it tips the pose's own most marginal case over.
+`jacobian_cond` does improve (~2x, `8.91→4.24` median) but never changes a pass/fail outcome,
+since the hanging family was never near-singular to begin with — a nice, clean illustration that
+a fix's benefit is entirely conditional on the problem it targets actually being present.
+
+**Also closes the last open mechanism question**: orientation-error growth over hold time
+(`docs/status/split_base_wrist_orientation_growth_2026-08-01.md`, §4) does **not** occur at the
+hanging pose at all — flat/decaying over 30s holds, with or without the flag. Confirms that
+mechanism is specific to holding orientation near `wrist_2=0`, not a general property of this
+controller architecture.
+
+**Recommendation, now settled**: `config/ur5e_mujoco_torque_osc_hanging_pose_friction_ff.yaml`
+(plain, default flags, no `split_base_wrist_task`) is the reference hanging-pose config.
+`split_base_wrist_task` stays scoped to the OLD pose family, where it's genuinely needed.
+
+**All three overnight follow-up investigations are now complete** — nothing running in the
+background as of this update.
 
 ## 13. Hanging-pose `-45°` clearance variant — real finding: Y-drift coupling is NOT singularity-specific
 
