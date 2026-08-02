@@ -1,0 +1,179 @@
+# config/ur5e_mujoco_torque_osc_tuned_split_base_wrist.yaml (unmodified) with
+# friction_model: karnopp instead of the default static tanh/viscous law
+# (controller_core/x_axis_cartesian_impedance.py's CartesianImpedanceConfig).
+#
+# Why this exists (added 2026-08-02, see
+# docs/status/karnopp_stiction_friction_model_2026-08-02.md for the full design and
+# real-hardware evidence): a real UR5e trace running THIS EXACT base config
+# (friction_feedforward: true, friction_model left at its default "static") found
+# wrist_1 sitting at |qd| < 1.2e-4 rad/s (encoder-noise-floor stationary, q moved a
+# total of 0.000126 rad over the whole run) for the entire ~6.4s trace while the
+# residual observer's qdd_residual grew from ~0 to several rad/s^2, strongly
+# correlated with elapsed time (r=-0.80) and only weakly with qd itself (r=-0.22) --
+# a growing, unmodeled static-holding torque, not a velocity-dependent effect. The
+# static model's tanh(qd/deadband) term is identically zero whenever qd is
+# identically zero, so it structurally cannot compensate this.
+#
+# This repo's other opt-in friction_model, "lugre" (config/
+# ur5e_mujoco_torque_osc_tuned_friction_ff_lugre.yaml), was independently found
+# (docs/status/lugre_friction_feedforward_2026-08-01.md, and re-derived/confirmed
+# here) to have the SAME structural blind spot: its ODE dz/dt = qd - |qd|*z/g(qd)
+# has dz/dt == 0 whenever qd == 0 exactly, so a joint parked at true zero velocity
+# for its entire trace (exactly wrist_1's case here) never builds meaningful
+# bristle deflection regardless of parameter tuning.
+#
+# "karnopp" (D. Karnopp, 1985 -- see the config field's own docstring in
+# x_axis_cartesian_impedance.py for the full citation/derivation) is a
+# velocity-hysteresis switching model instead of a continuously-integrated bristle
+# state: below karnopp_qd_stick_enter_radps the feedforward cancels whatever net
+# driving torque the rest of the controller already computed this cycle (task +
+# damping + posture + wrist-orientation + gravity), clipped to the per-joint
+# breakaway ceiling lugre_fs_nm -- driven by torque, not velocity, so it can
+# compensate a joint that never measurably moves at all. Above
+# karnopp_qd_stick_exit_radps it falls back to standard kinetic Coulomb (lugre_fc_nm)
+# + viscous (friction_ff_viscous) friction, reusing the same physical-quantity
+# fields the static/lugre models already use rather than duplicating them.
+#
+# karnopp_qd_stick_enter_radps/_exit_radps (0.005/0.02 rad/s) are grounded in this
+# same real trace's own per-joint |qd| statistics, not a pure guess: the truly-stuck
+# wrist_1 never exceeded 1.2e-4 rad/s all run, while shoulder_lift (the joint
+# actually doing the commanded move in this split_base_wrist_task config) had a
+# median |qd| of 0.034 rad/s and p90 of 0.050 rad/s -- these thresholds sit well
+# below "moving" and well above "stuck" with room for a real hysteresis band. Still
+# a placeholder in the sense that no dedicated breakaway-velocity measurement exists
+# for this arm (same unresolved calibration gap the LuGre plan doc already flags).
+#
+# Everything else in this file is byte-identical to
+# config/ur5e_mujoco_torque_osc_tuned_split_base_wrist.yaml -- only
+# `friction_model: karnopp` plus the two new karnopp_* threshold fields are added.
+# Sim-only; NOT real-hardware validated (see the status doc for validation results
+# and caveats -- do not run this on real hardware without a separate, deliberate
+# decision, per this repo's own established discipline for every new friction
+# model landed so far).
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+    kp_rot_wrist: 0.0
+    kd_rot_wrist: 10.0
+  wrist_orientation_task: true
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  split_base_wrist_task: true
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  friction_feedforward: true
+  friction_model: "karnopp"
+  friction_ff_qd_deadband: 0.05
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 5.0
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  lugre_fc_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 5.0
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  lugre_fs_nm:
+    shoulder_pan_joint: 6.5
+    shoulder_lift_joint: 6.5
+    elbow_joint: 6.5
+    wrist_1_joint: 1.3
+    wrist_2_joint: 1.3
+    wrist_3_joint: 1.3
+  karnopp_qd_stick_enter_radps:
+    shoulder_pan_joint: 0.005
+    shoulder_lift_joint: 0.005
+    elbow_joint: 0.005
+    wrist_1_joint: 0.005
+    wrist_2_joint: 0.005
+    wrist_3_joint: 0.005
+  karnopp_qd_stick_exit_radps:
+    shoulder_pan_joint: 0.02
+    shoulder_lift_joint: 0.02
+    elbow_joint: 0.02
+    wrist_1_joint: 0.02
+    wrist_2_joint: 0.02
+    wrist_3_joint: 0.02
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

@@ -45,6 +45,23 @@ WRIST_ORIENTATION_MASK: np.ndarray = np.array(
 )
 
 
+def _parse_friction_model(raw: Any) -> Literal["static", "lugre", "karnopp"]:
+    """Case-insensitive parse of the ``friction_model`` YAML value.
+
+    Matches the pre-existing (2026-08-01) permissive convention: any value that
+    isn't a recognized model name silently falls back to ``"static"`` rather
+    than raising, so a typo in a config never breaks loading -- it just leaves
+    the historical default behavior in place. Extended 2026-08-02 to recognize
+    ``"karnopp"`` alongside the pre-existing ``"lugre"``.
+    """
+    value = str(raw).lower()
+    if value == "lugre":
+        return "lugre"
+    if value == "karnopp":
+        return "karnopp"
+    return "static"
+
+
 @dataclass
 class CartesianImpedanceConfig:
     kp_x: float = 25.0
@@ -221,7 +238,7 @@ class CartesianImpedanceConfig:
     # feedforward at all" -- matching every other flag in this file's own
     # pattern of one boolean gating one behavior addition. Default "static"
     # means zero behavior change for every existing config.
-    friction_model: Literal["static", "lugre"] = "static"
+    friction_model: Literal["static", "lugre", "karnopp"] = "static"
     # Per-joint LuGre parameters (used only when friction_model == "lugre").
     # No authoritative UR5e-class LuGre parameter table exists (confirmed via
     # a literature pass, see the plan doc sec 1) -- these are placeholders,
@@ -272,6 +289,90 @@ class CartesianImpedanceConfig:
         default_factory=lambda: np.array([6.5, 6.5, 6.5, 1.3, 1.3, 1.3], dtype=np.float64)
     )
     lugre_vs_radps: np.ndarray = field(
+        default_factory=lambda: np.array([0.02, 0.02, 0.02, 0.02, 0.02, 0.02], dtype=np.float64)
+    )
+    # Karnopp stick-slip friction feedforward -- second opt-in alternative to
+    # "static", nested under the same friction_feedforward flag as "lugre"
+    # (added 2026-08-02, see docs/status/karnopp_stiction_friction_model_2026-08-02.md
+    # for the full evidence and design rationale). Real hardware evidence found the
+    # SAME night the LuGre option above landed but not analyzed until now: on a real
+    # UR5e trace (config/ur5e_mujoco_torque_osc_tuned_split_base_wrist.yaml,
+    # friction_feedforward=true, friction_model left at "static"), wrist_1 sat at
+    # |qd| < 1.2e-4 rad/s (encoder-noise-floor stationary, q moved a total of
+    # 0.000126 rad) for the ENTIRE run while qdd_residual (controller_core/
+    # dynamics_residual.py) grew from ~0 to several rad/s^2 in magnitude, strongly
+    # correlated with elapsed time (r=-0.80) and only weakly with qd itself
+    # (r=-0.22) -- the signature of a real, growing, unmodeled static-holding
+    # torque, not a velocity-dependent effect.
+    #
+    # This is a real structural gap in the LuGre option above, not just an
+    # under-tuned-parameters gap: LuGre's own ODE, dz/dt = qd - |qd|*z/g(qd), has
+    # dz/dt == 0 whenever qd == 0 EXACTLY (both terms vanish) -- proven by
+    # tests/unit/test_lugre_friction.py::test_lugre_zero_velocity_leaves_z_and_torque_at_zero
+    # and independently re-derived here: the ODE's relaxation time constant is
+    # g(qd)/|qd|, which diverges as qd -> 0. A joint sitting at machine-precision
+    # zero velocity for its entire trace (exactly this real wrist_1 case) can never
+    # build meaningful bristle deflection under this ODE, regardless of sigma0/Fc/Fs
+    # tuning -- already independently confirmed at a different (much higher, ODE-
+    # unit-test-only) qd in docs/status/lugre_friction_feedforward_2026-08-01.md's
+    # own "hundreds of seconds" relaxation-time finding. This real trace is a second,
+    # independent, real-hardware confirmation of the identical structural limitation.
+    #
+    # Karnopp (D. Karnopp, "Computer simulation of stick-slip friction in mechanical
+    # dynamic systems," ASME J. Dyn. Sys. Meas. Control, 1985) is the classical fix
+    # for exactly this regime: a velocity-hysteresis switching model, not a
+    # continuously-integrated bristle state. Below a "stuck" velocity band, the
+    # joint is assumed not to be truly sliding at all. Above a higher "moving"
+    # threshold the joint is treated as sliding and this falls back to a standard
+    # kinetic Coulomb+viscous law. The gap between the two thresholds is a
+    # hysteresis dead zone (holds the previous stuck/free state) -- the standard
+    # fix for the chatter a single-threshold switch would otherwise produce right
+    # at the boundary.
+    #
+    # CORRECTED 2026-08-02 (see _karnopp_step's docstring for the full derivation):
+    # an earlier version of the stuck branch tried to "cancel" the net driving
+    # torque already computed this cycle (task + damping + posture + orient_wrist
+    # + gravity) by re-adding a clipped copy of it here -- but those terms are ALSO
+    # summed into tau_bias separately by the caller, so this roughly DOUBLED the
+    # commanded torque on any stuck joint (confirmed by direct measurement: full-
+    # controller output came out at exactly 2x the "static" model's for an
+    # identical stuck state). The stuck branch now contributes zero feedforward.
+    # This does NOT close the qd~=0-forever gap LuGre also cannot close -- it only
+    # removes a real, measured torque-doubling bug. A genuinely correct fix for
+    # that gap (if one is needed at all -- real static friction on the physical
+    # robot already self-adjusts to hold a stuck joint without any help; the
+    # qdd_residual gap this feature targets reflects an incomplete DYNAMICS MODEL
+    # used for prediction, which more commanded torque cannot fix) is unresolved
+    # and needs its own separately-validated design, not a quick patch.
+    #
+    # NOTE: this is an engineering-judgment design choice made this session, not a
+    # literature-verified citation pass the way this repo's other adversarially-
+    # verified literature reviews were (docs/status/literature_review_dynamics_and_
+    # sensor_noise_identification_2026-08-01.md) -- the Karnopp model itself is
+    # textbook-standard and not in dispute, but no fresh source-verification pass
+    # was run this session to back a specific numeric claim beyond the model's name
+    # and year, consistent with this repo's own discipline of not fabricating
+    # precise citations.
+    #
+    # Reuses lugre_fc_nm/lugre_fs_nm (same physical quantities: kinetic Coulomb
+    # floor / static breakaway ceiling) and friction_ff_viscous (kinetic viscous
+    # coefficient) rather than duplicating config fields for the sliding branch.
+    # karnopp_qd_stick_enter_radps/_exit_radps are new: defaults (0.005/0.02 rad/s)
+    # are grounded in this same real trace's own per-joint |qd| statistics (median/
+    # p90/max), not a pure guess -- wrist_1 (truly stuck) never exceeded 1.2e-4
+    # rad/s all run, while shoulder_lift (the joint actually doing the commanded
+    # move, in this split_base_wrist_task config) had a median |qd| of 0.034 rad/s
+    # and p90 of 0.050 rad/s -- 0.005/0.02 sits well below the "moving" joint's
+    # typical speed and well above the "stuck" joint's noise floor, with room for a
+    # real hysteresis band. This is still a placeholder in the sense that it has
+    # not been calibrated against a dedicated breakaway-velocity measurement (no
+    # such measurement exists for this arm, per the LuGre plan doc's own
+    # unresolved calibration gap) -- it is grounded in real telemetry, not a
+    # calibrated fit.
+    karnopp_qd_stick_enter_radps: np.ndarray = field(
+        default_factory=lambda: np.array([0.005, 0.005, 0.005, 0.005, 0.005, 0.005], dtype=np.float64)
+    )
+    karnopp_qd_stick_exit_radps: np.ndarray = field(
         default_factory=lambda: np.array([0.02, 0.02, 0.02, 0.02, 0.02, 0.02], dtype=np.float64)
     )
     # Y-axis integral action (default off = historical behavior: pure kp_y/
@@ -472,9 +573,7 @@ class CartesianImpedanceConfig:
                 else np.array([0.4, 0.4, 0.4, 0.15, 0.15, 0.15], dtype=np.float64)
             ),
             friction_ff_qd_deadband=float(ctrl.get("friction_ff_qd_deadband", 0.05)),
-            friction_model=(
-                "lugre" if str(ctrl.get("friction_model", "static")).lower() == "lugre" else "static"
-            ),
+            friction_model=_parse_friction_model(ctrl.get("friction_model", "static")),
             lugre_sigma0_nm_per_rad=(
                 np.array(
                     [float(ctrl["lugre_sigma0_nm_per_rad"][name]) for name in JOINT_NAME_ORDER],
@@ -523,6 +622,22 @@ class CartesianImpedanceConfig:
                 if "lugre_vs_radps" in ctrl
                 else np.array([0.02, 0.02, 0.02, 0.02, 0.02, 0.02], dtype=np.float64)
             ),
+            karnopp_qd_stick_enter_radps=(
+                np.array(
+                    [float(ctrl["karnopp_qd_stick_enter_radps"][name]) for name in JOINT_NAME_ORDER],
+                    dtype=np.float64,
+                )
+                if "karnopp_qd_stick_enter_radps" in ctrl
+                else np.array([0.005, 0.005, 0.005, 0.005, 0.005, 0.005], dtype=np.float64)
+            ),
+            karnopp_qd_stick_exit_radps=(
+                np.array(
+                    [float(ctrl["karnopp_qd_stick_exit_radps"][name]) for name in JOINT_NAME_ORDER],
+                    dtype=np.float64,
+                )
+                if "karnopp_qd_stick_exit_radps" in ctrl
+                else np.array([0.02, 0.02, 0.02, 0.02, 0.02, 0.02], dtype=np.float64)
+            ),
             y_integral_action=bool(ctrl.get("y_integral_action", False)),
             ki_y=float(gains.get("ki_y", 0.0)),
             y_integral_limit_m_s=float(ctrl.get("y_integral_limit_m_s", 0.02)),
@@ -566,6 +681,7 @@ class CartesianImpedanceOutput:
     friction_feedforward_active: bool = False
     friction_model_used: str = "static"
     friction_z: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
+    friction_karnopp_stuck: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
     y_integral_action_active: bool = False
     y_integral_value: float = 0.0
     split_base_wrist_task_active: bool = False
@@ -608,6 +724,14 @@ class XAxisCartesianImpedanceController:
         # never wipe accumulated stiction state mid-episode (matches
         # set_gains()'s own documented contract).
         self._friction_z = np.zeros(6, dtype=np.float64)
+        # Karnopp stick-slip hysteresis latch, one bool per joint. Same lifecycle
+        # class as _friction_z: persistent across compute() calls (the hysteresis
+        # IS the state -- see karnopp_qd_stick_enter_radps's docstring), zeroed
+        # (here: reset to "stuck") in reset_from_state(), not touched by
+        # set_gains(). Initialized True (stuck): a fresh episode typically starts
+        # from a held/rest pose, and the hysteresis self-corrects within a cycle
+        # or two regardless of the initial guess.
+        self._karnopp_stuck = np.ones(6, dtype=bool)
 
     def reset_from_state(self, state: dict[str, Any]) -> None:
         st = as_impedance_robot_state(state)
@@ -622,6 +746,7 @@ class XAxisCartesianImpedanceController:
         self._x_des_at_anchor = float(np.asarray(st["ee_pos"], dtype=np.float64).reshape(3)[0])
         self._y_integral = 0.0
         self._friction_z = np.zeros(6, dtype=np.float64)
+        self._karnopp_stuck = np.ones(6, dtype=bool)
         self._initialized = True
 
     @property
@@ -697,6 +822,77 @@ class XAxisCartesianImpedanceController:
         z_dot = qd - np.abs(qd) * self._friction_z / g_safe
         self._friction_z = self._friction_z + dt * z_dot
         return sigma0 * self._friction_z + sigma1 * z_dot + sigma2 * qd
+
+    def _karnopp_step(self, qd: np.ndarray, driving_torque: np.ndarray) -> np.ndarray:
+        """Karnopp (1985) stick-slip switching friction feedforward.
+
+        See ``karnopp_qd_stick_enter_radps``'s docstring on ``CartesianImpedanceConfig``
+        for the full derivation and real-hardware evidence motivating this. Two
+        regimes, selected per joint via a velocity hysteresis latch
+        (``self._karnopp_stuck``, mutated in place -- persistent state, same
+        lifecycle as ``self._friction_z``):
+
+          - Stuck (``|qd|`` below ``karnopp_qd_stick_enter_radps``, or already
+            latched stuck and not yet above ``karnopp_qd_stick_exit_radps``):
+            **contributes zero feedforward torque.** An earlier version of this
+            method set ``tau_stuck = clip(driving_torque, -fs, fs)`` -- intended
+            to "cancel" driving_torque, but ``driving_torque`` is built from
+            terms (``tau_task_nominal``, ``tau_damping``, ``tau_posture``,
+            ``tau_orient_wrist``, ``g``) that are ALSO summed into ``tau_bias``
+            separately by the caller, so adding a second (near-)copy of them
+            here roughly DOUBLED the commanded torque on any stuck joint --
+            confirmed by direct measurement (2026-08-02): full-controller
+            output with friction_model="karnopp" came out at exactly 2x the
+            "static" model's output for an identical stuck-joint state. Beyond
+            that correctness bug, the underlying premise doesn't hold up either:
+            real static friction on the physical robot already self-adjusts to
+            cancel whatever net torque is applied, up to its real breakaway
+            limit -- that IS what "stuck" means -- so sending additional
+            feedforward torque changes neither the robot's real behavior (real
+            friction just absorbs more) nor the qdd_residual diagnostic gap
+            that motivated this feature (that gap reflects an incomplete rigid-
+            body DYNAMICS MODEL used for prediction, not insufficient commanded
+            torque; fixing it needs a friction-aware model for the predictor,
+            not more feedforward torque from the controller). Zero is the only
+            value defensible without a fresh, separately-validated design for
+            genuine breakaway assistance -- see
+            docs/status/karnopp_stiction_friction_model_2026-08-02.md for the
+            full trace and reasoning. With this branch at zero, "karnopp"
+            reduces to "static"'s own qd==0 behavior for a stuck joint --
+            no worse, but no better either; the sliding branch below is
+            unaffected and still provides real value.
+          - Sliding (latched free, ``|qd|`` above ``karnopp_qd_stick_exit_radps``):
+            standard kinetic Coulomb ``lugre_fc_nm`` + viscous
+            ``friction_ff_viscous``, same physical quantities and sign
+            convention as the static model's own sliding-regime behavior.
+
+        No time integration/ODE is needed for this model (unlike LuGre) -- the
+        only state is which regime each joint is latched into, which needs no
+        ``dt``. ``driving_torque`` is accepted for interface stability (the
+        caller still computes and passes it) but is no longer read here.
+        """
+        qd = np.asarray(qd, dtype=np.float64).reshape(6)
+        driving_torque = np.asarray(driving_torque, dtype=np.float64).reshape(6)
+        del driving_torque  # unused -- see docstring; kept as a parameter for interface stability
+        enter = np.asarray(self.cfg.karnopp_qd_stick_enter_radps, dtype=np.float64).reshape(6)
+        exit_threshold = np.asarray(self.cfg.karnopp_qd_stick_exit_radps, dtype=np.float64).reshape(6)
+        fc = np.asarray(self.cfg.lugre_fc_nm, dtype=np.float64).reshape(6)
+        viscous = np.asarray(self.cfg.friction_ff_viscous, dtype=np.float64).reshape(6)
+        abs_qd = np.abs(qd)
+
+        # Hysteresis update: stuck->free only above exit_threshold, free->stuck
+        # only below enter -- the dead zone between the two thresholds holds
+        # whatever the previous latch state was, preventing chatter right at a
+        # single boundary (the standard fix for a naive one-threshold switch).
+        became_free = self._karnopp_stuck & (abs_qd > exit_threshold)
+        became_stuck = (~self._karnopp_stuck) & (abs_qd < enter)
+        stuck = np.where(became_free, False, self._karnopp_stuck)
+        stuck = np.where(became_stuck, True, stuck)
+        self._karnopp_stuck = stuck
+
+        tau_stuck = np.zeros(6, dtype=np.float64)
+        tau_slide = fc * np.sign(qd) + viscous * qd
+        return np.where(stuck, tau_stuck, tau_slide)
 
     def _backtrack_task_scale(
         self,
@@ -973,6 +1169,16 @@ class XAxisCartesianImpedanceController:
             m_wrist = self.cfg.kp_rot_wrist * e_rot - self.cfg.kd_rot_wrist * omega
             tau_orient_wrist = (J_rot.T @ m_wrist) * WRIST_ORIENTATION_MASK
 
+        # Gravity is computed here, BEFORE the friction-feedforward block below,
+        # so the karnopp branch's driving_torque can include it -- a pure
+        # reordering of two mutually-independent computations (gravity doesn't
+        # depend on anything the friction block computes, and the static/lugre
+        # friction branches never read g), so this changes no existing output
+        # (verified byte-identical for every pre-existing friction_model value).
+        g = np.zeros(6, dtype=np.float64)
+        if "gravity_torque" in st and st["gravity_torque"] is not None:
+            g = np.asarray(st["gravity_torque"], dtype=np.float64).reshape(6)
+
         use_friction_feedforward = bool(self.cfg.friction_feedforward)
         friction_model_used = str(self.cfg.friction_model) if use_friction_feedforward else "static"
         tau_friction_ff = np.zeros(6, dtype=np.float64)
@@ -986,15 +1192,17 @@ class XAxisCartesianImpedanceController:
                 if not np.isfinite(dt) or dt <= 0.0:
                     dt = 1.0 / 500.0
                 tau_friction_ff = self._lugre_step(qd, dt)
+            elif self.cfg.friction_model == "karnopp":
+                # driving_torque is every other joint-space bias term already
+                # computed above this cycle (task torque, damping, posture,
+                # wrist-orientation, gravity) -- see _karnopp_step's docstring.
+                driving_torque = tau_task_nominal + tau_damping + tau_posture + tau_orient_wrist + g
+                tau_friction_ff = self._karnopp_step(qd, driving_torque)
             else:
                 coulomb = np.asarray(self.cfg.friction_ff_coulomb_nm, dtype=np.float64).reshape(6)
                 viscous = np.asarray(self.cfg.friction_ff_viscous, dtype=np.float64).reshape(6)
                 deadband = max(float(self.cfg.friction_ff_qd_deadband), 1e-9)
                 tau_friction_ff = coulomb * np.tanh(qd / deadband) + viscous * qd
-
-        g = np.zeros(6, dtype=np.float64)
-        if "gravity_torque" in st and st["gravity_torque"] is not None:
-            g = np.asarray(st["gravity_torque"], dtype=np.float64).reshape(6)
 
         tau_bias = tau_damping + tau_posture + tau_orient_wrist + tau_friction_ff + g
         tau_limit = np.asarray(self.cfg.tau_max_nm, dtype=np.float64).reshape(6)
@@ -1055,6 +1263,7 @@ class XAxisCartesianImpedanceController:
             friction_feedforward_active=use_friction_feedforward,
             friction_model_used=friction_model_used,
             friction_z=self._friction_z.copy(),
+            friction_karnopp_stuck=self._karnopp_stuck.astype(np.float64).copy(),
             y_integral_action_active=use_y_integral,
             y_integral_value=float(self._y_integral),
             split_base_wrist_task_active=use_split_base_wrist,
