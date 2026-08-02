@@ -79,6 +79,8 @@ def resolve_move_limit_overrides(args: argparse.Namespace) -> dict[str, float | 
         overrides.update(NOISE_ROBUST_GUARD_OVERRIDES)
     if args.max_tcp_accel_mps2 is not None:
         overrides["max_tcp_accel_mps2"] = float(args.max_tcp_accel_mps2)
+    if args.max_tcp_speed_mps is not None:
+        overrides["max_tcp_speed_mps"] = float(args.max_tcp_speed_mps)
     if args.accel_gap_cycles is not None:
         overrides["accel_gap_cycles"] = int(args.accel_gap_cycles)
     if args.speed_lowpass_alpha is not None:
@@ -187,6 +189,22 @@ def parse_args() -> argparse.Namespace:
             "negligible). Does not fix the underlying numerical issue; a deliberate, "
             "visible override for continuing real-hardware testing, not a silent "
             "threshold change."
+        ),
+    )
+    p.add_argument(
+        "--max-tcp-speed-mps",
+        type=float,
+        default=None,
+        help=(
+            "All three control modes. Explicit, opt-in override of "
+            "CartesianMoveLimits.max_tcp_speed_mps (class default 0.05 m/s). Added "
+            "2026-08-02 -- this guard previously had no CLI override at all, unlike "
+            "max_tcp_accel_mps2 above. A deliberate, evidence-scoped override only: "
+            "size it from a specific target accel/duration's own computed peak "
+            "velocity (accel*move_duration/pi for accel_duration_scurve) plus real "
+            "margin, not a blind increase -- the other guards (orientation error, "
+            "Y/Z-drift, joint velocity, TCP acceleration) are NOT affected by this "
+            "flag and remain the real safety net for anything this doesn't predict."
         ),
     )
     p.add_argument(
@@ -460,6 +478,7 @@ def main() -> int:
             coriolis_feedforward=bool(args.coriolis_feedforward),
             gain_overrides=gain_overrides,
             max_tcp_accel_mps2_override=move_limit_overrides.get("max_tcp_accel_mps2"),
+            max_tcp_speed_mps_override=move_limit_overrides.get("max_tcp_speed_mps"),
             accel_gap_cycles_override=move_limit_overrides.get("accel_gap_cycles"),
             enable_residual_observer=not bool(args.disable_residual_observer),
             residual_observer_async=bool(args.residual_observer_async),

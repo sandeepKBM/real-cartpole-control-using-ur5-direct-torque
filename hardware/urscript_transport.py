@@ -117,6 +117,7 @@ def run_urscript_x_transport(
     monitor_hz: float = 125.0,
     use_lambda: bool | None = None,
     max_tcp_accel_mps2_override: float | None = None,
+    max_tcp_speed_mps_override: float | None = None,
     accel_gap_cycles_override: int | None = None,
     speed_lowpass_alpha_override: float | None = None,
     speed_limit_gap_cycles_override: int | None = None,
@@ -209,6 +210,8 @@ def run_urscript_x_transport(
             # for the full rationale (real-hardware noise-amplification
             # finding, 2026-07-28).
             move_limits = replace(move_limits, max_tcp_accel_mps2=float(max_tcp_accel_mps2_override))
+        if max_tcp_speed_mps_override is not None:
+            move_limits = replace(move_limits, max_tcp_speed_mps=float(max_tcp_speed_mps_override))
         accel_overrides: dict[str, float] = {}
         if accel_gap_cycles_override is not None:
             accel_overrides["accel_gap_cycles"] = int(accel_gap_cycles_override)

@@ -48,6 +48,7 @@ def _load_cartesian_limits(
     robot_ip: str,
     *,
     max_tcp_accel_mps2_override: float | None = None,
+    max_tcp_speed_mps_override: float | None = None,
     accel_gap_cycles_override: int | None = None,
     speed_lowpass_alpha_override: float | None = None,
     speed_limit_gap_cycles_override: int | None = None,
@@ -82,6 +83,8 @@ def _load_cartesian_limits(
     overrides: dict[str, float] = {}
     if max_tcp_accel_mps2_override is not None:
         overrides["max_tcp_accel_mps2"] = float(max_tcp_accel_mps2_override)
+    if max_tcp_speed_mps_override is not None:
+        overrides["max_tcp_speed_mps"] = float(max_tcp_speed_mps_override)
     # Noise-robust accel estimation (2026-07-28) -- see CartesianMoveLimits'
     # accel_gap_cycles/speed_lowpass_alpha docstring. Explicit opt-in only;
     # default (None) leaves the class's own gap=1/alpha=1.0 (old behavior)
@@ -123,6 +126,7 @@ def run_x_transport_position(
     servo_gain: float = 300.0,
     servo_lookahead_s: float = 0.1,
     max_tcp_accel_mps2_override: float | None = None,
+    max_tcp_speed_mps_override: float | None = None,
     accel_gap_cycles_override: int | None = None,
     speed_lowpass_alpha_override: float | None = None,
     speed_limit_gap_cycles_override: int | None = None,
@@ -166,6 +170,7 @@ def run_x_transport_position(
             config_path,
             link.robot_ip,
             max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
+            max_tcp_speed_mps_override=max_tcp_speed_mps_override,
             accel_gap_cycles_override=accel_gap_cycles_override,
             speed_lowpass_alpha_override=speed_lowpass_alpha_override,
             speed_limit_gap_cycles_override=speed_limit_gap_cycles_override,

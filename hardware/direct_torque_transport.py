@@ -154,6 +154,7 @@ def run_x_transport_direct_torque(
     coriolis_feedforward: bool = False,
     gain_overrides: dict[str, float] | None = None,
     max_tcp_accel_mps2_override: float | None = None,
+    max_tcp_speed_mps_override: float | None = None,
     accel_gap_cycles_override: int | None = None,
     speed_lowpass_alpha_override: float | None = None,
     speed_limit_gap_cycles_override: int | None = None,
@@ -327,6 +328,15 @@ def run_x_transport_direct_torque(
         # noise amplification (~1/dt^2) is ~16x worse here -- expect this
         # override to matter more, not less, in this mode.
         move_limits = replace(move_limits, max_tcp_accel_mps2=float(max_tcp_accel_mps2_override))
+    if max_tcp_speed_mps_override is not None:
+        # Explicit, opt-in override of CartesianMoveLimits.max_tcp_speed_mps
+        # (class default 0.05 m/s) -- mirrors max_tcp_accel_mps2_override's
+        # own pattern above. A real, deliberate, evidence-scoped decision by
+        # the caller (e.g. sized with margin above a specific target
+        # accel/duration's own computed peak velocity), not a silent
+        # threshold change -- default (None) leaves the class default
+        # untouched.
+        move_limits = replace(move_limits, max_tcp_speed_mps=float(max_tcp_speed_mps_override))
     accel_overrides: dict[str, float] = {}
     if accel_gap_cycles_override is not None:
         accel_overrides["accel_gap_cycles"] = int(accel_gap_cycles_override)
