@@ -264,17 +264,26 @@ every pose change in this project's history.
   `-9799.8 → -0.055`. Pipeline is now honest; still mostly negative R² overall, not yet an
   actually-useful correction — a follow-up feature/data-improvement pass is in progress (§10).
 
-## 10. In progress right now (background, sim-only, no real-hardware bottleneck)
+## 10. Four parallel follow-ups dispatched after the real-hardware session — all landed
 
-Dispatched together after the real-hardware session ended, since there's no robot-time
-constraint on any of these:
-1. **`kp_rot_wrist` retune** — the concrete pointer from §4's diagnosis (currently 0,
-   damping-only) — sim gain sweep against the exact real scenarios that showed orientation
-   growth tonight, plus the standard regression sweep.
-2. **Residual-regression feature/data improvement, round 2** — pushing past "honest but
-   mediocre" (§9) toward actually useful, or an honest verdict that joints 2/3 are a hard
-   data-starvation limit needing a different data-collection strategy, not more modeling.
-3. Hanging-pose family (§8) — landed.
+Dispatched together once there was no robot-time constraint left:
+1. **`kp_rot_wrist` retune** (`docs/status/kp_rot_wrist_retune_2026-08-02.md`) — confirmed
+   structurally safe first (no matrix inversion in this term, unlike the unrelated `kp_rot`
+   gain's documented instability mechanism). Raising `kp_rot_wrist` alone went unstable
+   (underdamped PD); scaling `kd_rot_wrist` alongside (~4:1) fixed that. Chosen candidate
+   `kp_rot_wrist=20/kd_rot_wrist=80` cuts real orientation-error growth 35-41% with zero
+   regression on the standard sweep (34/38, byte-identical to baseline). A more aggressive
+   candidate (kp=80/kd=320) cut it further (~75%) but introduced a new long-hold divergence —
+   correctly rejected. New config:
+   `config/ur5e_mujoco_torque_osc_tuned_split_base_wrist_wrist_orient_retuned.yaml`.
+2. **Residual-regression feature improvement, round 2** — landed, see §9's update: cross-joint
+   coupling features made the model genuinely useful (5/6 joints improved, `wrist_2` went from
+   `R²≈0` to `+0.5`), not just honest. New default `--feature-set coupled`.
+3. **Hanging-pose transport family** — landed, see §8: the structural fix, `36/38` sim rigor
+   sweep, needs a real clearance check before real hardware.
+4. Skill updates (`.agents/skills/`, not git-tracked) capturing tonight's operational lessons —
+   sim-fidelity limits, config-key parity, a new `background-agent-dispatch` skill for a
+   recurring agent-dispatch failure pattern seen 3 times tonight.
 
 ## 11. Current real-hardware-validated envelope (the practical answer to "how far can we go")
 
