@@ -59,6 +59,7 @@ authoritative real-hardware record):
 | `direct_torque_20260801_202017` | +0.015 | 8.0s | 0.1409 / 0.1528m (92%) | **clean, duration_complete** | 7.8–297,619 (single-cycle transient, see §5) |
 | `direct_torque_20260801_202215` | −0.015 | 8.0s | −0.0632 / −0.1528m (41%) | TCP-**accel** trip (0.5112) | 5.31–5.32 |
 | `direct_torque_20260801_202639` | −0.015 | 8.0s | −0.0045 / −0.1528m (3%) | TCP-**accel** trip (0.7042, different timing/magnitude) | 7.56–7.82 |
+| `direct_torque_20260801_203354` | +0.02 | 8.0s | 0.0639 / 0.2037m (31%) | TCP-speed trip (0.0510) | 7.81–16.4 |
 
 **Bottom line: the singularity-conditioning mechanism is fixed, confirmed on real hardware
 every single time it's been tested tonight** (`jacobian_cond` stayed in the single-to-low-double
@@ -203,8 +204,12 @@ trips in a prior real backtest). Not yet root-caused.
 At `height_alpha=0.5`, zero-degree pose, `config/ur5e_mujoco_torque_osc_tuned_split_base_wrist.yaml`,
 `accel_duration_scurve`:
 - **`+X`**: clean through `accel=0.015, move_duration=8.0s` (92% achieved). Fails at
-  `accel=0.02, move_duration=4.0s` via the understood orientation-growth-driven speed guard —
-  not yet tested at `accel=0.02` with the longer `8.0s` duration (untested combination).
+  `accel=0.02` via the orientation-growth-driven speed guard at **both** `move_duration=4.0s`
+  (43% achieved, `orientation_error` 0.028 rad at trip) and `8.0s` (31% achieved,
+  `orientation_error` 0.083 rad at trip — ~3x the `4.0s` run's value). Doubling duration made it
+  *worse*, not better, directly confirming the exposure-time hypothesis from §4: more time gives
+  orientation error more room to grow before the same guard catches it, rather than helping the
+  arm "get there gently."
 - **`-X`**: clean at `accel=0.01` (implied by symmetry, not directly tested — only `+0.01` was
   actually run). Fails at `accel=0.015, move_duration=8.0s` via the unexplained transient in §6,
   twice, with different signatures both times.
@@ -212,10 +217,10 @@ At `height_alpha=0.5`, zero-degree pose, `config/ur5e_mujoco_torque_osc_tuned_sp
 
 ## 10. Suggested next steps (not decided, for discussion)
 
-1. Directly test `+X` at `accel=0.02, move_duration=8.0s` — untested combination, would show
-   whether the `+X` ceiling is really about accel magnitude or duration/exposure (per §4's
-   "tracks exposure time" finding, extending duration at this accel might make it *worse*, not
-   better — a real, informative test either way).
+1. ~~Directly test `+X` at `accel=0.02, move_duration=8.0s`~~ — **done**
+   (`direct_torque_20260801_203354`): worse than `4.0s`, confirming the exposure-time
+   hypothesis (see §9). `+X` ceiling for this pose/config is now `accel=0.015` at any tested
+   duration; `0.02` fails regardless of duration.
 2. A third `-X` `0.015/8s` trial, to see if a pattern emerges across three data points for §6's
    unexplained transient, or accept `-0.01` as the practical `-X` ceiling for now and move on.
 3. Once the acceleration-feedforward agent reports, real-hardware test it (small, careful first
@@ -224,3 +229,8 @@ At `height_alpha=0.5`, zero-degree pose, `config/ur5e_mujoco_torque_osc_tuned_sp
 4. `docs/status/split_base_wrist_orientation_growth_2026-08-01.md`'s `kp_rot_wrist` retune
    pointer is real, scoped, future work — not attempted tonight (would need its own sim
    validation pass before real hardware, per this repo's own gain-tuning discipline).
+5. **Dispatched** (background agent, sim/offline-only): fix the residual-torque regression's
+   catastrophic held-out extrapolation blowup (2 of 6 joints, R² deeply negative) found earlier
+   tonight — regularization/output-bounding, not a redesign. This repo's own top-ranked
+   "make the controller smarter" direction (`docs/status/nonlinear_controller_research_2026-07-31.md`),
+   explicitly not another RL attempt.
