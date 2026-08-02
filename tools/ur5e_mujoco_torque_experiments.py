@@ -205,6 +205,45 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--telemetry-duplicate-prob",
+        type=float,
+        default=0.0,
+        help=(
+            "controller-rollout/x-transport-minjerk only: per-cycle probability [0,1] that "
+            "the controller sees a FROZEN repeat of whatever it was delivered last cycle "
+            "instead of the fresh true state (RTDE duplicate-frame proxy -- real UR5e "
+            "hardware showed ~17%% isolated single-cycle duplicate tcp_pose/q reads in some "
+            "2026-08-02 direct_torque runs, 0%% in others; see the guard/telemetry-gap-bridge "
+            "work from that session). Independent Bernoulli trial each cycle (matches the "
+            "real evidence's own 'isolated, evenly spread' pattern -- occasional back-to-back "
+            "duplicates happen by chance at higher probabilities, same as real hardware, not "
+            "specially modeled). Physics (mj_step) and trace ground truth are UNAFFECTED --  "
+            "only what the controller is fed changes, same proxy pattern as --q-noise-std-rad. "
+            "Composes with --q-noise-std-rad/--qd-noise-std-radps: duplicate-or-fresh is "
+            "decided first, then sensor noise is added on top of whichever was selected, "
+            "matching encoder noise applying to whatever raw sample was actually received. "
+            "Default 0.0 = off, identical to today's behavior."
+        ),
+    )
+    p.add_argument(
+        "--friction-multiplier",
+        type=float,
+        default=1.0,
+        help=(
+            "controller-rollout/x-transport-minjerk only: uniform multiplier applied to "
+            "every joint's dof_frictionloss AFTER the model loads (default 1.0 = today's "
+            "calibrated values, byte-identical). Deliberate STRESS-TEST tool, not another "
+            "calibration attempt: sample values above 1.0 (e.g. via a driver script varying "
+            "this per run) to validate the controller against friction WORSE than anything "
+            "measured on real hardware so far -- if it stays safe there, real hardware (which "
+            "should fall inside that envelope, not outside it) has margin. Does not touch "
+            "dof_damping (the viscous term) -- frictionloss is the dominant, velocity-"
+            "independent term the MJCF's own class-default comment already documents as the "
+            "one that reproduces the real hold-phase signature; scaling damping too would "
+            "conflate two different physical effects in one knob."
+        ),
+    )
+    p.add_argument(
         "--noise-seed",
         type=int,
         default=None,
@@ -703,6 +742,8 @@ def run() -> int:
     q_noise_std = max(float(args.q_noise_std_rad), 0.0)
     qd_noise_std = max(float(args.qd_noise_std_radps), 0.0)
     torque_noise_std = max(float(args.torque_noise_std_nm), 0.0)
+    telemetry_duplicate_prob = min(max(float(args.telemetry_duplicate_prob), 0.0), 1.0)
+    last_delivered_controller_state = None
 
     cfg = _load_yaml(args.config)
     mujoco_cfg = cfg["mujoco"]
@@ -760,6 +801,16 @@ def run() -> int:
 
     try:
         model, data, site_id, joint_ids, actuator_ids = load_model(scene_xml)
+        friction_multiplier = max(float(args.friction_multiplier), 0.0)
+        if friction_multiplier != 1.0:
+            # Stress-test proxy (default 1.0 = no-op) -- see
+            # --friction-multiplier's help text. Scales dof_frictionloss for
+            # every joint uniformly, applied once after load, before any
+            # rollout step -- affects real physics (mj_step), unlike the
+            # controller-facing noise/duplicate proxies above, since the
+            # whole point is testing against a worse PLANT, not a worse
+            # sensor.
+            model.dof_frictionloss[:] = model.dof_frictionloss * friction_multiplier
         # Reused by every build_mujoco_state()/build_initial_state_and_adapter()
         # call below with gravity_compensation active, instead of letting
         # compute_gravity_torque allocate a brand new mujoco.MjData (plus a
@@ -948,13 +999,38 @@ def run() -> int:
             # come from the true state, so the task-space x/y/z/orientation
             # error terms are not perturbed by this flag. See --q-noise-std-rad
             # / --qd-noise-std-radps help text.
-            controller_state = pre_state
+            # Telemetry-duplicate proxy (default off = identical to pre_state): with
+            # probability telemetry_duplicate_prob, the controller is fed whatever it
+            # was delivered LAST cycle (fresh or itself already a duplicate -- matches
+            # real RTDE just replaying its last buffered sample) instead of this
+            # cycle's true fresh state. Physics (mj_step) and trace ground truth are
+            # UNAFFECTED, same proxy pattern as the sensor-noise block below -- only
+            # what the controller is fed changes. See --telemetry-duplicate-prob help
+            # text. Decided BEFORE sensor noise so noise applies to whichever raw
+            # sample (fresh or duplicate) was actually "received" this cycle, matching
+            # real encoder noise applying on top of whatever RTDE actually returned.
+            if telemetry_duplicate_prob > 0.0 and last_delivered_controller_state is not None:
+                is_duplicate = bool(noise_rng.random() < telemetry_duplicate_prob)
+            else:
+                is_duplicate = False
+            controller_state = last_delivered_controller_state if is_duplicate else pre_state
+
+            # Sensor-noise proxy (default off = identical to pre_state): the
+            # controller sees q/qd perturbed by Gaussian noise, but the TRUE
+            # pre_state (used for mj_step physics and trace ground truth) is
+            # untouched. Only the joint-space terms that read st["q"]/st["qd"]
+            # directly (tau_damping, tau_posture, and J@qd-derived
+            # ee_lin_vel/ee_ang_vel) are affected -- ee_pos/ee_quat here still
+            # come from the true state, so the task-space x/y/z/orientation
+            # error terms are not perturbed by this flag. See --q-noise-std-rad
+            # / --qd-noise-std-radps help text.
             if q_noise_std > 0.0 or qd_noise_std > 0.0:
                 controller_state = dataclasses.replace(
-                    pre_state,
-                    q=pre_state.q + (noise_rng.normal(0.0, q_noise_std, size=6) if q_noise_std > 0.0 else 0.0),
-                    qd=pre_state.qd + (noise_rng.normal(0.0, qd_noise_std, size=6) if qd_noise_std > 0.0 else 0.0),
+                    controller_state,
+                    q=controller_state.q + (noise_rng.normal(0.0, q_noise_std, size=6) if q_noise_std > 0.0 else 0.0),
+                    qd=controller_state.qd + (noise_rng.normal(0.0, qd_noise_std, size=6) if qd_noise_std > 0.0 else 0.0),
                 )
+            last_delivered_controller_state = controller_state
 
             if args.mode in ("single-joint-pulse", "constant-small-torque", "sinusoidal-torque", "safety-clipping"):
                 tau_raw = _direct_torque_profile(args.mode, args, float(data.time))
