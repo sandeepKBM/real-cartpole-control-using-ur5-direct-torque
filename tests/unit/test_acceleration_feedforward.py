@@ -163,3 +163,47 @@ def test_acceleration_feedforward_yaml_parsing():
     cfg_off = CartesianImpedanceConfig.from_controller_yaml_section(off_section)
     assert cfg_on.acceleration_feedforward is True
     assert cfg_off.acceleration_feedforward is False
+
+
+def test_flag_on_with_task_space_inertia_shaping_does_not_double_scale():
+    # Regression test for a real bug found 2026-08-02 (code review of the
+    # 2026-08-01 session's diff): with task_space_inertia_shaping=True, the
+    # wrench-shaping step at the bottom of compute() multiplies the ENTIRE
+    # wrench_task by Lambda once, uniformly. wrench_task at that point in the
+    # pipeline represents a desired task ACCELERATION (see the wrench-shaping
+    # step's own comment), not a force -- so the feedforward term must add
+    # raw target_x_accel there, not an already-Lambda-scaled force, or it
+    # gets Lambda-scaled a second time (effective Lambda^2). This was live in
+    # config/ur5e_mujoco_torque_osc_tuned_split_base_wrist_accel_ff.yaml,
+    # which sets both flags together -- never previously exercised by any
+    # test in this file (every prior test here defaults
+    # task_space_inertia_shaping=False).
+    #
+    # J=I with a NON-identity mass matrix (M_x=4.0) so Lambda_diag[0] ~= 4.0,
+    # clearly different from 1.0 -- deliberately not M=I, since at Lambda~=1
+    # a single-vs-double scaling bug is numerically almost invisible. With
+    # every other gain zeroed, a correct implementation must produce the
+    # SAME tau[0] whether the feedforward's Lambda-scaling happens inside the
+    # feedforward term itself (shaping off) or once via the downstream
+    # shaping step (shaping on) -- shaping doesn't change what Lambda IS,
+    # only how/when it's applied. The old, buggy code applied Lambda TWICE
+    # in the shaping-on case, so old_ratio ~= Lambda_diag[0] ~= 4.0 instead
+    # of 1.0 -- a large, easily-caught discrepancy at this Lambda value.
+    common = dict(
+        acceleration_feedforward=True,
+        kp_x=0.0, kd_x=0.0, kp_y=0.0, kd_y=0.0, kp_z=0.0, kd_z=0.0,
+        kp_rot=0.0, kd_rot=0.0, kp_posture=0.0, kd_posture=0.0, kd_joint=0.0,
+        lambda_regularization=1e-6,
+    )
+    mass_matrix = np.diag([4.0, 4.0, 4.0, 1.0, 1.0, 1.0])
+    state = _make_state(J=np.eye(6), mass_matrix=mass_matrix, target_x_accel=2.0)
+
+    out_shaping_off = _controller(task_space_inertia_shaping=False, **common).compute(state)
+    out_shaping_on = _controller(task_space_inertia_shaping=True, **common).compute(state)
+
+    assert out_shaping_off.acceleration_feedforward_active is True
+    assert out_shaping_on.acceleration_feedforward_active is True
+    assert out_shaping_off.tau[0] > 1e-6
+    ratio = out_shaping_on.tau[0] / out_shaping_off.tau[0]
+    # Fixed code: ratio ~= 1.0. The old bug would have given ratio ~= 4.0.
+    assert ratio == pytest.approx(1.0, rel=1e-3)

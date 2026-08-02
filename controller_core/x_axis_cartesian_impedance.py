@@ -892,6 +892,20 @@ class XAxisCartesianImpedanceController:
         # mass_matrix was supplied this cycle -- see acceleration_feedforward's
         # docstring above for why an identity-matrix fallback here would be
         # the wrong kind of "silent."
+        #
+        # use_shaping branches which physical quantity wrench_task represents
+        # at this point in the pipeline (see the wrench-shaping comment below):
+        # when shaping is on, wrench_task is a desired task ACCELERATION and
+        # the single lambda_for_wrench @ wrench_task step below converts the
+        # combined PD+feedforward acceleration into a force exactly once: add
+        # raw target_accel here, not a pre-Lambda-scaled force, or shaping
+        # would apply Lambda a second time (an effective Lambda^2 scaling --
+        # found and fixed 2026-08-02, confirmed numerically and live in
+        # config/ur5e_mujoco_torque_osc_tuned_split_base_wrist_accel_ff.yaml,
+        # which sets both flags together). When shaping is off, wrench_task
+        # is used directly as a FORCE (no further Lambda multiplication), so
+        # the feedforward term must be mass-weighted here to be dimensionally
+        # a force contribution.
         accel_ff_active = False
         wrench_accel_ff = np.zeros(3, dtype=np.float64)
         if use_accel_ff and mass_matrix_provided and lambda_mat is not None:
@@ -900,11 +914,18 @@ class XAxisCartesianImpedanceController:
             target_y_accel = float(st.get("target_y_accel", 0.0))
             target_z_accel = float(st.get("target_z_accel", 0.0))
             accel_ff_vec = np.zeros(wrench_task.shape[0], dtype=np.float64)
-            accel_ff_vec[0] = lambda_diag[0] * target_x_accel
-            if wrench_task.shape[0] >= 2:
-                accel_ff_vec[1] = lambda_diag[1] * target_y_accel
-            if wrench_task.shape[0] >= 3:
-                accel_ff_vec[2] = lambda_diag[2] * target_z_accel
+            if use_shaping:
+                accel_ff_vec[0] = target_x_accel
+                if wrench_task.shape[0] >= 2:
+                    accel_ff_vec[1] = target_y_accel
+                if wrench_task.shape[0] >= 3:
+                    accel_ff_vec[2] = target_z_accel
+            else:
+                accel_ff_vec[0] = lambda_diag[0] * target_x_accel
+                if wrench_task.shape[0] >= 2:
+                    accel_ff_vec[1] = lambda_diag[1] * target_y_accel
+                if wrench_task.shape[0] >= 3:
+                    accel_ff_vec[2] = lambda_diag[2] * target_z_accel
             wrench_task = wrench_task + accel_ff_vec
             wrench_accel_ff = accel_ff_vec[:3].copy()
             accel_ff_active = True
