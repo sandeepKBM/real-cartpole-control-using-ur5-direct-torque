@@ -313,17 +313,44 @@ At `height_alpha=0.5`, zero-degree pose, `config/ur5e_mujoco_torque_osc_tuned_sp
 1. ~~Directly test `+X` at `accel=0.02, move_duration=8.0s`~~ — **done**, see §11.
 2. ~~A third `-X` `0.015/8s` trial~~ — **done**, resolved via §6.
 3. ~~Acceleration feedforward~~ — **done**, mixed result, see §9. Not real-hardware tested.
-4. ~~`kp_rot_wrist` retune~~ — **in progress** (§10 item 1).
-5. ~~Residual-regression ridge fix~~ — **done**, see §9. Feature/data improvement round 2
-   **in progress** (§10 item 2).
+4. ~~`kp_rot_wrist` retune~~ — **done**, see §10 item 1.
+5. ~~Residual-regression ridge fix~~ — **done**, see §9. Feature/data improvement round 2 —
+   **done**, see §10 item 2.
 6. ~~Hanging-pose transport family~~ — **done**, see §8. The biggest open item now: a real
    physical clearance check in the lab, then a first small real test — cannot happen from home.
-7. **New, from §8's own gaps**: full-range rigor sweep for the hanging-pose family (only
-   `alpha=0.5` has been characterized so far), and checking whether it needs its own `-45°`-style
-   base-rotation variant for real wall/clearance needs, the way the old family did.
-8. **New, once §10's two in-progress items land**: decide whether to layer the `kp_rot_wrist`
-   retune (if it helps) and/or the improved residual-regression model onto the hanging-pose
-   family instead of (or in addition to) `split_base_wrist_task` — the hanging pose may not need
-   `split_base_wrist_task` at all, since it doesn't sit at the singularity to begin with; worth
-   checking whether the plain impedance controller is sufficient there, or whether
-   `split_base_wrist_task`-style changes still add value away from a singularity.
+7. **Hanging-pose `-45°` clearance variant — done, real finding, see §13.** Kinematically the
+   singularity-avoidance survives rotation (`cond(J)` unaffected); dynamically it does NOT — the
+   Y-drift coupling that bit the OLD family at this same rotation reintroduces here too, just
+   with ~3x more margin before onset. New evidence this coupling is a base-rotation
+   controller-architecture property, not something inseparable from the old family's wrist
+   singularity as previously assumed.
+8. Full-range rigor sweep for the hanging-pose family (only `alpha=0.5` fully characterized) —
+   **dispatched, in progress**.
+9. Whether the hanging pose needs `split_base_wrist_task` at all, since it doesn't sit at the
+   singularity to begin with — **dispatched, in progress**.
+
+## 13. Hanging-pose `-45°` clearance variant — real finding: Y-drift coupling is NOT singularity-specific
+
+(`docs/status/hanging_pose_clearance_variant_2026-08-02.md`) New pose
+`hardware/poses.py::HANGING_ALPHA_0_5_CLEARANCE_Q` (the hanging family's `shoulder_pan`
+overridden to `-45°`, mirroring `HEIGHT_ALPHA_0_5_CLEARANCE_Q`'s pattern exactly) — additive
+only, mirrored into `rl_gain_scheduling/gain_scheduling_env.py`.
+
+- **`cond(J)` unaffected by rotation**: 21-point sweep matches the un-rotated family to float
+  precision (max diff `1.24e-14`) — `shoulder_pan` rotation is a rigid-body symmetry that
+  doesn't touch conditioning, as expected.
+- **But the rigor sweep drops hard**: `canonical_grid` `2/8` at this rotated pose vs. `8/8`
+  un-rotated, with the SAME qualitative signature the old pose family showed on real hardware at
+  this exact rotation — near-1:1 X:Y diagonal motion, growing with displacement, up to a real
+  `|Y-Y0|>0.03m` guard trip at `dx=0.20m`.
+- **The real news**: since this reproduces at `cond(J)≈7-15` (nowhere near singular), the Y-drift
+  coupling is **not** inseparable from the old family's wrist singularity, as this session
+  previously assumed — it looks like a real property of commanding this controller architecture
+  at a rotated base pose, independent of which specific pose family it's rotating. Genuinely
+  useful, if sobering, evidence: neither `split_base_wrist_task` nor a totally different pose
+  family fixes this on its own — it may need its own dedicated investigation regardless of which
+  pose family is chosen.
+- One real silver lining: onset margin is meaningfully better here (~3x further out than the old
+  family's documented sim onset of `~0.05-0.06m`) — a real, if partial, improvement, not a fix.
+- **Not real-hardware-ready** — no physical clearance check has been done for this rotated
+  hanging posture, same rule as every pose change in this project.
