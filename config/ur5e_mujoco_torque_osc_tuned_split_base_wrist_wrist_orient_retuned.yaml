@@ -1,0 +1,150 @@
+# config/ur5e_mujoco_torque_osc_tuned_split_base_wrist.yaml (tonight's real-hardware-
+# validated 9/9 config) with ONLY kp_rot_wrist/kd_rot_wrist retuned: 0.0/10.0 (damping-only)
+# -> 20.0/80.0. Everything else byte-identical to that file.
+#
+# Why this exists (2026-08-02, docs/status/kp_rot_wrist_retune_2026-08-02.md): the same-night
+# diagnostic docs/status/split_base_wrist_orientation_growth_2026-08-01.md found real
+# orientation error grows continuously (up to 0.18 rad on real hardware, not yet guard-tripping
+# but the actual driver of several TCP-speed-guard trips) under split_base_wrist_task, because
+# with kp_rot=0 (required elsewhere -- unstable near this pose through the shared eps-
+# regularized Lambda pipeline) and kp_rot_wrist=0, orientation has NO proportional/restoring
+# channel at all -- only kd_rot/kd_rot_wrist damping plus whatever nullspace_posture supplies
+# as a side effect. That doc's own pointer for a future retune was to raise kp_rot_wrist, since
+# wrist_orientation_task's tau_orient_wrist = (J_rot.T @ (kp_rot_wrist*e_rot - kd_rot_wrist*omega))
+# * WRIST_ORIENTATION_MASK is a plain joint-space PD term (see
+# controller_core/x_axis_cartesian_impedance.py lines ~941-953) with NO matrix inversion --
+# structurally different from kp_rot's shared Lambda-weighted wrench pipeline, so it was not
+# assumed to inherit that instability, but this needed direct sim verification, not inference.
+#
+# Sweep summary (kp_rot_wrist swept 0-80 at several kp:kd ratios, at the exact real failure
+# pose q=[0.0, -0.835398, -1.2, -0.985398, 0.0, 0.0] and the exact real accel_duration_scurve
+# failure scenarios, target_accel in {+-0.02, +-0.015} x move_duration in {4.0, 8.0}s):
+# - Raising kp_rot_wrist alone (kd_rot_wrist fixed at 10) makes orientation error WORSE, then
+#   unstable: kp=20 already ~2.7x worse than kp=0 on the short-hold cases; kp>=30 tripped the
+#   0.25 rad guard even on previously-clean 4s moves; kp=50 pushed max|qd| to ~0.29-0.31 rad/s
+#   (vs baseline's ~0.04-0.17) -- classic underdamped PD, not the kp_rot-style positive-feedback
+#   instability, but a real failure mode all the same if kd isn't scaled with kp.
+# - With kd_rot_wrist scaled up alongside kp_rot_wrist (~4:1 ratio), the short-hold (4s move +
+#   4s hold) scenarios improve substantially and monotonically as gain increases (kp=20/kd=80:
+#   orientation error roughly halved vs baseline, e.g. 0.0734->0.0434 rad; kp=80/kd=320: cut to
+#   ~1/4, e.g. 0.0734->0.0195 rad), smooth monotonic growth in every trace checked (no
+#   oscillation).
+# - BUT at kp=80/kd=320, the 4-category rigor sweep's long_holds category (hold up to 30s)
+#   regresses 8/8 -> 6/8: orientation error does NOT plateau there like baseline does (baseline
+#   is flat ~0.070-0.071 rad from hold=4s through hold=30s at dx=0.06m); the kp=80/kd=320
+#   candidate instead keeps growing across the whole 30s hold (0.008->0.024->0.125->guard trip
+#   by t=30s) -- a real, separate, slow-onset divergence at high gain, not present at more
+#   moderate gain.
+# - kp=20/kd=80 (this file) and kp=10/kd=40 both preserve long_holds 8/8 (kp=20/kd=80: worst
+#   0.075 rad at dx=0.06m/hold=30s, vs baseline's 0.071 rad -- comparable, not diverging) while
+#   still giving a real, meaningful reduction on the short-exposure scenarios that motivated
+#   this retune. kp=20/kd=80 was chosen over kp=10/kd=40 for a larger effect size on the
+#   motivating short-hold scenarios (35-41% error reduction vs ~20%) at equal long_holds safety.
+#
+# Full 4-category rigor sweep at height_alpha=0.5 (canonical_grid/long_holds/
+# large_displacements/torque_scale_robustness), this file vs. the unmodified
+# split_base_wrist.yaml baseline: BYTE-IDENTICAL pass/fail pattern, 34/38 both
+# (6/8, 8/8, 8/8, 12/14) -- zero regressions.
+#
+# Sim only; not real-hardware validated. Does not replace
+# config/ur5e_mujoco_torque_osc_tuned_split_base_wrist.yaml as the real-hardware default
+# without its own careful, small-first real-lab check, per every other unvalidated config in
+# this repo's history.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+    kp_rot_wrist: 20.0
+    kd_rot_wrist: 80.0
+  wrist_orientation_task: true
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  split_base_wrist_task: true
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  friction_feedforward: true
+  friction_ff_qd_deadband: 0.05
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 5.0
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
