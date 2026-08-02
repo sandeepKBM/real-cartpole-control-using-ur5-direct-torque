@@ -416,6 +416,52 @@ class CartesianImpedanceConfig:
     y_integral_action: bool = False
     ki_y: float = 0.0
     y_integral_limit_m_s: float = 0.02
+    # X-axis integral action (default off = historical behavior: pure kp_x/
+    # kd_x PD, ki_x implicitly 0). Added 2026-08-02 to address a real, directly
+    # measured hold-phase undershoot: direct_torque_20260802_190759 (wrist2-
+    # offset pose, split_base_wrist_task) showed shoulder_lift torque ramp to
+    # a steady -6.08 Nm and x_error plateau at 0.0082m out of a 0.02m target
+    # for the entire 2s hold, completely flat -- the textbook signature of
+    # proportional control settling at a stable equilibrium once its own
+    # error-proportional output drops below the joint's real static-friction
+    # breakaway threshold (Fs), not a transient. friction_feedforward's
+    # static/lugre/karnopp models are all velocity-driven and vanish exactly
+    # as qd->0 approaching this equilibrium -- see karnopp_qd_stick_enter_radps's
+    # docstring for why a torque-driven feedforward alternative isn't a
+    # defensible fix either. Integral action is the classical, model-free
+    # answer to a steady-state error under any roughly-constant disturbance:
+    # as long as x_err stays nonzero, the integral term keeps growing without
+    # bound until it exceeds Fs and pushes through, however small the
+    # residual gap is -- no friction model or parameter accuracy required.
+    #
+    # Directly mirrors y_integral_action's already-validated pattern (added
+    # 2026-08-01 for the -45 deg pose's Y-drift coupling -- a DIFFERENT,
+    # structural disturbance, not friction; that flag's own real-hardware
+    # test found "zero measurable effect at a gentle dose" for THAT problem,
+    # which does not predict anything about ki_x's effectiveness here --
+    # genuine stiction is the textbook integral-action use case that Y-drift
+    # was not). Same anti-windup clamp shape (accumulate every step, then
+    # clip -- never clip only occasionally), same reset_from_state()
+    # lifecycle, same "config/gain-override only, not in the live gain-
+    # scheduling contract" precedent as kp_rot_wrist/kd_rot_wrist and ki_y.
+    #
+    #   Fx = kp_x*x_err + kd_x*(x_vel_des - v_x) + ki_x*x_integral
+    #   x_integral(t) = clip(x_integral(t-1) + x_err*dt, -x_integral_limit_m_s, +x_integral_limit_m_s)
+    #
+    # CORRECTED 2026-08-02, same day, direct sim testing before any real-
+    # hardware attempt: accumulation only happens while |x_vel_des| is near
+    # zero (i.e. during hold, not an active move) -- see _karnopp_step-
+    # adjacent reasoning in compute() at the accumulation site for why. A
+    # first version accumulated unconditionally and, tested in sim at the
+    # exact real-evidence scenario, wound up against the large transient
+    # move-phase tracking error and overshot the target during hold (x_error
+    # measured crossing zero and growing negative for the rest of the hold)
+    # -- a real closed-loop windup bug, not present in the original
+    # motivating case (a flat HOLD-phase plateau), fixed by restricting
+    # accumulation to exactly the phase this feature targets.
+    x_integral_action: bool = False
+    ki_x: float = 0.0
+    x_integral_limit_m_s: float = 0.02
     # Base/wrist task split (default off = historical behavior). Added
     # 2026-08-01 after a real-hardware TCP-accel guard trip at the
     # height_alpha=0.5 pose using accel_duration_scurve at a modest
@@ -641,6 +687,9 @@ class CartesianImpedanceConfig:
             y_integral_action=bool(ctrl.get("y_integral_action", False)),
             ki_y=float(gains.get("ki_y", 0.0)),
             y_integral_limit_m_s=float(ctrl.get("y_integral_limit_m_s", 0.02)),
+            x_integral_action=bool(ctrl.get("x_integral_action", False)),
+            ki_x=float(gains.get("ki_x", 0.0)),
+            x_integral_limit_m_s=float(ctrl.get("x_integral_limit_m_s", 0.02)),
             split_base_wrist_task=bool(ctrl.get("split_base_wrist_task", False)),
             acceleration_feedforward=bool(ctrl.get("acceleration_feedforward", False)),
         )
@@ -684,6 +733,8 @@ class CartesianImpedanceOutput:
     friction_karnopp_stuck: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
     y_integral_action_active: bool = False
     y_integral_value: float = 0.0
+    x_integral_action_active: bool = False
+    x_integral_value: float = 0.0
     split_base_wrist_task_active: bool = False
     acceleration_feedforward_active: bool = False
     wrench_accel_ff: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
@@ -717,6 +768,7 @@ class XAxisCartesianImpedanceController:
         self._posture_reanchored = False
         self._x_des_at_anchor = 0.0
         self._y_integral = 0.0
+        self._x_integral = 0.0
         # LuGre bristle-deflection state, one scalar per joint. Genuinely
         # stateful (integrated over time), same lifecycle class as
         # _q_rest/_quat0/_y_integral: zeroed here and in reset_from_state(),
@@ -745,6 +797,7 @@ class XAxisCartesianImpedanceController:
         self._posture_reanchored = False
         self._x_des_at_anchor = float(np.asarray(st["ee_pos"], dtype=np.float64).reshape(3)[0])
         self._y_integral = 0.0
+        self._x_integral = 0.0
         self._friction_z = np.zeros(6, dtype=np.float64)
         self._karnopp_stuck = np.ones(6, dtype=bool)
         self._initialized = True
@@ -1001,7 +1054,38 @@ class XAxisCartesianImpedanceController:
                 self._y_integral = 0.0
         Fy_integral = self.cfg.ki_y * self._y_integral if use_y_integral else 0.0
 
-        Fx = self.cfg.kp_x * x_err + self.cfg.kd_x * (x_vel_des - float(v[0]))
+        use_x_integral = bool(self.cfg.x_integral_action)
+        if use_x_integral:
+            # Accumulate ONLY while the target is holding still (|x_vel_des|
+            # below a small threshold), not during an active move. Found
+            # necessary by direct sim testing (2026-08-02): accumulating
+            # throughout the move phase too winds the integral up against the
+            # large, transient tracking error a fast move naturally has
+            # (nothing to do with friction), and that windup then overshoots
+            # the target once the hold phase begins -- x_error was measured
+            # crossing zero and continuing to grow negative for the rest of
+            # the hold, a real closed-loop failure a synthetic single-
+            # integrator test could not have caught. This feature exists to
+            # close a HOLD-phase steady-state gap (the real evidence is a
+            # flat, non-decaying plateau during hold), not to help move-phase
+            # tracking, which kp_x/kd_x already handle -- gating to hold-only
+            # matches that motivating case exactly and removes the windup
+            # path entirely, without needing a reset-on-move-start (frozen,
+            # not reset, so a brief blip in x_vel_des doesn't wipe progress).
+            x_vel_des_abs = abs(float(x_vel_des))
+            if x_vel_des_abs < 1e-4:
+                dt = float(st.get("dt_s", 1.0 / 500.0))
+                if not np.isfinite(dt) or dt <= 0.0:
+                    dt = 1.0 / 500.0
+                x_integral_limit = max(float(self.cfg.x_integral_limit_m_s), 0.0)
+                self._x_integral += x_err * dt
+                if x_integral_limit > 0.0:
+                    self._x_integral = float(np.clip(self._x_integral, -x_integral_limit, x_integral_limit))
+                else:
+                    self._x_integral = 0.0
+        Fx_integral = self.cfg.ki_x * self._x_integral if use_x_integral else 0.0
+
+        Fx = self.cfg.kp_x * x_err + self.cfg.kd_x * (x_vel_des - float(v[0])) + Fx_integral
         Fy = self.cfg.kp_y * y_err - self.cfg.kd_y * float(v[1]) + Fy_integral
         Fz = self.cfg.kp_z * z_err - self.cfg.kd_z * float(v[2])
 
@@ -1266,6 +1350,8 @@ class XAxisCartesianImpedanceController:
             friction_karnopp_stuck=self._karnopp_stuck.astype(np.float64).copy(),
             y_integral_action_active=use_y_integral,
             y_integral_value=float(self._y_integral),
+            x_integral_action_active=use_x_integral,
+            x_integral_value=float(self._x_integral),
             split_base_wrist_task_active=use_split_base_wrist,
             acceleration_feedforward_active=accel_ff_active,
             wrench_accel_ff=wrench_accel_ff,
