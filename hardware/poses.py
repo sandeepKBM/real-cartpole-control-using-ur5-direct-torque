@@ -27,6 +27,51 @@ HEIGHT_ALPHA_0_5_CLEARANCE_Q = HEIGHT_ALPHA_0_5_Q.copy()
 HEIGHT_ALPHA_0_5_CLEARANCE_Q[0] = -0.7853981633974483
 
 
+# height_alpha=0.5 with wrist_2 nudged off exactly 0 (added 2026-08-02). HEIGHT_ALPHA_0_5_Q
+# sits exactly at wrist_2=0, the UR-family wrist singularity (cond(full 6x6 J) ~7.28e16 at
+# this pose) -- confirmed by direct measurement that a single-joint offset resolves this far
+# more cheaply than either controller-side split_base_wrist_task or the from-scratch
+# "hanging" pose family above: at wrist_2=0.2 rad (~11 deg), cond(J) drops to ~29.2 (15
+# orders of magnitude better), while site position shifts only ~2cm and tool orientation
+# tilts only slightly (Z-axis [0,-1,0] -> [0.20,-0.98,0.02]) from HEIGHT_ALPHA_0_5_Q -- unlike
+# the hanging-pose family, whose from-scratch search produced a tool orientation
+# ([0.588,0,0.809] Z-axis) with no resemblance to the original at all. This is the minimal,
+# single-joint fix; everything else is unchanged from HEIGHT_ALPHA_0_5_Q.
+#
+# Real-hardware validated in position mode (2026-08-02, position_20260802_170653):
+# duration_complete, safety_pass=True, achieved 0.01998/0.02m (99.9%), orientation error
+# <0.0004 rad throughout, zero real-time telemetry issues. direct_torque not yet tested.
+HEIGHT_ALPHA_0_5_WRIST2_OFFSET_Q = HEIGHT_ALPHA_0_5_Q.copy()
+HEIGHT_ALPHA_0_5_WRIST2_OFFSET_Q[4] = 0.2
+
+
+# height_alpha=0.5 with the elbow flipped to the alternate IK branch (genuinely inverted/
+# "hanging" arm shape, user-requested 2026-08-02) PLUS the same wrist_2 nudge as above,
+# reaching the same tool position/orientation as HEIGHT_ALPHA_0_5_Q to within a small,
+# deliberate margin. Found via numeric IK (damped least-squares) seeded to converge to the
+# elbow-up branch (elbow=+1.098 rad here vs HEIGHT_ALPHA_0_5_Q's elbow=-1.2 rad -- a real
+# sign flip, not a small tweak) targeting HEIGHT_ALPHA_0_5_Q's exact tool pose
+# (pos=[-0.1215,-0.234,0.9279], Z-axis=[0,-1,0]) to <1e-6 residual before applying the
+# wrist_2 offset.
+#
+# IMPORTANT, measured directly: the elbow-inverted branch alone (wrist_2=0) does NOT avoid
+# the singularity -- wrist_2 converges back to ~0 on its own regardless of elbow branch,
+# since the singularity is tied to this specific TARGET ORIENTATION, not to which elbow
+# solution reaches it (cond(J)=1.67e8 at wrist_2=0 on this branch). The wrist_2 offset is
+# still required. On this branch it needs a larger offset than HEIGHT_ALPHA_0_5_WRIST2_OFFSET_Q
+# above for comparable conditioning (0.3 rad here vs 0.2 rad there): wrist_2=0.1 -> cond=208,
+# 0.2 -> cond=104, 0.3 -> cond=70.2 (chosen value, ~14 orders of magnitude better than
+# singular, position shift ~3cm, orientation Z-axis [0,-1,0] -> [0.206,-0.955,0.212]).
+#
+# Sim-only so far -- no real-hardware validation of this specific pose yet. When testing
+# direct_torque mode with this pose, always pass it as --start-q-rad explicitly so the
+# transport loop's own moveJ brings the arm here as the real starting origin before any
+# torque command begins -- do not rely on skip-joint-move or an assumed prior position.
+HEIGHT_ALPHA_0_5_ELBOW_INVERTED_WRIST2_OFFSET_Q = np.array(
+    [-0.0, -2.023883, 1.098332, -1.414729, 0.3, -0.680517], dtype=np.float64
+)
+
+
 def q_for_height_alpha(alpha: float) -> np.ndarray:
     """Interpolate between active-origin (0) and lower-B (1) joint poses."""
     alpha = float(alpha)

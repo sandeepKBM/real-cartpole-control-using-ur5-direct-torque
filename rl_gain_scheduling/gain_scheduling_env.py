@@ -49,6 +49,22 @@ from transport_metrics import (  # noqa: E402
 ACTIVE_ORIGIN_Q = np.array([0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0], dtype=np.float64)
 LOWER_B_Q = np.array([0.0, -0.1, -2.4, -0.4, 0.0, 0.0], dtype=np.float64)
 
+# height_alpha=0.5 with wrist_2 nudged to 0.2 rad (mirrored from hardware/poses.py --
+# HEIGHT_ALPHA_0_5_WRIST2_OFFSET_Q, added 2026-08-02). Single-joint fix for the same
+# wrist_2=0 singularity the hanging-pose family above addresses via a full pose redesign --
+# see that file's comment for the cond(J)/position/orientation comparison.
+HEIGHT_ALPHA_0_5_WRIST2_OFFSET_Q = (0.5 * ACTIVE_ORIGIN_Q + 0.5 * LOWER_B_Q).astype(np.float64)
+HEIGHT_ALPHA_0_5_WRIST2_OFFSET_Q[4] = 0.2
+
+# Elbow-inverted alternate-IK-branch variant, mirrored from hardware/poses.py --
+# HEIGHT_ALPHA_0_5_ELBOW_INVERTED_WRIST2_OFFSET_Q. Same tool position/orientation as
+# HEIGHT_ALPHA_0_5_Q (to a small deliberate margin), genuinely inverted elbow shape
+# (elbow=+1.098 rad vs -1.2 rad), wrist_2=0.3 rad for conditioning -- see that file's
+# comment for the full derivation and cond(J) table.
+HEIGHT_ALPHA_0_5_ELBOW_INVERTED_WRIST2_OFFSET_Q = np.array(
+    [-0.0, -2.023883, 1.098332, -1.414729, 0.3, -0.680517], dtype=np.float64
+)
+
 # "Hanging"/elbow-down alternative pose family (added 2026-08-01, mirrored from
 # hardware/poses.py -- these two files' pose constants must move together, per the
 # 2026-08-01 finding that they had already silently diverged once for the original
