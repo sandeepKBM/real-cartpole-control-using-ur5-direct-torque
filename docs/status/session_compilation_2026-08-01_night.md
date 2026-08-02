@@ -212,24 +212,71 @@ config-vs-implementation gap, flagged for a maintainer decision, not fixed.
   not a guard defect. This means sim cannot currently be trusted to validate this failure class
   either way — a real constraint on how much weight to put on any sim-only result for this
   family of problems, including the orientation-growth sim A/B in §4.
-- **"Hanging" end-effector pose redesign** — considered and deprioritized (not built). Was
-  motivated by avoiding `wrist_2=0` entirely, but that problem is already solved more surgically
-  by `split_base_wrist_task`; the two remaining open problems (§4, §6) have no evidence tying
-  them to the pose choice specifically. Would be a much larger, more invasive change (duplicated
-  pose definitions in two files, invalidates all tuned gains, needs fresh real-world clearance
-  re-verification) with no clear problem it currently solves. Revisit only if future evidence
-  ties either open issue to sitting near `wrist_2=0` specifically.
+- **"Hanging" end-effector pose redesign — REVERSED, now built and validated (§8 below).**
+  Initially deprioritized here on the grounds that `split_base_wrist_task` already solved the
+  singularity more surgically. After §6 resolved and the user judged `split_base_wrist_task`
+  "mainly a diagnostic fix" not acceptable for real lab deployment on its own, this was revisited
+  and built properly (`docs/status/hanging_pose_transport_family_2026-08-01.md`) — see §8.
 
-## 8. In progress, not yet reported
+## 8. Fix #3 — hanging-pose transport family (landed, sim-only, structural fix)
 
-- **Acceleration feedforward** (background agent, sim-only build): adding a computed-torque-style
-  feedforward term (`Fx += effective_mass * target_x_accel`) to the currently-pure-PD impedance
-  law, motivated by real observed tracking lag/jitter and the complete absence of any
-  acceleration feedforward in the current controller (confirmed by direct grep — `target_accel_mps2`
-  only reaches the trajectory generator, never the torque law). New flag-gated option, new named
-  config layered on `split_base_wrist_task`. Not yet complete as of this compilation.
+After §6 resolved and the user judged `split_base_wrist_task` alone "mainly a diagnostic fix,
+not acceptable for real lab deployment" — the more fundamental fix was built:
+`docs/status/hanging_pose_transport_family_2026-08-01.md`. A new elbow-down pose family
+(`hardware/poses.py::HANGING_ORIGIN_Q`/`HANGING_LOWER_Q`/`q_for_hanging_height_alpha`, mirrored
+into `rl_gain_scheduling/gain_scheduling_env.py`), found via a MuJoCo FK grid search (16,684
+candidates) + Nelder-Mead refinement — additive only, no existing pose constant touched.
 
-## 9. Current real-hardware-validated envelope (the practical answer to "how far can we go")
+**This avoids the singularity structurally, not just its consequence**: `cond(J)` across the
+whole new family's range is `7-15` (static FK sweep, confirmed `8.9-11.2` in an actual
+closed-loop rollout) — vs. the old family's `1e16-2.5e17` across its ENTIRE range. 12-16 orders
+of magnitude better, everywhere in the range, not just spot-checked at endpoints. Workspace
+coverage verified equivalent (Z-height range 0.537-1.044m vs. old family's 0.537-1.08m;
+reachable ±0.20-0.25m in X with no joint-limit contact); gravity-comp torque comparable or
+lower (9-17 Nm vs. 0-26 Nm).
+
+**Sim validation**: the plain old tuned gains (only `home_qpos` changed, zero pose-specific
+tuning) score 23/38 on the standard rigor sweep — already beating the old family's own
+documented friction-era baseline (19/38). Layering the existing, already-validated
+`friction_feedforward` fix reaches **36/38 (94.7%)**, matching the old family's best-ever
+historical number. The 2 remaining failures are a pre-existing, pose-agnostic torque-budget
+limit at 10% torque scale, not a new problem introduced by this pose.
+
+**Not yet done**: only the `alpha=0.5` midpoint got the full rigor sweep (not the whole range);
+the `-45°` real-lab clearance rotation hasn't been checked in this posture; and — critically —
+**zero real-hardware or physical clearance validation**. This needs a supervised visual
+clearance check in the actual lab before it goes anywhere near the real arm, same discipline as
+every pose change in this project's history.
+
+## 9. Two more sim-only tracks landed tonight (from home, after the real-hardware session ended)
+
+- **Acceleration feedforward** (`docs/status/acceleration_feedforward_2026-08-01.md`): added a
+  computed-torque-style feedforward term to the previously pure-PD torque law, motivated by real
+  observed tracking lag/jitter and the confirmed complete absence of acceleration feedforward in
+  the controller. Honest mixed result: negligible at tonight's real accel magnitude (0.02 m/s²),
+  and at a larger untested one (0.3 m/s²) a real tradeoff — hold-phase torque drops ~7x but
+  move-phase jitter nearly triples, one canonical-grid case regresses. Not recommended as
+  default; not real-hardware tested.
+- **Residual-torque regression ridge fix** (`docs/status/residual_torque_regression_pipeline_2026-08-01.md`):
+  fixed a catastrophic held-out extrapolation blowup (joint 2 R² `-9799.8`) root-caused to
+  near-collinear features at the tiny `qd` range elbow/wrist_1 see during X-only transport.
+  Closed-form ridge regression (`λ=1e5`) plus output clipping fixed it: joint 2 R²
+  `-9799.8 → -0.055`. Pipeline is now honest; still mostly negative R² overall, not yet an
+  actually-useful correction — a follow-up feature/data-improvement pass is in progress (§10).
+
+## 10. In progress right now (background, sim-only, no real-hardware bottleneck)
+
+Dispatched together after the real-hardware session ended, since there's no robot-time
+constraint on any of these:
+1. **`kp_rot_wrist` retune** — the concrete pointer from §4's diagnosis (currently 0,
+   damping-only) — sim gain sweep against the exact real scenarios that showed orientation
+   growth tonight, plus the standard regression sweep.
+2. **Residual-regression feature/data improvement, round 2** — pushing past "honest but
+   mediocre" (§9) toward actually useful, or an honest verdict that joints 2/3 are a hard
+   data-starvation limit needing a different data-collection strategy, not more modeling.
+3. Hanging-pose family (§8) — landed.
+
+## 11. Current real-hardware-validated envelope (the practical answer to "how far can we go")
 
 At `height_alpha=0.5`, zero-degree pose, `config/ur5e_mujoco_torque_osc_tuned_split_base_wrist.yaml`,
 `accel_duration_scurve`:
@@ -241,30 +288,33 @@ At `height_alpha=0.5`, zero-degree pose, `config/ur5e_mujoco_torque_osc_tuned_sp
   orientation error more room to grow before the same guard catches it, rather than helping the
   arm "get there gently."
 - **`-X`**: clean at `accel=0.01` (implied by symmetry, not directly tested — only `+0.01` was
-  actually run). Fails at `accel=0.015, move_duration=8.0s` in all 3 trials tonight, via two
-  likely-distinct real mechanisms (§6) — an unexplained accel transient (2/3 trials) and the
-  already-understood §4 orientation-growth speed trip (1/3 trials). `-X` ceiling for this
-  pose/config is `accel=0.01`, same as `+X`'s effective ceiling once §4's exposure-time finding
-  is accounted for.
+  actually run). Fails at `accel=0.015, move_duration=8.0s` in all 3 trials tonight — now fully
+  explained, not a mystery (§6): 2/3 trials were RTDE telemetry staleness artifacts, 1/3 was the
+  already-understood §4 orientation-growth mechanism. `-X` ceiling for this pose/config is
+  `accel=0.01`, same as `+X`'s effective ceiling once §4's exposure-time finding is accounted
+  for.
 - Singularity-conditioning: fixed and validated in **every real run tonight, 9/9, pass or fail.**
+- All of the above is specific to `split_base_wrist_task` at the OLD (singular) pose family. The
+  new hanging-pose family (§8) hasn't had real hardware or the same displacement-envelope
+  characterization done yet — its sim numbers (36/38 rigor sweep) aren't directly comparable to
+  this section's real-hardware displacement-envelope numbers without that work.
 
-## 10. Suggested next steps (not decided, for discussion)
+## 12. Suggested next steps (not decided, for discussion)
 
-1. ~~Directly test `+X` at `accel=0.02, move_duration=8.0s`~~ — **done**
-   (`direct_torque_20260801_203354`): worse than `4.0s`, confirming the exposure-time
-   hypothesis (see §9). `+X` ceiling for this pose/config is now `accel=0.015` at any tested
-   duration; `0.02` fails regardless of duration.
-2. ~~A third `-X` `0.015/8s` trial~~ — **done** (`direct_torque_20260801_204446`): revealed a
-   likely second, distinct mechanism rather than resolving the first (see §6's revised read).
-   `-0.01` is the practical `-X` ceiling for now.
-3. Once the acceleration-feedforward agent reports, real-hardware test it (small, careful first
-   step per this session's own established discipline) — motivated by the general jitter/tracking-lag
-   discussion, not by either open failure mode specifically.
-4. `docs/status/split_base_wrist_orientation_growth_2026-08-01.md`'s `kp_rot_wrist` retune
-   pointer is real, scoped, future work — not attempted tonight (would need its own sim
-   validation pass before real hardware, per this repo's own gain-tuning discipline).
-5. **Dispatched** (background agent, sim/offline-only): fix the residual-torque regression's
-   catastrophic held-out extrapolation blowup (2 of 6 joints, R² deeply negative) found earlier
-   tonight — regularization/output-bounding, not a redesign. This repo's own top-ranked
-   "make the controller smarter" direction (`docs/status/nonlinear_controller_research_2026-07-31.md`),
-   explicitly not another RL attempt.
+1. ~~Directly test `+X` at `accel=0.02, move_duration=8.0s`~~ — **done**, see §11.
+2. ~~A third `-X` `0.015/8s` trial~~ — **done**, resolved via §6.
+3. ~~Acceleration feedforward~~ — **done**, mixed result, see §9. Not real-hardware tested.
+4. ~~`kp_rot_wrist` retune~~ — **in progress** (§10 item 1).
+5. ~~Residual-regression ridge fix~~ — **done**, see §9. Feature/data improvement round 2
+   **in progress** (§10 item 2).
+6. ~~Hanging-pose transport family~~ — **done**, see §8. The biggest open item now: a real
+   physical clearance check in the lab, then a first small real test — cannot happen from home.
+7. **New, from §8's own gaps**: full-range rigor sweep for the hanging-pose family (only
+   `alpha=0.5` has been characterized so far), and checking whether it needs its own `-45°`-style
+   base-rotation variant for real wall/clearance needs, the way the old family did.
+8. **New, once §10's two in-progress items land**: decide whether to layer the `kp_rot_wrist`
+   retune (if it helps) and/or the improved residual-regression model onto the hanging-pose
+   family instead of (or in addition to) `split_base_wrist_task` — the hanging pose may not need
+   `split_base_wrist_task` at all, since it doesn't sit at the singularity to begin with; worth
+   checking whether the plain impedance controller is sufficient there, or whether
+   `split_base_wrist_task`-style changes still add value away from a singularity.
