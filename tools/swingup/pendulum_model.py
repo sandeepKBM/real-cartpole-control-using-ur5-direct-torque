@@ -77,6 +77,21 @@ def theta_ddot(theta: float, theta_dot: float, a: float, p: PendulumParams = DEF
     )
 
 
+def theta_ddot_2d(theta: float, theta_dot: float, a_x: float, a_z: float, p: PendulumParams = DEFAULT_PARAMS) -> float:
+    """Generalization of theta_ddot allowing the pivot to also accelerate
+    vertically (a_z). Derived the same way (Euler-Lagrange with pivot
+    position (x_c(t), z_c(t)) prescribed): the a_z term couples through
+    sin(theta) instead of cos(theta) -- structurally identical to how
+    gravity couples in, i.e. a_z acts like a time-varying modification to
+    effective gravity in the pivot's accelerating frame (the classic
+    "Kapitza pendulum" mechanism: pump a swing by raising/lowering your
+    center of mass, not just pushing horizontally). This is a genuinely
+    different energy-injection channel from a_x -- worth combining, not a
+    redundant restatement of the same physics."""
+    k = p.M * p.d_com / p.I_p
+    return -k * G * np.sin(theta) - k * (a_x * np.cos(theta) + a_z * np.sin(theta)) - (p.b_damping / p.I_p) * theta_dot
+
+
 def energy(theta: float, theta_dot: float, p: PendulumParams = DEFAULT_PARAMS) -> float:
     """Mechanical energy relative to the pivot, hanging (theta=0) at the minimum."""
     return 0.5 * p.I_p * theta_dot**2 - p.M * G * p.d_com * np.cos(theta)
@@ -145,4 +160,73 @@ def simulate(
         "flipped_at": flipped_at,
         "peak_v_c": float(np.max(np.abs(v_cs))) if v_cs else 0.0,
         "peak_x_c": float(np.max(np.abs(x_cs))) if x_cs else 0.0,
+    }
+
+
+def simulate_2d(
+    accel_fn,
+    *,
+    t_max: float,
+    dt: float = 0.001,
+    p: PendulumParams = DEFAULT_PARAMS,
+    x_bounds: tuple[float, float] | None = None,
+    z_bounds: tuple[float, float] | None = None,
+    theta0: float = 0.001,
+) -> dict:
+    """Same as simulate() but the pivot can also accelerate vertically.
+    ``accel_fn(t, x_c, v_c, z_c, v_z, theta, theta_dot) -> (a_x, a_z)``.
+    x_bounds/z_bounds are independent hard clips -- typically X is tightly
+    rail-bounded and Z is either unbounded or loosely bounded, reflecting
+    that this task is far less constrained vertically than horizontally."""
+    n = int(t_max / dt)
+    t = 0.0
+    theta, theta_dot = theta0, 0.0
+    x_c, v_c = 0.0, 0.0
+    z_c, v_z = 0.0, 0.0
+    ts, thetas, x_cs, z_cs = [], [], [], []
+    best_dist = dist_from_inverted(theta)
+    flipped_at = None
+    for _ in range(n):
+        a_x, a_z = accel_fn(t, x_c, v_c, z_c, v_z, theta, theta_dot)
+        if x_bounds is not None:
+            lo, hi = x_bounds
+            if x_c >= hi and a_x > 0:
+                a_x = 0.0
+            elif x_c <= lo and a_x < 0:
+                a_x = 0.0
+        if z_bounds is not None:
+            lo, hi = z_bounds
+            if z_c >= hi and a_z > 0:
+                a_z = 0.0
+            elif z_c <= lo and a_z < 0:
+                a_z = 0.0
+        theta_dot += theta_ddot_2d(theta, theta_dot, a_x, a_z, p) * dt
+        theta += theta_dot * dt
+        v_c += a_x * dt
+        x_c += v_c * dt
+        v_z += a_z * dt
+        z_c += v_z * dt
+        if x_bounds is not None:
+            x_c = float(np.clip(x_c, x_bounds[0], x_bounds[1]))
+        if z_bounds is not None:
+            z_c = float(np.clip(z_c, z_bounds[0], z_bounds[1]))
+        t += dt
+        ts.append(t)
+        thetas.append(theta)
+        x_cs.append(x_c)
+        z_cs.append(z_c)
+        d = dist_from_inverted(theta)
+        best_dist = min(best_dist, d)
+        if flipped_at is None and d < 0.15:
+            flipped_at = t
+
+    return {
+        "t": np.array(ts),
+        "theta": np.array(thetas),
+        "x_c": np.array(x_cs),
+        "z_c": np.array(z_cs),
+        "best_dist_from_inverted": best_dist,
+        "flipped_at": flipped_at,
+        "peak_x_c": float(np.max(np.abs(x_cs))) if x_cs else 0.0,
+        "peak_z_c": float(np.max(np.abs(z_cs))) if z_cs else 0.0,
     }
