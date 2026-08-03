@@ -98,7 +98,13 @@ def resonance_band_power_fraction(
     move_mask = t <= move_duration_s
     if int(move_mask.sum()) < min_move_cycles:
         return None
-    tau = np.array([row["tau_controller"][joint_index] for row in trace])
+    # position-mode traces log tau_shadow (OSC computed but not applied),
+    # not tau_controller -- fall back rather than KeyError so this stays
+    # callable from position-mode tools (e.g. the rail-bound finder).
+    tau_key = "tau_controller" if "tau_controller" in trace[0] else "tau_shadow"
+    if tau_key not in trace[0]:
+        return None
+    tau = np.array([row[tau_key][joint_index] for row in trace])
     seg = tau[move_mask]
     seg = seg - seg.mean()
     win = np.hanning(len(seg))
