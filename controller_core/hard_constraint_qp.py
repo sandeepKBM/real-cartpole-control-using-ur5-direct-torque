@@ -70,8 +70,17 @@ class HardYConstraintQPConfig(TorqueTaskQPConfig):
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "HardYConstraintQPConfig":
         base = TorqueTaskQPConfig.from_controller_yaml_section(ctrl)
+        base_kwargs = {f.name: getattr(base, f.name) for f in base.__dataclass_fields__.values()}
+        # TorqueTaskQPConfig.from_controller_yaml_section only propagates a
+        # fixed subset of CartesianImpedanceConfig fields from `base` (see
+        # its own cls(...) call) -- nullspace_posture/lambda_regularization
+        # are NOT among them, so `base` always carries the class default
+        # (False / 1e-6) regardless of YAML content. Overwrite them by
+        # reading straight from ctrl instead of trusting base_kwargs.
+        base_kwargs["nullspace_posture"] = bool(ctrl.get("nullspace_posture", False))
+        base_kwargs["lambda_regularization"] = float(ctrl.get("lambda_regularization", 1.0e-6))
         return cls(
-            **{f.name: getattr(base, f.name) for f in base.__dataclass_fields__.values()},
+            **base_kwargs,
             hard_y_constraint=bool(ctrl.get("hard_y_constraint", False)),
             hard_y_tolerance_mps2=float(ctrl.get("hard_y_tolerance_mps2", 0.05)),
             dual_sweeps=int(ctrl.get("dual_sweeps", 4)),
@@ -211,6 +220,53 @@ class HardYConstraintQPController:
         tau_task_nominal = j_t @ wrench_scaled
         tau_damping = -self.cfg.kd_joint * qd
         tau_posture = self.cfg.kp_posture * (self._q_rest - q) - self.cfg.kd_posture * qd
+
+        # Nullspace-consistent posture projection (mirrors
+        # XAxisCartesianImpedanceController's nullspace_posture mechanism,
+        # controller_core/x_axis_cartesian_impedance.py lines ~1483-1595,
+        # ported here 2026-08-03). Without this, tau_posture above is added
+        # directly into tau_des below and this QP's own cost (see module
+        # docstring: absent box-bound saturation, the weighted-least-squares
+        # solution is exactly tau=tau_des) reproduces it in tau_qp -- i.e.
+        # posture torque leaks straight into the task with NO projection at
+        # all, the exact bug class already found and fixed for the impedance
+        # controller. Flag-gated (nullspace_posture, default False, inherited
+        # from CartesianImpedanceConfig) and mass_matrix-gated -- byte-
+        # identical to the pre-existing behavior otherwise. Uses the static
+        # lambda_regularization eps (no adaptive scheduling ported -- that
+        # needs cond_task/lambda_cond_low/high plumbing not yet present in
+        # this simpler controller family; a straight static-eps nullspace
+        # projector is itself already validated upstream as the pre-adaptive
+        # historical default).
+        mass_matrix_provided = st.get("mass_matrix") is not None
+        if bool(self.cfg.nullspace_posture) and mass_matrix_provided:
+            # Project against POSITION rows only (jacobian[0:3,:]), NOT the
+            # full 6D jacobian -- found necessary 2026-08-03 after the
+            # full-6D version measured a wash (no X-tracking gain, no
+            # orientation gain either): this controller's kp_rot=0 means the
+            # task wrench itself supplies zero orientation-RESTORING force
+            # (only kd_rot*omega damping), so posture-toward-q_rest is the
+            # ONLY restoring mechanism available for orientation. Projecting
+            # posture out of the full 6D task (as the impedance controller's
+            # nullspace_posture does) also projects it out of orientation,
+            # removing that sole restoring path -- confirmed by measurement,
+            # not just derivation (orientation_error was 0.248 vs 0.245
+            # baseline with the full-6D projector, i.e. no help). Position-
+            # only mirrors the effective row-selection the impedance
+            # controller's best -45/-40deg configs use via reduced_task_dims
+            # (xyz+rz), simplified here to xyz only since this controller has
+            # no reduced_task_dims/split-task mechanism to select rz alone.
+            J_pos = jacobian[0:3, :]
+            m_mat_ns = np.asarray(st["mass_matrix"], dtype=np.float64).reshape(6, 6)
+            m_inv_ns = np.linalg.inv(m_mat_ns)
+            eps_ns = max(float(self.cfg.lambda_regularization), 0.0)
+            a_mat_ns = J_pos @ m_inv_ns @ J_pos.T
+            eye_task_ns = np.eye(a_mat_ns.shape[0], dtype=np.float64)
+            lambda_mat_nullspace = np.linalg.inv(a_mat_ns + eps_ns * eye_task_ns)
+            j_bar_ns = m_inv_ns @ J_pos.T @ lambda_mat_nullspace
+            nullspace_proj = np.eye(6) - J_pos.T @ j_bar_ns.T
+            tau_posture = nullspace_proj @ tau_posture
+
         gravity = np.zeros(6, dtype=np.float64)
         if st.get("gravity_torque") is not None:
             gravity = np.asarray(st["gravity_torque"], dtype=np.float64).reshape(6)

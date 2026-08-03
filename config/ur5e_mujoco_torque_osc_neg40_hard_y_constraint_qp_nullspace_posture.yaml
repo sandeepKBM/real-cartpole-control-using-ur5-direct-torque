@@ -1,0 +1,131 @@
+# HARD-Y-CONSTRAINT QP + NULLSPACE-CONSISTENT POSTURE (2026-08-03)
+#
+# Same as ur5e_mujoco_torque_osc_neg40_hard_y_constraint_qp.yaml, plus
+# nullspace_posture: true -- ported from
+# XAxisCartesianImpedanceController's nullspace_posture mechanism into
+# HardYConstraintQPController (controller_core/hard_constraint_qp.py).
+#
+# Motivation: sim testing of the plain hard-Y-constraint config found
+# achieved_x stuck at 3-9% of target and orientation/max_qd stuck near
+# their guard ceilings REGARDLESS of hard_y_tolerance_mps2 -- root-caused
+# to tau_posture being summed directly into this QP's tau_des with NO
+# nullspace projection at all (unlike the impedance controller, where this
+# exact leak was found and fixed earlier). Since this QP's own cost makes
+# tau_qp == tau_des exactly whenever box/hard-Y constraints aren't binding
+# (see hard_constraint_qp.py's module docstring), an unprojected posture
+# term competes with the task on every single cycle, not just at
+# saturation. This config tests whether closing that specific gap recovers
+# useful X-tracking.
+#
+# lambda_regularization left at the class default (1.0e-6, NOT the 0.1 used
+# in the impedance controller's wrist_2=0-singularity configs) because this
+# uses the SAME wrist2=0.2 rad start pose as the plain hard-Y config below
+# -- cond(J) ~29 there, well-conditioned, no need for heavy regularization.
+#
+# RESULT (2026-08-03, sim, dx=0.06m/1.0s move at this pose): DOES NOT FIX
+# the controller. Both this (position-only nullspace projection, rows 0:3)
+# and an earlier full-6D-jacobian variant were tested against the plain
+# (unprojected) config: full-6D was a wash (orientation trip at t=0.476s vs.
+# 0.476s baseline, ~identical); position-only delayed the trip slightly
+# (t=0.58s) but still hits the SAME ||orientation error||>0.25rad guard well
+# before the 1.0s move completes, in every variant. Root cause confirmed
+# NOT to be a posture/task leak: with kp_rot=0.0 (this config's gains block),
+# the QP's own task wrench supplies ZERO orientation-RESTORING force (only
+# kd_rot*omega damping) -- unlike the impedance controller's equivalent
+# kp_rot=0 configs, which restore orientation via nullspace-projected
+# posture PLUS reduced_task_dims (xyz+rz) excluding orientation from the
+# task the projector nulls against. HardYConstraintQPController has no
+# reduced_task_dims/split-task mechanism, so there is currently no way to
+# give posture exclusive authority over orientation while the task still
+# claims all 6 rows. A real fix needs either a wrist_orientation_task-style
+# dedicated PD term (untested here -- the impedance controller's own
+# wrist_orientation_task also uses kp_rot_wrist=0, damping-only, so it isn't
+# a ready-made restoring-force answer either) or porting reduced_task_dims
+# itself into this controller family. Neither done here -- kept flag-gated,
+# default off, purely as a validated (if currently insufficient) building
+# block for that future work, not as a working fix.
+#
+# Use with --controller-kind hard_constraint_qp and:
+#   --start-q-rad -0.6981317007977318 -0.8353981633974483 -1.2 -0.9853981633974482 0.2 0.0
+#
+# NOT yet real-hardware validated. NOT recommended over the reduced-task
+# impedance controller's best sim result at this pose
+# (ur5e_mujoco_torque_osc_neg40_wrist2offset_runB_reduced_task_xyz_rz*.yaml)
+# -- this QP controller family is not yet viable for a full transport move.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "torque_qp"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  hard_y_constraint: true
+  hard_y_tolerance_mps2: 0.05
+  dual_sweeps: 4
+  dual_root_iters: 10
+  nullspace_posture: true
+  lambda_regularization: 1.0e-6
+  safety:
+    max_joint_velocity_radps: 2.5
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.05
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
