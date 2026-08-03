@@ -1,0 +1,126 @@
+# config/ur5e_mujoco_torque_osc_tuned_wrist_orient_friction_ff.yaml with
+# friction_ff_coulomb_nm.shoulder_lift_joint raised from the sim-guessed 5.0 to a
+# real-hardware-calibrated 6.1 (2026-08-02, matching the exact value already applied to
+# assets/ur5e_torque/ur5e_torque.xml's shoulder_lift frictionloss -- see
+# docs/status/friction_calibration_from_qdd_residual_2026-08-02.md for the full
+# derivation).
+#
+# Why this exists: that earlier calibration only updated the SIM PLANT model
+# (frictionloss in the MJCF). The real-robot CONTROLLER's own friction_ff_coulomb_nm
+# compensation term was never updated to match -- it was still using the same original
+# sim-guessed 5.0 Nm value, meaning the real robot's own compensation for shoulder_lift
+# was under-sized relative to what we now have real evidence for (measured plateau
+# torque -6.084 Nm, a direct, model-independent lower-bound measurement at qd~0 --
+# not a guess). This config closes that gap on the CONTROLLER side.
+#
+# Also motivated by a second piece of same-day evidence: direct_torque_20260802_202937
+# (a genuine ||orientation error|| > 0.25 rad trip, not noise -- orientation grew
+# smoothly and monotonically over 3.5s while all three wrist joints stayed essentially
+# frozen) needed 2.1x the elbow torque and 2.5x the wrist torque of a directly
+# comparable successful same-direction leg (202909) for a geometrically identical move.
+# That's consistent with under-compensated real friction forcing higher total commanded
+# torque, which appears to come at the expense of the wrist_orientation_task's own
+# authority. This config does not fix elbow/wrist specifically (no comparably clean,
+# qd~0 steady-state measurement exists for those joints the way it does for
+# shoulder_lift -- see the calibration doc's own scoping: measurements below the
+# existing guess only establish a lower bound the guess already satisfies, they cannot
+# justify a change), but raising shoulder_lift's compensation is the one evidence-scoped
+# change available right now. NOT yet real-hardware validated -- this is the first
+# config to carry it.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+    kp_rot_wrist: 0.0
+    kd_rot_wrist: 10.0
+  wrist_orientation_task: true
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  friction_feedforward: true
+  friction_ff_qd_deadband: 0.05
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 6.1
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
