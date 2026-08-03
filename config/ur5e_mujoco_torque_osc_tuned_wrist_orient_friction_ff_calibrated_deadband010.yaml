@@ -1,0 +1,126 @@
+# config/ur5e_mujoco_torque_osc_tuned_wrist_orient_friction_ff_calibrated.yaml with
+# friction_ff_qd_deadband widened from 0.05 to 0.10 rad/s (2026-08-02). Real-hardware
+# A/B follow-up, not yet validated.
+#
+# Why this exists: the plain friction_feedforward:false A/B (direct_torque_20260802_211012,
+# same command, same pose) confirmed friction_feedforward's tanh(qd/deadband) term is the
+# real driver of the ~2Hz +X oscillation this session dug into -- shoulder_lift torque's
+# spectral power in the predicted 1.4-2.2Hz resonance band dropped from 80.6% (FF on,
+# 205057) to 6.8% (FF off, 211012), a ~12x drop in concentration and ~5-6x drop in
+# absolute oscillation magnitude. But disabling FF entirely throws away its real,
+# already-validated hold-phase steady-state benefit (2026-07-31: 96% combined pass rate
+# vs 57% baseline, 2.5-9x lower steady-state error).
+#
+# The mechanism isn't "FF is bad", it's that the deadband is too tight for what it's now
+# covering: qd_lift sits in the 0.02-0.08 rad/s range for nearly the whole MOVE phase (not
+# just hold), and tanh(qd/deadband) has slope coulomb/deadband at the origin -- at
+# deadband=0.05 that's 6.1/0.05=122 Nm per rad/s of qd, a steep switch right where qd
+# actually lives during the move, not just at true holds. Widening to 0.10 halves that
+# slope to 61 Nm per rad/s -- a gentler, more viscous-like transition across the same
+# operating range, same direction as the already-precedented 2026-07-31 fix (0.01->0.05
+# for an earlier, tighter hold-phase limit cycle). qd never gets far enough past 0.10 in
+# this move regime to reach the fully-saturated +-1 tanh plateau either, so this trades
+# some peak hold-phase compensation authority for (hypothesized) much less move-phase
+# excitation -- the real test is whether the ~2Hz torque-spectral concentration drops
+# back toward the FF-off run's ~7% while achieved_x_delta_m stays close to the FF-on
+# run's ~93%, not just picking one side of that tradeoff blind.
+#
+# NOT yet real-hardware tested. Everything else (gains, all other flags,
+# friction_ff_coulomb_nm/viscous) unchanged from the calibrated config.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+    kp_rot_wrist: 0.0
+    kd_rot_wrist: 10.0
+  wrist_orientation_task: true
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  friction_feedforward: true
+  friction_ff_qd_deadband: 0.10
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 6.1
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
