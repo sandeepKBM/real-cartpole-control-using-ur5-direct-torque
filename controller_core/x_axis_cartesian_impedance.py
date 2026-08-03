@@ -84,6 +84,31 @@ class CartesianImpedanceConfig:
     kd_rot: float = 5.0
     kp_posture: float = 2.0
     kd_posture: float = 0.5
+    # Per-joint posture gain override (default None = historical behavior:
+    # the scalar kp_posture/kd_posture above applies uniformly to all 6
+    # joints). Added 2026-08-03 after a real, visually-caught finding: with
+    # reduced_task_dims dropping rx/ry (a 4D task on 6 joints, 2 genuine
+    # redundant DOF), the scalar posture gain was not strong enough to stop
+    # the task itself from using shoulder_pan -- the cheapest available
+    # direction for correcting rz at this pose -- as its preferred solution.
+    # A rendered round-trip video showed shoulder_pan swinging a full 23deg
+    # (-52.7 to -29.7deg) around the -40deg start pose during a 0.06m move,
+    # NOT caught by any of the scalar summary metrics (y_drift/orientation/
+    # achieved_x all looked fine). This matters beyond aesthetics: -40deg was
+    # chosen for real physical wall/base clearance, so a 12-13deg swing in
+    # either direction can eat directly into that margin.
+    #
+    # When set (a length-6 array, JOINT_NAME_ORDER order), replaces the
+    # scalar posture gain per-joint: tau_posture[i] = kp[i]*(q_rest[i]-q[i])
+    # - kd[i]*qd[i]. Intended use: strong gain on shoulder_pan (and wrist_2,
+    # to stay away from its singularity) to discourage the task from routing
+    # through them, low gain on shoulder_lift/elbow (the joints that should
+    # be doing the actual rail-motion work), matching the "prefer planar
+    # arm-motion pattern" design goal. NOT yet validated -- this is the
+    # mechanism, not an asserted-correct gain set; the caller's config
+    # supplies the actual values.
+    posture_kp_by_joint: np.ndarray | None = None
+    posture_kd_by_joint: np.ndarray | None = None
     kd_joint: float = 0.8
     tau_max_nm: np.ndarray = field(
         default_factory=lambda: np.array([8.0, 8.0, 8.0, 2.5, 2.5, 2.5], dtype=np.float64)
@@ -727,6 +752,16 @@ class CartesianImpedanceConfig:
             kd_rot=float(gains.get("kd_rot", 5.0)),
             kp_posture=float(gains.get("kp_posture", 2.0)),
             kd_posture=float(gains.get("kd_posture", 0.5)),
+            posture_kp_by_joint=(
+                np.array([float(ctrl["posture_kp_by_joint"][name]) for name in JOINT_NAME_ORDER], dtype=np.float64)
+                if "posture_kp_by_joint" in ctrl
+                else None
+            ),
+            posture_kd_by_joint=(
+                np.array([float(ctrl["posture_kd_by_joint"][name]) for name in JOINT_NAME_ORDER], dtype=np.float64)
+                if "posture_kd_by_joint" in ctrl
+                else None
+            ),
             kd_joint=float(gains.get("kd_joint", 0.8)),
             tau_max_nm=tm,
             jacobian_singular_cond_max=float(
@@ -1476,7 +1511,20 @@ class XAxisCartesianImpedanceController:
         wrench_scaled = wrench_effective * singular_scale
         tau_task_nominal = J_task.T @ wrench_scaled
         tau_damping = -self.cfg.kd_joint * qd
-        tau_posture = self.cfg.kp_posture * (self._q_rest - q) - self.cfg.kd_posture * qd
+        if self.cfg.posture_kp_by_joint is not None or self.cfg.posture_kd_by_joint is not None:
+            kp_vec = (
+                self.cfg.posture_kp_by_joint
+                if self.cfg.posture_kp_by_joint is not None
+                else np.full(6, self.cfg.kp_posture, dtype=np.float64)
+            )
+            kd_vec = (
+                self.cfg.posture_kd_by_joint
+                if self.cfg.posture_kd_by_joint is not None
+                else np.full(6, self.cfg.kd_posture, dtype=np.float64)
+            )
+            tau_posture = kp_vec * (self._q_rest - q) - kd_vec * qd
+        else:
+            tau_posture = self.cfg.kp_posture * (self._q_rest - q) - self.cfg.kd_posture * qd
         if use_nullspace and lambda_mat_nullspace is not None and m_inv is not None:
             # Dynamically consistent nullspace projector: posture torques can
             # no longer produce task-space acceleration. Uses
