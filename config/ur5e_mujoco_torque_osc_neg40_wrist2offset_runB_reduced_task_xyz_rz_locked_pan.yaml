@@ -1,0 +1,222 @@
+# -40deg VARIANT (2026-08-03) of
+# ur5e_mujoco_torque_osc_neg45_wrist2offset_runB_reduced_task_xyz_rz.yaml --
+# base rotation changed from -45deg to -40deg per re-measured real lab
+# clearance. Content is otherwise byte-identical (same reduced_task_dims
+# X,Y,Z,rz selection, same Run B secondary-torque settings). Use with
+# --start-q-rad -0.6981317007977318 -0.8353981633974483 -1.2 -0.9853981633974482 0.2 0.0
+#
+# Sim result (2026-08-03), same 4-category comparison as the -45deg version:
+#   dx=0.04: PASS (y_drift=0.0088, achieved_x=0.0335)
+#   dx=0.06: PASS (y_drift=0.0160, achieved_x=0.0505)
+#   dx=0.08: PASS (y_drift=0.0285, achieved_x=0.0649, orient=0.2246)
+#   dx=0.10: FAIL, Y-drift wall (achieved_x=0.0782 before trip -- best result
+#            of the whole session, beats the -45deg version's 0.0739)
+# Plain Run B (full 6D task, no reduced-task) at -40deg FAILS at dx=0.08
+# (y_drift=0.031, orient right at the same ~0.25 ceiling this reduced-task
+# config avoids) -- the reduced-task mechanism is what recovers the clean
+# pass here, not the angle change alone.
+#
+# The rz-only orientation mechanism was re-verified at -40deg specifically
+# (not just inherited from the -45deg finding): dropping rz reproduces the
+# identical failure signature (orient=0.2496 ceiling, achieved_x collapses
+# to 0.045) confirming this is a property of the base-rotation pose family,
+# not a -45deg-specific artifact.
+#
+# Max frame of movement, current understanding: clean/valid pass up to
+# dx=0.08m; absolute ceiling (any guard) ~0.078m -- the underlying Y-drift/
+# orientation wall is UNCHANGED from the -45deg case, this config just
+# operates closer to it. NOT yet real-hardware validated at this angle.
+# REDUCED-TASK CONFIG (Part 8 orientation-axis ablation, 2026-08-03) -- Run B
+# baseline (posture ON, wrist_orientation_task OFF, reanchor OFF, joint
+# damping OFF, wrist2=0.2, wrench_lambda_adaptive_regularization) with
+# reduced_task_dims: X,Y,Z,rz only (world-Z rotation) -- roll/pitch (rx/ry)
+# dropped from the wrench-shaping task entirely.
+#
+# Why: an 8-way orientation-axis ablation (O0 through O3_full, all 3 single
+# axes, all 3 pairs, full) at dx=0.08 found a clean, decisive pattern: EVERY
+# variant that includes rz passes; EVERY variant that excludes it fails at
+# the same orientation-guard ceiling (~0.249 rad, right at the 0.25 limit).
+# rx/ry contribute essentially nothing, alone or combined with each other.
+# Physically sensible: the base is rotated -45deg about world Z, so
+# orientation drift during X transport at this pose is predominantly
+# yaw-like (about Z), not roll/pitch.
+#
+# This 4D task (X,Y,Z,rz) matches the full 6D task's performance almost
+# exactly at dx=0.08 (achieved_x 0.0616 vs 0.0619) and slightly EXCEEDS it
+# at dx=0.10 (achieved_x 0.0739 vs 0.0717, both hitting the same 0.05m
+# Y-drift guard). Dropping rx/ry costs nothing measured so far and may help
+# marginally -- not yet understood why, flagged as an open question, not
+# assumed to be noise.
+#
+# NOT yet real-hardware validated. NOT yet tested at dx=0.12+ or against a
+# static-waypoint/trajectory-shape sweep (Parts 12/13 of the reduced-task
+# plan). Known limitation inherited from reduced_task_dims itself: J_dot@qd
+# is not compensated anywhere in this controller (see that flag's own
+# docstring).
+# CANONICAL ATTRIBUTION-MATRIX CONFIG -- Run B -- posture ON, wrist_orientation_task OFF, reanchor OFF, joint damping OFF (current best candidate -- see docs/status or session history 2026-08-02/03)
+# Regression asset: do not delete or repurpose. Part of the A-F matrix
+# (config/ur5e_mujoco_torque_osc_neg45_wrist2offset_runB_matrix_{A..F}.yaml),
+# built 2026-08-03 to attribute the -45deg Y-drift/orientation wall to
+# specific secondary torque components at the wrist2-offset pose. All six
+# share: wrist_2=0.2 start pose, wrench_lambda_adaptive_regularization,
+# same gains/guards. Use with:
+#   --start-q-rad -0.7853981633974483 -0.8353981633974483 -1.2 -0.9853981633974482 0.2 0.0
+#
+# config/ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed_neg45_pose.yaml with
+# wrench_lambda_adaptive_regularization: true added (2026-08-02). Meant to be
+# used together with a wrist_2-offset start pose (e.g.
+# --start-q-rad -0.7853981633974483 -0.8353981633974483 -1.2 -0.9853981633974482 0.2 0.0
+# -- shoulder_pan=-45deg, wrist_2=0.2 instead of the singular 0.0), NOT the
+# base config's default HEIGHT_ALPHA_0_5_CLEARANCE_Q (wrist_2=0). NOT yet
+# real-hardware validated.
+#
+# Why this exists (full root-cause chain, 2026-08-02 session):
+# An external audit correctly ruled out a target/frame-construction bug
+# (verified directly: target_x = x0 + dx is a pure world-frame scalar
+# translation; ee_pos/Jacobian/Y-guard are all consistently world-frame;
+# finite-difference-checked Jacobian matches analytic to 1e-10) and pushed
+# on whether the "full-Lambda" operational-space path actually decouples.
+# It does, mathematically -- lambda_diagonal_shaping is off in the base
+# config, so the wrench-shaping step already uses the complete, un-
+# diagonalized Lambda = (J M^-1 J^T + eps I)^-1, not naive independent
+# per-axis J^T*F. But two real, distinct problems were found underneath:
+#
+# 1. cond(full 6x6 J) ~1e17 at this pose -- because HEIGHT_ALPHA_0_5_
+#    CLEARANCE_Q keeps wrist_2=0 (the same kinematic singularity already
+#    documented for the un-rotated pose family), the -45deg base rotation
+#    just applies on top of it. A unit-X task acceleration through the
+#    exact Lambda math predicts a_y=-0.25 instead of 0 at wrist_2=0 --
+#    genuine rank deficiency, not implementable away by better regularization
+#    alone. Offsetting wrist_2 to 0.2 (mirroring the already-established
+#    HEIGHT_ALPHA_0_5_WRIST2_OFFSET_Q fix for the un-rotated pose) restores
+#    cond(J) to ~29 and the Lambda math predicts a_pred=[1.0,-0.0000,0.0000]
+#    -- clean decoupling, AT eps=1e-6.
+#
+# 2. But the base config's actual lambda_regularization=0.1 (sized for the
+#    cond~1e17 case) independently breaks decoupling REGARDLESS of whether
+#    wrist_2 is singular or offset -- at eps=0.1, a_pred=[0.44,-0.27,-0.03]
+#    at BOTH wrist_2=0.0 and wrist_2=0.2 (cond(J) 1e17 vs 29 made almost no
+#    difference to the broken prediction). Confirmed as the real driver of
+#    the closed-loop Y-drift via a torque-source decomposition on a real
+#    trace (a_i = J*M^-1*tau_i per component): tau_gravity's compensation
+#    residual against MuJoCo's own qfrc_bias is <0.2% of the signal (not the
+#    source); tau_task is the dominant, growing Y-acceleration contributor.
+#
+# This flag fixes problem 2 specifically -- it does NOT touch
+# lambda_adaptive_regularization (the existing, separate flag), which only
+# schedules the NULLSPACE projector's eps by design (see that flag's own
+# docstring: naively scheduling the WRENCH-SHAPING eps too was already tried
+# once and caused joint-velocity blowup at cond(J)~1e3-1e4, well short of
+# any real singularity). wrench_lambda_adaptive_regularization is a
+# deliberately separate scheduler for exactly the wrench-shaping eps, with
+# its own conservative far-field floor (wrench_lambda_regularization_far:
+# 0.01, NOT reusing lambda_regularization_far's 1.0e-4) informed directly by
+# a 2026-08-02 sim sweep at this pose: eps=0.001 dropped Y-drift a lot but
+# tripped max|qd| to 3.05 rad/s (guard is 3.0); eps=0.01-0.03 gave real,
+# safe improvement (max|qd| 0.28-0.89 rad/s). Reuses the existing
+# lambda_cond_low/lambda_cond_high thresholds (1e4/1e8) -- at cond(J)~29
+# (wrist2-offset pose) that's far below cond_low so the schedule returns
+# wrench_lambda_regularization_far essentially unclamped; at cond(J)~1e17
+# (if used WITHOUT the wrist_2 offset) it clips to lambda_regularization
+# (0.1, unchanged) -- so this flag falls back to today's already-validated
+# behavior if the wrist_2 offset isn't also applied, rather than doing
+# something new and unvalidated at the singular pose.
+#
+# NOT a complete fix by itself in the sim sweep that motivated it (0.06/0.10/
+# 0.15/0.20 all still exercised, see docs/status or session history for the
+# exact table) -- real, monotonic improvement in Y-drift and modest
+# improvement in achieved_x, but the dx=0.10+ wall was not fully eliminated.
+# This is the most causally-grounded fix attempted so far (identified root
+# cause with a mechanism, not another blind gain/feedforward search), not a
+# proven complete solution.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 0.0
+    kp_rot_wrist: 0.0
+    kd_rot_wrist: 10.0
+  wrist_orientation_task: false
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: false
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  wrench_lambda_adaptive_regularization: true
+  wrench_lambda_regularization_far: 0.01
+  reduced_task_dims: true
+  task_dim_x: true
+  task_dim_y: true
+  task_dim_z: true
+  task_dim_rx: false
+  task_dim_ry: false
+  task_dim_rz: true
+  task_lock_shoulder_pan: true
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.05
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

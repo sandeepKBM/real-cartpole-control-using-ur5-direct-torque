@@ -692,6 +692,38 @@ class CartesianImpedanceConfig:
     task_dim_rx: bool = True
     task_dim_ry: bool = True
     task_dim_rz: bool = True
+    # Hard per-joint task exclusion (default off = historical behavior).
+    # Added 2026-08-03, a DIFFERENT and stronger mechanism than
+    # posture_kp_by_joint above: that's a soft preference that competes with
+    # the task (measured to cut, not eliminate, an unwanted 23deg
+    # shoulder_pan swing -- down to 13deg, still real). This instead zeros
+    # the excluded joint's COLUMN in J_task -- the same column-zeroing
+    # split_base_wrist_task already uses for the wrist columns, generalized
+    # to any joint. Since tau_task = J_task^T @ wrench_effective, a zeroed
+    # column means tau_task[that joint] is exactly 0 by construction, not
+    # approximately small -- no task force can reach that joint at all, only
+    # gravity compensation and posture (which then has nothing to compete
+    # against there, since the task genuinely cannot pull on it).
+    #
+    # Applied AFTER J_task/wrench_task/cond_task are established by whichever
+    # of split_base_wrist_task/reduced_task_dims/the full-J default is
+    # active -- composes with any of them rather than being a fourth
+    # mutually-exclusive mode. cond_task is recomputed from the
+    # column-locked J_task so adaptive-eps scheduling sees the real
+    # (possibly worse-conditioned) matrix, not the pre-lock one.
+    #
+    # Real risk this does NOT eliminate: locking columns can make the
+    # remaining task infeasible or push A_task toward singular if too many
+    # joints are locked relative to the task's own dimensionality (e.g.
+    # locking 3+ joints against a 4D task leaves only 3 free columns for 4
+    # task rows) -- untested combinations should be checked before trusting
+    # them, this flag doesn't guard against that itself.
+    task_lock_shoulder_pan: bool = False
+    task_lock_shoulder_lift: bool = False
+    task_lock_elbow: bool = False
+    task_lock_wrist_1: bool = False
+    task_lock_wrist_2: bool = False
+    task_lock_wrist_3: bool = False
     # Acceleration feedforward (default off = historical behavior: pure PD on
     # position+velocity error, Fx = kp_x*x_err + kd_x*(x_vel_des - vx)).
     # Added 2026-08-01 (see docs/status/acceleration_feedforward_2026-08-01.md):
@@ -891,6 +923,12 @@ class CartesianImpedanceConfig:
             task_dim_rx=bool(ctrl.get("task_dim_rx", True)),
             task_dim_ry=bool(ctrl.get("task_dim_ry", True)),
             task_dim_rz=bool(ctrl.get("task_dim_rz", True)),
+            task_lock_shoulder_pan=bool(ctrl.get("task_lock_shoulder_pan", False)),
+            task_lock_shoulder_lift=bool(ctrl.get("task_lock_shoulder_lift", False)),
+            task_lock_elbow=bool(ctrl.get("task_lock_elbow", False)),
+            task_lock_wrist_1=bool(ctrl.get("task_lock_wrist_1", False)),
+            task_lock_wrist_2=bool(ctrl.get("task_lock_wrist_2", False)),
+            task_lock_wrist_3=bool(ctrl.get("task_lock_wrist_3", False)),
             acceleration_feedforward=bool(ctrl.get("acceleration_feedforward", False)),
         )
 
@@ -1391,6 +1429,25 @@ class XAxisCartesianImpedanceController:
             J_task = J
             wrench_task = wrench
             cond_task = cond
+
+        locked_flags = [
+            self.cfg.task_lock_shoulder_pan,
+            self.cfg.task_lock_shoulder_lift,
+            self.cfg.task_lock_elbow,
+            self.cfg.task_lock_wrist_1,
+            self.cfg.task_lock_wrist_2,
+            self.cfg.task_lock_wrist_3,
+        ]
+        if any(locked_flags):
+            # Zero the locked joints' columns -- tau_task = J_task^T @ ...
+            # then has an exact zero row for each locked joint, so no task
+            # force can reach it regardless of wrench_task's value. See
+            # task_lock_shoulder_pan's docstring for the full rationale and
+            # the known risk of locking too many joints against the task's
+            # own dimensionality.
+            J_task = J_task.copy()
+            J_task[:, locked_flags] = 0.0
+            cond_task = float(np.linalg.cond(J_task)) if J_task.shape[0] > 1 else float(np.linalg.norm(J_task))
 
         # Operational-space terms (P3, flag-gated; default off).
         use_shaping = bool(self.cfg.task_space_inertia_shaping)
