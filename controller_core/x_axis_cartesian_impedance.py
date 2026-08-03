@@ -462,6 +462,33 @@ class CartesianImpedanceConfig:
     x_integral_action: bool = False
     ki_x: float = 0.0
     x_integral_limit_m_s: float = 0.02
+    # Y-coupling feedforward (default off = historical behavior). Added
+    # 2026-08-02, a different lever on the same -45 deg pose Y-drift problem
+    # y_integral_action targets above -- that flag is FEEDBACK (reacts to
+    # measured y_err) and was already found to trade off against X-tracking
+    # authority at any dose large enough to matter (5-10x baseline kp_y/kd_y
+    # stops the guard trip but costs a 45-55% X-tracking shortfall,
+    # unimproved by 3x the move duration -- see AGENTS.md sec 3's -45 deg
+    # findings). This flag is FEEDFORWARD instead: it biases the Y TARGET
+    # itself as a function of the COMMANDED x_des, open-loop, not reactive to
+    # y_err at all. Motivation: the real-hardware trip signature was the TCP
+    # moving in a near-45 deg diagonal (X and Y displacement nearly equal),
+    # and a controlled sim dose-response measured Y-drift growing roughly
+    # linearly with commanded X displacement (slope ~0.65-0.73, see AGENTS.md).
+    # If that coupling is a repeatable, structural function of the COMMANDED
+    # trajectory (not measurement noise or a stochastic disturbance), a
+    # feedforward target bias lets the EXISTING baseline kp_y/kd_y do the
+    # correcting against a much smaller residual error instead of the full
+    # drift -- same gain, easier job, rather than more gain fighting harder.
+    # NOT yet validated -- y_coupling_gain's default (0.7) is the measured
+    # dose-response slope, not a value confirmed to reduce real Y-drift; the
+    # sign and magnitude both need a real sim A/B before trusting this.
+    #
+    #   y_des = y_des - y_coupling_gain * (x_des - x0)     [applied once,
+    #   after x_des/y_des are finalized by the hold/tracking branches above,
+    #   before x_err/y_err are computed]
+    y_coupling_feedforward: bool = False
+    y_coupling_gain: float = 0.7
     # Base/wrist task split (default off = historical behavior). Added
     # 2026-08-01 after a real-hardware TCP-accel guard trip at the
     # height_alpha=0.5 pose using accel_duration_scurve at a modest
@@ -690,6 +717,8 @@ class CartesianImpedanceConfig:
             x_integral_action=bool(ctrl.get("x_integral_action", False)),
             ki_x=float(gains.get("ki_x", 0.0)),
             x_integral_limit_m_s=float(ctrl.get("x_integral_limit_m_s", 0.02)),
+            y_coupling_feedforward=bool(ctrl.get("y_coupling_feedforward", False)),
+            y_coupling_gain=float(ctrl.get("y_coupling_gain", 0.7)),
             split_base_wrist_task=bool(ctrl.get("split_base_wrist_task", False)),
             acceleration_feedforward=bool(ctrl.get("acceleration_feedforward", False)),
         )
@@ -1019,6 +1048,9 @@ class XAxisCartesianImpedanceController:
             y_des = self._y0
             z_des = self._z0
             quat_ref = self._quat0
+
+        if self.cfg.y_coupling_feedforward:
+            y_des = y_des - self.cfg.y_coupling_gain * (x_des - self._x0)
 
         x_err = x_des - float(p[0])
         y_err = y_des - float(p[1])

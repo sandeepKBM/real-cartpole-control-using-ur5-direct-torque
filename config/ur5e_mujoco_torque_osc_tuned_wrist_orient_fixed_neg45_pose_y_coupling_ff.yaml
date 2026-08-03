@@ -1,0 +1,125 @@
+# config/ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed_neg45_pose.yaml with
+# y_coupling_feedforward: true added (2026-08-02). NOT YET VALIDATED -- this
+# is the first config to carry this flag.
+#
+# Why: the base config's own dose-response table (see its header) shows
+# Y-drift growing roughly linearly with commanded X displacement:
+#
+#   dx (m)  move-phase max|Y-drift| (m)   ratio
+#   0.01    0.0059                        0.59
+#   0.02    0.0135                        0.675
+#   0.03    0.0217-0.0234                 0.72-0.78
+#   0.04    0.0299-0.0300                 0.75
+#   0.06    0.0423                        0.705
+#
+# Every prior fix attempt was FEEDBACK (reacts to measured y_err: kp_y/kd_y
+# gain sweep, y_integral_action/ki_y) and found the same structural
+# trade-off -- any Y-correcting force large enough to matter competes with
+# X-tracking authority at this pose (5-10x baseline kp_y/kd_y stops the trip
+# but costs 45-55% X-tracking shortfall, unimproved by 3x move duration).
+# y_coupling_feedforward is FEEDFORWARD instead: it biases the Y TARGET as a
+# function of the COMMANDED x_des, open-loop, so the EXISTING baseline
+# kp_y/kd_y only has to correct a small residual instead of the full drift.
+# y_coupling_gain: -0.7
+# (0.59-0.78 across the table above), not a value confirmed to reduce real
+# Y-drift -- this config exists to run that A/B, not to assert the answer.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+    kp_rot_wrist: 0.0
+    kd_rot_wrist: 10.0
+  wrist_orientation_task: true
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  y_coupling_feedforward: true
+  y_coupling_gain: -0.7
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.05
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
+# RESULT (2026-08-02 sim A/B, controller-rollout mode): sign matters -- the
+# naive +0.7 (matching the raw dose-response slope) made drift WORSE
+# (0.0423->0.0489 at dx=0.06); -0.7 correctly reduces it (0.0423->0.0357,
+# ~16%). Gain sweep at dx=0.06 (-0.35/-0.7/-1.0/-1.4/-2.0) shows a real,
+# monotonic drift-vs-achieved_x trade-off (drift 0.0390->0.0060, achieved_x
+# 0.0392->0.0192 across that range) -- NOT free compensation, the same
+# structural cost as feedback (kp_y/kd_y, ki_y), just via a different lever.
+# At dx=0.10 (past the current wall), gain=-1.0 trips at the same drift
+# limit as baseline, only reaching achieved_x=0.0530 vs baseline's 0.0501 --
+# a real but marginal ~6% improvement, NOT a meaningfully extended safe
+# range. Conclusion: this does not solve the -45deg Y-drift ceiling; it
+# joins kp_y/kd_y and ki_y on the list of Y-axis interventions that don't
+# escape the structural authority trade-off, just via feedforward instead
+# of feedback. Kept as a validated, working, correctly-signed mechanism
+# (not deleted) since -0.7 with a small gentle dose could still be a
+# reasonable, low-cost partial mitigation layered with other work, but it
+# is NOT a fix on its own.
