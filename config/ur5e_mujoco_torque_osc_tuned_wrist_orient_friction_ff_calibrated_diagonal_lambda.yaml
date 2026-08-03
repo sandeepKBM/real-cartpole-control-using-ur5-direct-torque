@@ -1,0 +1,128 @@
+# config/ur5e_mujoco_torque_osc_tuned_wrist_orient_friction_ff_calibrated.yaml with
+# lambda_diagonal_shaping: true additionally added (2026-08-02).
+#
+# Why this exists: real hardware today reproduced the SAME -0.20m/move_duration=6.0s
+# failure at the wrist2-offset pose TWICE, hours apart (direct_torque_20260802_202937
+# and _204957) -- and the two runs track in near-lockstep for both Z-drift and
+# orientation error the whole way (e.g. both hit z_drift=-15.1xmm/orient=0.12xx rad at
+# t=3.0s almost exactly). That is not the stochastic stick-slip signature this session
+# has repeatedly found elsewhere (identical commands producing wildly different
+# outcomes) -- it's a reproducible, deterministic-looking coupling. The +0.20m/
+# move_duration=6.0s direction, by contrast, shows a much smaller move-phase Z drift
+# (~4mm vs ~19mm) and no orientation trip.
+#
+# This exact symptom -- Z-drift growing together with orientation error, direction-
+# dependent, NOT explained by friction/torque variability -- matches a real, already
+# root-caused and already-fixed mechanism documented in controller_core/
+# x_axis_cartesian_impedance.py's own lambda_diagonal_shaping field docstring (found
+# 2026-07-25, at the OLD, non-wrist2-offset pose family): away from the wrist_2=0
+# singularity, Lambda = (J M^-1 J^T + eps I)^-1 develops large off-diagonal terms
+# (X-Z), so the shaped wrench's Z-row picks up a spurious Z command proportional to
+# the X-restoring force even when z_err is ~0. lambda_diagonal_shaping fixes this by
+# using only diag(Lambda) for the wrench-shaping step (the nullspace-posture
+# projector still uses the full, undiagonalized Lambda, since that math needs the
+# true dynamically-consistent pseudoinverse and was measured healthy separately).
+# Already validated with zero regressions across a 304-run sweep on the OLD pose
+# family (AGENTS.md sec 3) -- this is its first application at the wrist2-offset pose,
+# NOT yet real-hardware validated here specifically. Given the mechanism itself is a
+# general property of Lambda's off-diagonal structure away from a singularity, not
+# something specific to the old pose's exact geometry, it's a well-grounded thing to
+# try, not a speculative guess.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+    kp_rot_wrist: 0.0
+    kd_rot_wrist: 10.0
+  wrist_orientation_task: true
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  lambda_diagonal_shaping: true
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  friction_feedforward: true
+  friction_ff_qd_deadband: 0.05
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 6.1
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
