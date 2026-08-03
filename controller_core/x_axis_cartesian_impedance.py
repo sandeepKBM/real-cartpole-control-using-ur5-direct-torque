@@ -45,6 +45,16 @@ WRIST_ORIENTATION_MASK: np.ndarray = np.array(
 )
 
 
+def _parse_y_control_mode(raw: Any) -> Literal["tight", "corridor"]:
+    """Case-insensitive parse of the ``y_control_mode`` YAML value, matching
+    _parse_friction_model's permissive convention: an unrecognized value
+    falls back to "tight" (the historical default) rather than raising."""
+    value = str(raw).lower()
+    if value == "corridor":
+        return "corridor"
+    return "tight"
+
+
 def _parse_friction_model(raw: Any) -> Literal["static", "lugre", "karnopp"]:
     """Case-insensitive parse of the ``friction_model`` YAML value.
 
@@ -448,6 +458,40 @@ class CartesianImpedanceConfig:
     y_integral_action: bool = False
     ki_y: float = 0.0
     y_integral_limit_m_s: float = 0.02
+    # Y control mode (default "tight" = historical behavior: continuous
+    # kp_y/kd_y PD on y_err, unchanged). Added 2026-08-03. "corridor" replaces
+    # that with a deadband: near zero correction while |y_err| stays inside
+    # y_soft_limit_m, ramping smoothly (not a step) up to full corridor gain
+    # by y_hard_limit_m. This is a DIFFERENT mechanism from y_integral_action
+    # above (which adds a growing bias on top of the existing continuous PD)
+    # -- corridor mode instead relaxes correction near center, on the
+    # hypothesis that not fighting small, natural Y excursions at all costs
+    # less X-tracking authority than continuously correcting them. Untested;
+    # this flag makes the A/B possible, it does not assert an answer.
+    #
+    # y_hard_limit_m is the corridor's own saturation point (full
+    # y_corridor_kp/kd applies beyond it), NOT a replacement for the real
+    # safety termination -- that still lives in ImpedanceSafetyMonitor's
+    # max_abs_y_drift_m/max_abs_orthogonal_drift_m (controller_core/safety.py),
+    # untouched by this flag. Sizing y_hard_limit_m to roughly match (or sit
+    # just inside) whatever safety threshold a given config uses is a
+    # deliberate choice for the caller to make per-config, not enforced here.
+    #
+    # Smoothstep (3t^2 - 2t^3 for t in [0,1]) is used for the ramp rather than
+    # a linear one: smoothstep has zero derivative at BOTH t=0 and t=1, so the
+    # corridor gain is C1-continuous at both boundaries -- a linear ramp would
+    # have a derivative kink at the soft-limit boundary (correction switching
+    # from flat-zero to linearly-increasing), a small but real discontinuity
+    # in commanded force. Mutually exclusive with y_integral_action (raises)
+    # -- combining a deadbanded P-term with an always-accumulating integral
+    # term on the same axis is a real interaction (the integral would keep
+    # growing while inside the deadband, since y_err is nonzero there even
+    # though the P-term contributes nothing) that hasn't been analyzed.
+    y_control_mode: Literal["tight", "corridor"] = "tight"
+    y_soft_limit_m: float = 0.015
+    y_hard_limit_m: float = 0.05
+    y_corridor_kp: float = 80.0
+    y_corridor_kd: float = 15.0
     # X-axis integral action (default off = historical behavior: pure kp_x/
     # kd_x PD, ki_x implicitly 0). Added 2026-08-02 to address a real, directly
     # measured hold-phase undershoot: direct_torque_20260802_190759 (wrist2-
@@ -577,6 +621,52 @@ class CartesianImpedanceConfig:
     # coincidentally equal output -- verified byte-identical in
     # tests/unit/test_split_base_wrist_task.py.
     split_base_wrist_task: bool = False
+    # Reduced-task dimension selection (default off = historical behavior:
+    # all 6 rows active, byte-identical to today). Added 2026-08-03 as the
+    # general form of the row-selection idea split_base_wrist_task already
+    # uses for one specific case (position-only, base-joint-only) -- this
+    # flag instead selects an ARBITRARY subset of the 6 task rows via a true
+    # row-selection matrix S (J_task = S @ J, wrench_task = S @ wrench), not
+    # a zeroed/masked 6x6 (that would leave A_task = J_task M^-1 J_task^T
+    # singular in the dropped directions and break the Lambda inversion).
+    #
+    # task_dim_x/y/z select Fx/Fy/Fz (translation, always in the world frame
+    # p/v are already expressed in throughout this file). task_dim_rx/ry/rz
+    # select the 3 components of the WORLD-frame angular-velocity Jacobian
+    # rows (jacr, i.e. M[0]/M[1]/M[2] in the wrench) -- these are NOT tool-
+    # frame Euler roll/pitch/yaw; they are the axis-angle-style world-X/Y/Z
+    # rotation-rate directions mj_jacSite already returns, the same
+    # convention every other rotational quantity in this file already uses
+    # (orientation_error_vec_wxyz, omega). Deliberately not introducing a
+    # NEW tool-frame transform here: the 2026-08-02/03 frame audit spent real
+    # effort ruling out exactly this class of bug (world-vs-tool-frame
+    # mismatch) for the existing pipeline, and a fresh Euler/tool-frame
+    # selection would reopen that risk for no established benefit yet -- if
+    # a genuine tool-frame axis selection turns out to be needed (e.g. "yaw
+    # about the pole axis" specifically), that is a deliberate follow-up, not
+    # bundled into this flag.
+    #
+    # Mutually exclusive with split_base_wrist_task -- their interaction
+    # (row selection AND column selection at once) is untested; compute()
+    # raises ValueError if both are enabled together rather than silently
+    # picking one.
+    #
+    # Known, explicitly NOT addressed by this flag: J_dot @ qd (the
+    # Coriolis-like task-acceleration term from a moving Jacobian) is not
+    # computed anywhere in this file currently -- grepped and confirmed
+    # absent 2026-08-03, not just unused for this feature specifically. The
+    # tau_task formula here is J_task^T @ Lambda_task @ wrench_task, exactly
+    # mirroring the existing (non-reduced) wrench-shaping step's own
+    # omission -- this flag does not add a new gap, it inherits the
+    # existing one. Do not read reduced-task tracking error as evidence this
+    # term doesn't matter; it has never been measured either way.
+    reduced_task_dims: bool = False
+    task_dim_x: bool = True
+    task_dim_y: bool = True
+    task_dim_z: bool = True
+    task_dim_rx: bool = True
+    task_dim_ry: bool = True
+    task_dim_rz: bool = True
     # Acceleration feedforward (default off = historical behavior: pure PD on
     # position+velocity error, Fx = kp_x*x_err + kd_x*(x_vel_des - vx)).
     # Added 2026-08-01 (see docs/status/acceleration_feedforward_2026-08-01.md):
@@ -748,12 +838,24 @@ class CartesianImpedanceConfig:
             y_integral_action=bool(ctrl.get("y_integral_action", False)),
             ki_y=float(gains.get("ki_y", 0.0)),
             y_integral_limit_m_s=float(ctrl.get("y_integral_limit_m_s", 0.02)),
+            y_control_mode=_parse_y_control_mode(ctrl.get("y_control_mode", "tight")),
+            y_soft_limit_m=float(ctrl.get("y_soft_limit_m", 0.015)),
+            y_hard_limit_m=float(ctrl.get("y_hard_limit_m", 0.05)),
+            y_corridor_kp=float(ctrl.get("y_corridor_kp", gains.get("kp_y", 80.0))),
+            y_corridor_kd=float(ctrl.get("y_corridor_kd", gains.get("kd_y", 15.0))),
             x_integral_action=bool(ctrl.get("x_integral_action", False)),
             ki_x=float(gains.get("ki_x", 0.0)),
             x_integral_limit_m_s=float(ctrl.get("x_integral_limit_m_s", 0.02)),
             y_coupling_feedforward=bool(ctrl.get("y_coupling_feedforward", False)),
             y_coupling_gain=float(ctrl.get("y_coupling_gain", 0.7)),
             split_base_wrist_task=bool(ctrl.get("split_base_wrist_task", False)),
+            reduced_task_dims=bool(ctrl.get("reduced_task_dims", False)),
+            task_dim_x=bool(ctrl.get("task_dim_x", True)),
+            task_dim_y=bool(ctrl.get("task_dim_y", True)),
+            task_dim_z=bool(ctrl.get("task_dim_z", True)),
+            task_dim_rx=bool(ctrl.get("task_dim_rx", True)),
+            task_dim_ry=bool(ctrl.get("task_dim_ry", True)),
+            task_dim_rz=bool(ctrl.get("task_dim_rz", True)),
             acceleration_feedforward=bool(ctrl.get("acceleration_feedforward", False)),
         )
 
@@ -799,6 +901,7 @@ class CartesianImpedanceOutput:
     x_integral_action_active: bool = False
     x_integral_value: float = 0.0
     split_base_wrist_task_active: bool = False
+    y_corridor_scale: float = 1.0
     acceleration_feedforward_active: bool = False
     wrench_accel_ff: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
 
@@ -1119,6 +1222,14 @@ class XAxisCartesianImpedanceController:
                 self._x_des_at_anchor = float(x_des)
                 self._posture_reanchored = True
 
+        use_y_corridor = self.cfg.y_control_mode == "corridor"
+        if use_y_corridor and bool(self.cfg.y_integral_action):
+            raise ValueError(
+                "y_control_mode='corridor' and y_integral_action are mutually exclusive -- "
+                "the integral term would keep accumulating inside the deadband even though "
+                "the P-term contributes nothing there; that interaction is unanalyzed."
+            )
+
         use_y_integral = bool(self.cfg.y_integral_action)
         if use_y_integral:
             # dt_s is optional on the state contract (AGENTS.md sec 2); fall
@@ -1167,7 +1278,21 @@ class XAxisCartesianImpedanceController:
         Fx_integral = self.cfg.ki_x * self._x_integral if use_x_integral else 0.0
 
         Fx = self.cfg.kp_x * x_err + self.cfg.kd_x * (x_vel_des - float(v[0])) + Fx_integral
-        Fy = self.cfg.kp_y * y_err - self.cfg.kd_y * float(v[1]) + Fy_integral
+        if use_y_corridor:
+            y_soft = max(float(self.cfg.y_soft_limit_m), 0.0)
+            y_hard = max(float(self.cfg.y_hard_limit_m), y_soft + 1e-9)
+            abs_y_err = abs(y_err)
+            if abs_y_err <= y_soft:
+                corridor_scale = 0.0
+            elif abs_y_err >= y_hard:
+                corridor_scale = 1.0
+            else:
+                t = (abs_y_err - y_soft) / (y_hard - y_soft)
+                corridor_scale = float(3.0 * t**2 - 2.0 * t**3)  # smoothstep: C1 at both ends
+            Fy = corridor_scale * (self.cfg.y_corridor_kp * y_err - self.cfg.y_corridor_kd * float(v[1]))
+        else:
+            corridor_scale = 1.0
+            Fy = self.cfg.kp_y * y_err - self.cfg.kd_y * float(v[1]) + Fy_integral
         Fz = self.cfg.kp_z * z_err - self.cfg.kd_z * float(v[2])
 
         e_rot = orientation_error_vec_wxyz(quat_ref, quat)
@@ -1187,6 +1312,12 @@ class XAxisCartesianImpedanceController:
         # below that uses them is unchanged arithmetic, not just
         # coincidentally-equal output.
         use_split_base_wrist = bool(self.cfg.split_base_wrist_task)
+        use_reduced_task_dims = bool(self.cfg.reduced_task_dims)
+        if use_split_base_wrist and use_reduced_task_dims:
+            raise ValueError(
+                "split_base_wrist_task and reduced_task_dims are mutually exclusive -- "
+                "their interaction (column selection AND row selection at once) is untested."
+            )
         if use_split_base_wrist:
             # Position rows only, base-joint columns only (shoulder_pan,
             # shoulder_lift, elbow -- JOINT_NAME_ORDER[0:3]); wrist columns
@@ -1202,6 +1333,25 @@ class XAxisCartesianImpedanceController:
             J_task[:, 0:3] = J[0:3, 0:3]
             wrench_task = wrench[0:3].copy()
             cond_task = float(np.linalg.cond(J[0:3, 0:3]))
+        elif use_reduced_task_dims:
+            # True row selection (S @ J), not a zeroed/masked 6x6 -- see
+            # reduced_task_dims' docstring for why a mask would break the
+            # Lambda inversion. selected_dims order matches wrench's own
+            # [Fx,Fy,Fz,Mx,My,Mz] row order exactly.
+            dim_flags = [
+                self.cfg.task_dim_x,
+                self.cfg.task_dim_y,
+                self.cfg.task_dim_z,
+                self.cfg.task_dim_rx,
+                self.cfg.task_dim_ry,
+                self.cfg.task_dim_rz,
+            ]
+            selected = [i for i, flag in enumerate(dim_flags) if flag]
+            if not selected:
+                raise ValueError("reduced_task_dims is on but no task_dim_* flag is True -- empty task.")
+            J_task = J[selected, :]
+            wrench_task = wrench[selected]
+            cond_task = float(np.linalg.cond(J_task)) if len(selected) > 1 else float(np.linalg.norm(J_task))
         else:
             J_task = J
             wrench_task = wrench
@@ -1212,6 +1362,17 @@ class XAxisCartesianImpedanceController:
         use_nullspace = bool(self.cfg.nullspace_posture)
         use_adaptive_eps = bool(self.cfg.lambda_adaptive_regularization)
         use_accel_ff = bool(self.cfg.acceleration_feedforward)
+        if use_accel_ff and use_reduced_task_dims:
+            # acceleration_feedforward's accel_ff_vec[0]/[1]/[2] indexing
+            # below hardcodes x/y/z as the first 3 wrench_task rows, which
+            # only holds for the natural (unselected) or split_base_wrist_task
+            # row orders. An arbitrary reduced_task_dims selection (e.g.
+            # y,z only) breaks that assumption silently. Not yet made
+            # selection-aware -- raise rather than corrupt.
+            raise ValueError(
+                "acceleration_feedforward + reduced_task_dims is not yet supported: "
+                "accel_ff_vec's x/y/z indexing assumes the natural row order."
+            )
         mass_matrix_provided = "mass_matrix" in st and st["mass_matrix"] is not None
         lambda_mat: np.ndarray | None = None
         lambda_mat_nullspace: np.ndarray | None = None
@@ -1442,6 +1603,7 @@ class XAxisCartesianImpedanceController:
             x_integral_action_active=use_x_integral,
             x_integral_value=float(self._x_integral),
             split_base_wrist_task_active=use_split_base_wrist,
+            y_corridor_scale=corridor_scale,
             acceleration_feedforward_active=accel_ff_active,
             wrench_accel_ff=wrench_accel_ff,
         )
