@@ -129,6 +129,7 @@ def run_one(
             "target_x": float(target_x),
             "target_ee_pos": target_ee_pos,
             "target_ee_vel": target_ee_vel,
+            "jacobian": jacobian,
         }
         xd_cmd = controller.compute(robot_state)
 

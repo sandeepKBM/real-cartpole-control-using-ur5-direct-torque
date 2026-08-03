@@ -1,12 +1,19 @@
 """X move+hold via ``speedL`` (native RTDE Cartesian velocity control).
 
-No dynamics whatsoever: no gravity compensation, no Jacobian, no mass
-matrix, no torque -- see controller_core/cartesian_velocity_controller.py's
-module docstring for why this exists and its tradeoff (zero force
-compliance) versus the torque-control lane in direct_torque_transport.py.
-Shares the SAME safety stack as position_transport.py (CartesianMoveMonitor,
-DeadlineMonitor, StaleStateMonitor, EStopLatch, robot safety-status check
-every cycle) -- this is a new command path, not a new safety policy.
+Still no gravity compensation / mass matrix / torque -- but DOES compute a
+kinematic Jacobian each cycle (via LocalMujocoDynamics, the same MuJoCo-
+backed J(q) position_transport.py's shadow OSC already uses), because
+CartesianVelocityConfig.reduced_task_dims defaults to True and requires it:
+sim characterization found holding full 3D orientation drives wrist_2 back
+toward its kinematic singularity, capping the safe transport range at
+~0.047m -- see controller_core/cartesian_velocity_controller.py's module
+docstring for the full story and controller_core/state_types.py's
+`RobotState` contract at the ``as_robot_state`` level (no ``mass_matrix``
+or ``ee_lin_vel``/``ee_ang_vel`` required here, unlike the impedance
+controller's contract). Shares the SAME safety stack as
+position_transport.py (CartesianMoveMonitor, DeadlineMonitor,
+StaleStateMonitor, EStopLatch, robot safety-status check every cycle) --
+this is a new command path, not a new safety policy.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ from simulation.ur5e_mujoco_torque import x_profile_target
 from transport_metrics import compute_valid_move_hold_metrics, summarize_move_hold_trace
 
 from .link import RTDEStateError, UR5eLink
+from .local_dynamics import LocalMujocoDynamics
 from .position_transport import _load_cartesian_limits
 from .safety import (
     CartesianMoveMonitor,
@@ -95,6 +103,9 @@ def run_x_transport_velocity(
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     velocity_cfg = CartesianVelocityConfig.from_controller_yaml_section(cfg.get("controller", {}) or {})
     controller = CartesianVelocityController(velocity_cfg)
+    local_dyn: LocalMujocoDynamics | None = None
+    if velocity_cfg.reduced_task_dims:
+        local_dyn = LocalMujocoDynamics()
 
     monitor = CartesianMoveMonitor(
         _load_cartesian_limits(
@@ -188,6 +199,8 @@ def run_x_transport_velocity(
                 "target_ee_pos": target_ee_pos,
                 "target_ee_vel": target_ee_vel,
             }
+            if local_dyn is not None:
+                robot_state["jacobian"] = local_dyn.jacobian(link_state.q)
             xd_cmd = controller.compute(robot_state)
 
             try:

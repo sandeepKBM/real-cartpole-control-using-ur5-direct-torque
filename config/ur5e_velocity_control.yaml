@@ -27,9 +27,23 @@
 # i.e. a position error decays with ~0.5s time constant) -- first real
 # values to validate in sim before any real-hardware use.
 #
-# NOT yet real-hardware validated. NOT yet sim-validated for max range/speed
-# (that characterization, started for the torque-control locked-pan config
-# earlier this session, has not yet been repeated for this mode).
+# NOT yet real-hardware validated.
+#
+# Range/speed characterization (2026-08-03, kinematic-only sim, see
+# tools/diagnostics/ur5e_velocity_control_kinematic_sim.py) found a real,
+# UNRESOLVED safety-relevant instability: with reduced_task_dims on (the
+# default -- see controller_core/cartesian_velocity_controller.py's module
+# docstring for the full story), dx=0.04m at this pose is genuinely stable
+# (checked out to a 10s hold with zero orientation growth), but dx=0.02m
+# (a SMALLER, supposedly easier move) diverges -- orientation error grows
+# unboundedly during the hold phase, reaching ~1 rad by t=6s with guards
+# disabled. The dx-dependent bifurcation between stable and diverging is
+# NOT understood. dx>=0.06m fails via the wrist_2 joint-velocity guard
+# (the same kinematic singularity ceiling found for the torque-control
+# lane, just hit slightly differently here). DO NOT treat this config as
+# validated across a range -- only dx=0.04m at this specific pose has been
+# checked and found stable; anything else is unverified, and dx=0.02m is
+# actively known-unsafe.
 #
 # Use with --control-mode velocity and:
 #   --start-q-rad -0.6981317007977318 -0.8353981633974483 -1.2 -0.9853981633974482 0.2 0.0
@@ -62,6 +76,22 @@ controller:
     kp_rot: 2.0
     max_lin_speed_mps: 0.25
     max_ang_speed_radps: 0.5
+    # reduced_task_dims (default true): the primary task is X/Y/Z/rz only --
+    # rx/ry are dropped from the task pinv resolves directly, and instead
+    # absorb whatever the min-norm+null-space-posture solution needs, same
+    # fix the torque-control lane already validated (dropping rx/ry frees
+    # wrist_2 from being driven back toward its kinematic singularity).
+    # kp_posture/pinv_damping tune the null-space secondary objective (see
+    # controller_core/cartesian_velocity_controller.py's module docstring
+    # for the full sweep that picked these two values together -- they are
+    # NOT independently tunable, damping this small is what makes
+    # kp_posture actually effective instead of numerically unstable).
+    reduced_task_dims: true
+    task_dim_rx: false
+    task_dim_ry: false
+    task_dim_rz: true
+    kp_posture: 1.0
+    pinv_damping: 0.005
   safety:
     max_joint_velocity_radps: 3.0
     max_abs_y_drift_m: 0.03
