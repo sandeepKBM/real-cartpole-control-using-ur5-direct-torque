@@ -105,7 +105,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--controller-kind",
-        choices=("torque_qp", "impedance"),
+        choices=("torque_qp", "impedance", "hard_constraint_qp"),
         default=None,
         help="Controller used for controller-based experiments.",
     )

@@ -34,7 +34,9 @@ from .lqr_controller import (
 )
 from .mpc_controller import CartPoleMPCConfig, CartPoleMPCController
 from .box_qp import solve_box_qp
+from .constrained_box_qp import solve_constrained_box_qp
 from .torque_task_qp import TorqueTaskQPConfig, TorqueTaskQPController
+from .hard_constraint_qp import HardYConstraintQPConfig, HardYConstraintQPController
 from .x_axis_cartesian_impedance import (
     CartesianImpedanceConfig,
     CartesianImpedanceOutput,
@@ -81,8 +83,11 @@ __all__ = [
     "CartPoleMPCConfig",
     "CartPoleMPCController",
     "solve_box_qp",
+    "solve_constrained_box_qp",
     "TorqueTaskQPConfig",
     "TorqueTaskQPController",
+    "HardYConstraintQPConfig",
+    "HardYConstraintQPController",
     "CartesianImpedanceConfig",
     "CartesianImpedanceOutput",
     "XAxisCartesianImpedanceController",

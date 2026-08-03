@@ -17,6 +17,8 @@ import numpy as np
 
 from controller_core import (
     CartesianImpedanceConfig,
+    HardYConstraintQPConfig,
+    HardYConstraintQPController,
     ImpedanceSafetyConfig,
     ImpedanceSafetyMonitor,
     JsonlTraceWriter,
@@ -41,7 +43,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCENE_XML = REPO_ROOT / "assets" / "ur5e_torque" / "scene.xml"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "ur5e_mujoco_torque"
 
-ControllerKind = Literal["torque_qp", "impedance", "zero_torque"]
+ControllerKind = Literal["torque_qp", "impedance", "zero_torque", "hard_constraint_qp"]
 
 # Default per-joint magnitudes for the asymmetric-Coulomb plant friction extra
 # term below, mirroring the size3/size1 joint-class split already used for the
@@ -278,7 +280,7 @@ class MujocoUR5eTorqueAdapterConfig:
     transport_axis_index: int = 0
 
     def validate(self) -> None:
-        if self.controller_kind not in ("torque_qp", "impedance", "zero_torque"):
+        if self.controller_kind not in ("torque_qp", "impedance", "zero_torque", "hard_constraint_qp"):
             raise ValueError(f"Unsupported controller_kind: {self.controller_kind!r}")
         self.torque_limit_nm = np.asarray(self.torque_limit_nm, dtype=np.float64).reshape(6)
         if not np.isfinite(float(self.torque_limit_scale)) or float(self.torque_limit_scale) <= 0.0:
@@ -344,6 +346,8 @@ def build_controller(kind: ControllerKind, ctrl_cfg: dict[str, Any]) -> Any:
     """Instantiate one of the reusable controller_core torque laws."""
     if kind == "torque_qp":
         return TorqueTaskQPController(TorqueTaskQPConfig.from_controller_yaml_section(ctrl_cfg))
+    if kind == "hard_constraint_qp":
+        return HardYConstraintQPController(HardYConstraintQPConfig.from_controller_yaml_section(ctrl_cfg))
     if kind == "impedance":
         return XAxisCartesianImpedanceController(CartesianImpedanceConfig.from_controller_yaml_section(ctrl_cfg))
     if kind == "zero_torque":
