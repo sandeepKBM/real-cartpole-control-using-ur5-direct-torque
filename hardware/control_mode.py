@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-HARDWARE_CONTROL_MODES = frozenset({"position", "direct_torque", "urscript"})
+HARDWARE_CONTROL_MODES = frozenset({"position", "direct_torque", "urscript", "velocity"})
 
 
 def normalize_control_mode(value: str) -> str:

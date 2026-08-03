@@ -17,6 +17,7 @@ from .link import UR5eLink
 from .position_transport import PositionTransportResult, run_x_transport_position
 from .safety import UR5eSafetyLimits
 from .urscript_transport import UrscriptTransportResult, run_urscript_x_transport
+from .velocity_transport import VelocityTransportResult, run_x_transport_velocity
 
 
 def _validate_start_q_rad(start_q_rad: np.ndarray) -> np.ndarray:
@@ -162,6 +163,37 @@ def run_x_transport(
             reason=raw_pos.reason,
             summary=raw_pos.summary,
             trace_path=raw_pos.trace_path,
+            control_mode=mode,
+        )
+
+    if mode == "velocity":
+        link_v = UR5eLink(robot_ip, frequency_hz=125.0)
+        if not skip_joint_move:
+            _joint_move_ur5e_link(link_v, motion_opt_in=motion_opt_in, target_q_rad=start_q_rad)
+        raw_vel: VelocityTransportResult = run_x_transport_velocity(
+            link_v,
+            config_path=config_path,
+            target_x_delta_m=target_x_delta_m,
+            move_duration_s=move_duration_s,
+            duration_s=duration_s,
+            output_dir=output_dir,
+            motion_opt_in=motion_opt_in,
+            max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
+            max_tcp_speed_mps_override=max_tcp_speed_mps_override,
+            accel_gap_cycles_override=accel_gap_cycles_override,
+            speed_lowpass_alpha_override=speed_lowpass_alpha_override,
+            speed_limit_gap_cycles_override=speed_limit_gap_cycles_override,
+            speed_limit_lowpass_alpha_override=speed_limit_lowpass_alpha_override,
+            accel_max_consecutive_violations_override=accel_max_consecutive_violations_override,
+            accel_hard_multiple_override=accel_hard_multiple_override,
+            speed_max_consecutive_violations_override=speed_max_consecutive_violations_override,
+            speed_hard_multiple_override=speed_hard_multiple_override,
+        )
+        return XTransportResult(
+            ok=raw_vel.ok,
+            reason=raw_vel.reason,
+            summary=raw_vel.summary,
+            trace_path=raw_vel.trace_path,
             control_mode=mode,
         )
 

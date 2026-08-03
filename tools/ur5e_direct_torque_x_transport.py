@@ -108,7 +108,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--robot-ip", required=True)
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    p.add_argument("--control-mode", choices=("position", "direct_torque", "urscript"), default="position")
+    p.add_argument("--control-mode", choices=("position", "direct_torque", "urscript", "velocity"), default="position")
     p.add_argument("--target-x-delta", type=float, default=0.02)
     p.add_argument(
         "--trajectory-profile",
@@ -509,7 +509,7 @@ def main() -> int:
         link = UR5eLink(args.robot_ip, frequency_hz=125.0)
         link.connect(with_control=False)
         state = link.read_state()
-        print(f"PROBE OK (position) q={state.q.round(4).tolist()} tcp_x={state.tcp_pose[0]:.4f}")
+        print(f"PROBE OK ({args.control_mode}) q={state.q.round(4).tolist()} tcp_x={state.tcp_pose[0]:.4f}")
         link.disconnect()
         return 0
 

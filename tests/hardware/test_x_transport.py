@@ -302,3 +302,52 @@ def test_run_x_transport_urscript_forwards_move_limit_overrides(monkeypatch):
     assert captured["accel_hard_multiple_override"] == 6.5
     assert captured["speed_max_consecutive_violations_override"] == 5
     assert captured["speed_hard_multiple_override"] == 8.5
+
+
+# --------------------------------------------------------------------------- #
+# run_x_transport(control_mode="velocity") -- dispatch-level test only (the
+# real speedL streaming loop is covered by tests/hardware/test_velocity_
+# transport.py). Mirrors the urscript dispatch test above: patches both
+# _joint_move_ur5e_link (so no real moveJ/RTDE machinery is needed) and
+# run_x_transport_velocity, and checks the override kwargs reach it.
+# --------------------------------------------------------------------------- #
+def test_run_x_transport_velocity_forwards_move_limit_overrides(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("hardware.x_transport._joint_move_ur5e_link", lambda *a, **k: None)
+
+    def _fake_run_x_transport_velocity(link, **kwargs):
+        captured.update(kwargs)
+        from hardware.velocity_transport import VelocityTransportResult
+
+        return VelocityTransportResult(ok=True, reason="", summary={"success": True}, trace_path=None)
+
+    monkeypatch.setattr("hardware.x_transport.run_x_transport_velocity", _fake_run_x_transport_velocity)
+
+    result = run_x_transport(
+        control_mode="velocity",
+        robot_ip="127.0.0.1",
+        config_path=Path("unused.yaml"),
+        target_x_delta_m=0.02,
+        move_duration_s=1.0,
+        duration_s=2.0,
+        output_dir=None,
+        motion_opt_in=True,
+        max_tcp_accel_mps2_override=1.23,
+        accel_gap_cycles_override=7,
+        speed_lowpass_alpha_override=0.33,
+        accel_max_consecutive_violations_override=4,
+        accel_hard_multiple_override=6.5,
+        speed_max_consecutive_violations_override=5,
+        speed_hard_multiple_override=8.5,
+    )
+
+    assert captured["max_tcp_accel_mps2_override"] == 1.23
+    assert captured["accel_gap_cycles_override"] == 7
+    assert captured["speed_lowpass_alpha_override"] == 0.33
+    assert captured["accel_max_consecutive_violations_override"] == 4
+    assert captured["accel_hard_multiple_override"] == 6.5
+    assert captured["speed_max_consecutive_violations_override"] == 5
+    assert captured["speed_hard_multiple_override"] == 8.5
+    assert result.ok is True
+    assert result.control_mode == "velocity"

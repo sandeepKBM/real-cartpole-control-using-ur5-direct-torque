@@ -46,6 +46,15 @@ class RTDEStateError(RuntimeError):
 # silently swap velocity/acceleration positionally with no error at all).
 _EXPECTED_SERVOL_PARAMS = ("pose", "speed", "acceleration", "time", "lookahead_time", "gain")
 
+# The exact speedL(xd, acceleration, time) signature this code was written
+# against (ur_rtde's documented API for Cartesian velocity streaming).
+# Deliberately NOT verified inside connect() like servoL's check above --
+# unlike servoL, speedL is only used by velocity_transport.py, and every
+# other caller of UR5eLink (position mode, plus every existing test double)
+# has no reason to implement it. verify_speedl_signature() is public and
+# called explicitly by velocity_transport.py before streaming instead.
+_EXPECTED_SPEEDL_PARAMS = ("xd", "acceleration", "time")
+
 
 def _load_rtde_classes() -> tuple[type[Any], type[Any]]:
     try:
@@ -231,6 +240,69 @@ class UR5eLink:
         pose_arr = np.asarray(pose, dtype=np.float64).reshape(6)
         self._control.servoL(pose_arr.tolist(), speed, acceleration, time_s, lookahead_time, gain)
 
+    def verify_speedl_signature(self) -> None:
+        """Explicit, opt-in counterpart to _verify_servol_signature -- see
+        _EXPECTED_SPEEDL_PARAMS' comment for why this isn't wired into
+        connect() automatically. Callers that stream speedL (only
+        velocity_transport.py today) must call this once after
+        connect(with_control=True), before the first speed_l()."""
+        if self._control is None:
+            raise RTDEStateError("verify_speedl_signature() called before connect(with_control=True)")
+        speed_l = getattr(self._control, "speedL", None)
+        if speed_l is None:
+            raise RTDELinkError(
+                "Connected RTDE control interface has no speedL method -- cannot "
+                "perform Cartesian velocity control with this library/robot combination."
+            )
+        try:
+            sig = inspect.signature(speed_l)
+        except (TypeError, ValueError):
+            return
+        params = list(sig.parameters)
+        if params and params[0] == "self":
+            params = params[1:]
+        if tuple(params[: len(_EXPECTED_SPEEDL_PARAMS)]) != _EXPECTED_SPEEDL_PARAMS:
+            raise RTDELinkError(
+                "speedL's signature does not match the expected "
+                f"{_EXPECTED_SPEEDL_PARAMS}; found parameters {tuple(params)}. Refusing "
+                "to guess argument order -- update hardware/link.py's "
+                "_EXPECTED_SPEEDL_PARAMS after confirming the real signature for this "
+                "rtde_control version."
+            )
+
+    def speed_l(self, xd, *, acceleration: float, time_s: float = 0.0) -> None:
+        """Stream one RTDE ``speedL`` Cartesian-velocity setpoint.
+        ``acceleration`` bounds how fast the robot's own controller ramps
+        toward ``xd`` (m/s^2 for the linear part, ur_rtde uses one scalar for
+        both linear/angular); ``time_s``, if > 0, tells the robot to
+        decelerate to zero by then if no new speedL arrives -- 0.0 (default)
+        means "hold until superseded or speedStop()", matching how this is
+        streamed every cycle from velocity_transport.py's loop."""
+        if self._control is None:
+            raise RTDEStateError("speed_l() called before connect(with_control=True)")
+        xd_arr = np.asarray(xd, dtype=np.float64).reshape(6)
+        if not np.all(np.isfinite(xd_arr)):
+            raise RTDEStateError("speed_l() got non-finite velocity command")
+        self._control.speedL(xd_arr.tolist(), float(acceleration), float(time_s))
+
+    def speed_stop(self, acceleration: float = 10.0) -> None:
+        """Best-effort deceleration stop for a speedL streaming session
+        (mirrors servo_stop's best-effort, never-raise contract)."""
+        if self._control is None:
+            return
+        method = getattr(self._control, "speedStop", None)
+        if method is None:
+            return
+        try:
+            method(float(acceleration))
+        except TypeError:
+            try:
+                method()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def move_j(
         self,
         q_rad: np.ndarray,
@@ -272,7 +344,7 @@ class UR5eLink:
         ``EStopLatch.trip(reason)`` (callers should trip the latch
         separately with the same reason)."""
         if self._control is not None:
-            for method_name in ("servoStop", "stopScript"):
+            for method_name in ("servoStop", "speedStop", "stopScript"):
                 method = getattr(self._control, method_name, None)
                 if method is None:
                     continue

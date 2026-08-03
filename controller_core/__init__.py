@@ -33,6 +33,7 @@ from .lqr_controller import (
     CartPoleLQRController,
 )
 from .mpc_controller import CartPoleMPCConfig, CartPoleMPCController
+from .cartesian_velocity_controller import CartesianVelocityConfig, CartesianVelocityController
 from .box_qp import solve_box_qp
 from .constrained_box_qp import solve_constrained_box_qp
 from .torque_task_qp import TorqueTaskQPConfig, TorqueTaskQPController
@@ -82,6 +83,8 @@ __all__ = [
     "CartPoleLQRController",
     "CartPoleMPCConfig",
     "CartPoleMPCController",
+    "CartesianVelocityConfig",
+    "CartesianVelocityController",
     "solve_box_qp",
     "solve_constrained_box_qp",
     "TorqueTaskQPConfig",

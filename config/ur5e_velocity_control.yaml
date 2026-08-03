@@ -1,0 +1,78 @@
+# NATIVE RTDE VELOCITY CONTROL (speedL), 2026-08-03 -- fourth
+# hardware/x_transport.py control mode, alongside position/direct_torque/
+# urscript. Uses controller_core/cartesian_velocity_controller.py: a pure
+# P-only resolved-rate Cartesian velocity law with NO dynamics (no gravity
+# comp, no Jacobian, no mass matrix, no torque) -- the robot's own firmware
+# resolves the Cartesian velocity to joint velocities via speedL.
+#
+# Why this exists: UR5e has no native torque interface. Nearly every Y-drift
+# /orientation bug this repo has fought (see AGENTS.md section 3 -- the
+# wrist_2=0 Lambda-decoupling failure, the -45/-40deg Y-drift wall, the
+# hard-constraint QP's missing orientation-restoring mechanism found
+# 2026-08-03) is a consequence of the torque/dynamics modeling those control
+# modes require, not of the transport task itself. speedL sidesteps all of
+# it -- real measured UR5e tracking accuracy on the native servo loop is
+# ~0.7-0.9mm / 0.1-0.3deg RMS, several orders of magnitude tighter than the
+# 30-50mm Y-drift this session spent hours fighting in torque control.
+#
+# The real tradeoff, not fixed by this config: ZERO force compliance. This
+# is only appropriate for pure point-to-point transport / range
+# characterization with no physical pole yet -- NOT for eventual swing-up
+# once a pole is mounted and needs to push back on the end-effector. Keep
+# the torque lane (config/ur5e_mujoco_torque_osc_*.yaml) for that phase.
+#
+# velocity_control.kp_x/kp_y/kp_z/kp_rot are 1/s VELOCITY gains, NOT the
+# impedance controller's N/m FORCE gains -- do not copy those values here,
+# they are dimensionally different. Untuned defaults below (kp=2.0 1/s,
+# i.e. a position error decays with ~0.5s time constant) -- first real
+# values to validate in sim before any real-hardware use.
+#
+# NOT yet real-hardware validated. NOT yet sim-validated for max range/speed
+# (that characterization, started for the torque-control locked-pan config
+# earlier this session, has not yet been repeated for this mode).
+#
+# Use with --control-mode velocity and:
+#   --start-q-rad -0.6981317007977318 -0.8353981633974483 -1.2 -0.9853981633974482 0.2 0.0
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  velocity_control:
+    kp_x: 2.0
+    kp_y: 2.0
+    kp_z: 2.0
+    kp_rot: 2.0
+    max_lin_speed_mps: 0.25
+    max_ang_speed_radps: 0.5
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.05
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
