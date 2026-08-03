@@ -136,6 +136,38 @@ class CartesianImpedanceConfig:
     lambda_regularization_far: float = 1.0e-4
     lambda_cond_low: float = 1.0e4
     lambda_cond_high: float = 1.0e8
+    # Wrench-shaping adaptive regularization (default off), DELIBERATELY
+    # SEPARATE from lambda_adaptive_regularization above -- added 2026-08-02
+    # after root-causing the -45deg Y-drift problem to exactly the failure
+    # mode this file's own comment predicted: at this pose, the static
+    # lambda_regularization=0.1 (sized for the wrist_2=0 singularity,
+    # cond(J)~1e17) badly damages decoupling even when the Jacobian is
+    # actually well-conditioned (verified: a unit-X task acceleration through
+    # the real wrench-shaping Lambda predicts a_y=-0.27 instead of 0, with
+    # eps=0.1, REGARDLESS of whether wrist_2 is at the singularity or offset
+    # to 0.2 -- cond(J) 1e17 vs 29 made almost no difference to the broken
+    # prediction). The comment above (lines ~130-134) explains why the
+    # EXISTING nullspace-only scheduler can't just be pointed at wrench-
+    # shaping too: naively reducing eps there (tried at eps_far=1.0e-4, this
+    # flag's sibling's default) caused joint-velocity blowup measured at
+    # cond(J)~1e3-1e4, well short of any real singularity -- confirmed again
+    # here (2026-08-02 sim sweep at the wrist2-offset -45deg pose, cond~29):
+    # eps=0.001 dropped Y-drift substantially but tripped max|qd| to 3.05
+    # rad/s (guard is 3.0); eps=0.01-0.03 gave real, safe Y-drift improvement
+    # (max|qd| 0.28-0.89 rad/s) without the blowup. wrench_lambda_regularization_far
+    # defaults to 0.01, NOT 1.0e-4 -- deliberately far more conservative than
+    # the nullspace scheduler's far-field value, informed directly by that
+    # sweep rather than reused blind. Reuses lambda_cond_low/lambda_cond_high
+    # (same log(cond)-space interpolation, see _scheduled_lambda_regularization)
+    # rather than duplicating separate thresholds -- at cond(J)~29 (this
+    # pose) that's already far below cond_low=1e4 so the schedule returns
+    # wrench_lambda_regularization_far unclamped; at cond(J)~1e17 (the
+    # original singular pose) it clips to lambda_regularization (0.1,
+    # unchanged, safe) -- so enabling this flag without ALSO fixing the
+    # wrist_2 singularity falls back to today's already-validated behavior,
+    # not something new and unvalidated.
+    wrench_lambda_adaptive_regularization: bool = False
+    wrench_lambda_regularization_far: float = 0.01
     # Posture re-anchoring (default off = historical behavior). In move+hold
     # trajectories ``_q_rest`` stays the reset pose, so during the hold the
     # posture anchor fights the task force; at a task singularity that force
@@ -622,6 +654,8 @@ class CartesianImpedanceConfig:
             lambda_regularization_far=float(ctrl.get("lambda_regularization_far", 1.0e-4)),
             lambda_cond_low=float(ctrl.get("lambda_cond_low", 1.0e4)),
             lambda_cond_high=float(ctrl.get("lambda_cond_high", 1.0e8)),
+            wrench_lambda_adaptive_regularization=bool(ctrl.get("wrench_lambda_adaptive_regularization", False)),
+            wrench_lambda_regularization_far=float(ctrl.get("wrench_lambda_regularization_far", 0.01)),
             posture_reanchor_on_settle=bool(ctrl.get("posture_reanchor_on_settle", False)),
             reanchor_x_tol_m=float(ctrl.get("reanchor_x_tol_m", 2.0e-3)),
             reanchor_qd_tol_radps=float(ctrl.get("reanchor_qd_tol_radps", 0.05)),
@@ -866,6 +900,21 @@ class XAxisCartesianImpedanceController:
         (used when the task is well-conditioned) and ``lambda_regularization``
         (used unchanged as the near-singularity ceiling)."""
         eps_far = max(float(self.cfg.lambda_regularization_far), 0.0)
+        eps_near = max(float(self.cfg.lambda_regularization), 0.0)
+        cond_low = max(float(self.cfg.lambda_cond_low), 1.0)
+        cond_high = max(float(self.cfg.lambda_cond_high), cond_low * (1.0 + 1e-9))
+        cond = max(float(cond), 1.0)
+        log_frac = (np.log(cond) - np.log(cond_low)) / (np.log(cond_high) - np.log(cond_low))
+        log_frac = float(np.clip(log_frac, 0.0, 1.0))
+        return eps_far + log_frac * (eps_near - eps_far)
+
+    def _scheduled_wrench_lambda_regularization(self, cond: float) -> float:
+        """Same log(cond(J)) interpolation as _scheduled_lambda_regularization,
+        applied to the wrench-shaping Lambda instead of the nullspace
+        projector's -- see wrench_lambda_adaptive_regularization's docstring
+        for why these are kept as two separate schedulers, not one shared
+        one."""
+        eps_far = max(float(self.cfg.wrench_lambda_regularization_far), 0.0)
         eps_near = max(float(self.cfg.lambda_regularization), 0.0)
         cond_low = max(float(self.cfg.lambda_cond_low), 1.0)
         cond_high = max(float(self.cfg.lambda_cond_high), cond_low * (1.0 + 1e-9))
@@ -1167,7 +1216,12 @@ class XAxisCartesianImpedanceController:
         lambda_mat: np.ndarray | None = None
         lambda_mat_nullspace: np.ndarray | None = None
         m_inv: np.ndarray | None = None
-        eps_wrench = max(float(self.cfg.lambda_regularization), 0.0)
+        use_wrench_adaptive_eps = bool(self.cfg.wrench_lambda_adaptive_regularization)
+        eps_wrench = (
+            self._scheduled_wrench_lambda_regularization(cond_task)
+            if use_wrench_adaptive_eps
+            else max(float(self.cfg.lambda_regularization), 0.0)
+        )
         eps_effective = eps_wrench
         # acceleration_feedforward alone is also a trigger for this block (not
         # just task_space_inertia_shaping/nullspace_posture): it needs the
@@ -1179,14 +1233,17 @@ class XAxisCartesianImpedanceController:
             else:
                 m_mat = np.eye(6, dtype=np.float64)
             m_inv = np.linalg.inv(m_mat)
-            # lambda_mat (wrench shaping) always uses the static, previously-
-            # validated eps: reducing it destabilizes the shaped wrench itself
-            # (measured joint-velocity blowup at cond(J)~1e3-1e4, well short of
-            # the exact singularity) -- a separate failure mode from the
-            # nullspace-projector leak the adaptive schedule targets. Only the
-            # nullspace projector's Lambda is scheduled. Uses J_task (== J
-            # when split_base_wrist_task is off), so a_mat is 3x3 in split
-            # mode and 6x6 otherwise.
+            # lambda_mat (wrench shaping) uses the static, previously-validated
+            # eps by default: reducing it unconditionally destabilizes the
+            # shaped wrench itself (measured joint-velocity blowup at
+            # cond(J)~1e3-1e4, well short of the exact singularity) -- a
+            # separate failure mode from the nullspace-projector leak
+            # lambda_adaptive_regularization targets. wrench_lambda_adaptive_
+            # regularization (separate flag, see its own docstring) schedules
+            # THIS eps by live cond_task instead, with a more conservative
+            # far-field floor informed directly by that failure mode. Uses
+            # J_task (== J when split_base_wrist_task is off), so a_mat is 3x3
+            # in split mode and 6x6 otherwise.
             a_mat = J_task @ m_inv @ J_task.T
             eye_task = np.eye(a_mat.shape[0], dtype=np.float64)
             lambda_mat = np.linalg.inv(a_mat + eps_wrench * eye_task)
