@@ -97,6 +97,10 @@ def resolve_move_limit_overrides(args: argparse.Namespace) -> dict[str, float | 
         overrides["speed_max_consecutive_violations"] = int(args.speed_max_consecutive_violations)
     if args.speed_hard_multiple is not None:
         overrides["speed_hard_multiple"] = float(args.speed_hard_multiple)
+    if args.accel_variable_tolerance:
+        overrides["accel_variable_tolerance"] = True
+    if args.speed_variable_tolerance:
+        overrides["speed_variable_tolerance"] = True
     return overrides
 
 
@@ -323,6 +327,30 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--accel-variable-tolerance",
+        action="store_true",
+        help=(
+            "direct_torque only. Turns on severity-scaled (tiered) consecutive-"
+            "violation tolerance for the TCP accel guard instead of the flat "
+            "--accel-max-consecutive-violations count: class-default tiers give "
+            "10 cycles' tolerance for a reading under 2x the threshold, 5 cycles "
+            "for 2x-3.5x, 2 cycles above that, up to (and never past) the "
+            "untouched hard-ceiling instant-trip. Motivated by real evidence "
+            "(2026-08-02): the identical dx=0.10/move=3.0 command produced real "
+            "peak accel values of 0.60 and 0.89 m/s^2 on two different attempts "
+            "-- a brief, moderate stick-slip breakaway transient, not sustained "
+            "instability -- which this is built to ride through without weakening "
+            "the hard-ceiling path that catches a genuine runaway. Tier values "
+            "are not yet exposed as their own flags -- this switch uses "
+            "CartesianMoveLimits' own class defaults."
+        ),
+    )
+    p.add_argument(
+        "--speed-variable-tolerance",
+        action="store_true",
+        help="Same graduated-tolerance mechanism as --accel-variable-tolerance, applied to the TCP speed check.",
+    )
+    p.add_argument(
         "--noise-robust-guards",
         action="store_true",
         help=(
@@ -529,6 +557,8 @@ def main() -> int:
                 "speed_max_consecutive_violations"
             ),
             speed_hard_multiple_override=move_limit_overrides.get("speed_hard_multiple"),
+            accel_variable_tolerance_override=move_limit_overrides.get("accel_variable_tolerance"),
+            speed_variable_tolerance_override=move_limit_overrides.get("speed_variable_tolerance"),
             trajectory_profile=str(args.trajectory_profile),
             target_accel_mps2=None if args.target_accel is None else float(args.target_accel),
         )

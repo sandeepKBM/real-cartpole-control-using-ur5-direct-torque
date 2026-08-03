@@ -164,6 +164,8 @@ def run_x_transport_direct_torque(
     accel_hard_multiple_override: float | None = None,
     speed_max_consecutive_violations_override: int | None = None,
     speed_hard_multiple_override: float | None = None,
+    accel_variable_tolerance_override: bool | None = None,
+    speed_variable_tolerance_override: bool | None = None,
     enable_residual_observer: bool = True,
     residual_qdd_gap_cycles: int = 1,
     residual_qdd_lowpass_alpha: float = 1.0,
@@ -391,6 +393,19 @@ def run_x_transport_direct_torque(
         accel_overrides["speed_max_consecutive_violations"] = int(speed_max_consecutive_violations_override)
     if speed_hard_multiple_override is not None:
         accel_overrides["speed_hard_multiple"] = float(speed_hard_multiple_override)
+    # Graduated (tiered) tolerance switches (landed 2026-08-02, see
+    # CartesianMoveLimits.accel_variable_tolerance's docstring in
+    # hardware/safety.py) -- turns on the severity-scaled tier1/tier2/tier3
+    # cycle counts (class defaults: 2x-multiple gets 10 cycles, 3.5x gets 5,
+    # up to the hard ceiling gets 2), letting a brief, moderate breakaway-
+    # transient spike ride through without weakening the untouched hard-
+    # ceiling instant-trip path. Tier values themselves are not exposed as
+    # CLI flags yet -- only the on/off switch, using the class's own already-
+    # documented defaults.
+    if accel_variable_tolerance_override is not None:
+        accel_overrides["accel_variable_tolerance"] = bool(accel_variable_tolerance_override)
+    if speed_variable_tolerance_override is not None:
+        accel_overrides["speed_variable_tolerance"] = bool(speed_variable_tolerance_override)
     if accel_overrides:
         move_limits = replace(move_limits, **accel_overrides)
     move_monitor = CartesianMoveMonitor(move_limits)
