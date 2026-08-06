@@ -211,3 +211,39 @@ def orientation_error_vec_wxyz(quat_des: np.ndarray, quat_cur: np.ndarray) -> np
     if q_err[0] < 0.0:
         q_err = -q_err
     return 2.0 * q_err[1:4]
+
+
+def orientation_error_vec_axis_angle_wxyz(quat_des: np.ndarray, quat_cur: np.ndarray) -> np.ndarray:
+    """Exact axis-angle orientation error: ``angle * axis``, same convention as
+    :func:`orientation_error_vec_wxyz`.
+
+    That function returns ``2 * vec(q_err)``, whose norm is ``2*sin(theta/2)`` --
+    the small-angle linearization of the true rotation angle ``theta``. This one
+    returns the true ``theta * axis``, so the two agree to O(theta^3) and diverge
+    as the error grows (theta=0.25 rad: 0.25 vs 0.2493, 0.3% low; theta=1.0 rad:
+    1.0 vs 0.9589, 4.1% low). Adapted from the axis-angle extraction in
+    ian-chuang/homestri-ur5e-rl (``get_rot_angle``), reimplemented here directly
+    on the quaternion rather than via a rotation matrix.
+
+    Opt-in only (``CartesianImpedanceConfig.orientation_error_exact_axis_angle``).
+    The default stays the linearized form because every gain in this repo's tuned
+    OSC configs was validated against it -- see AGENTS.md section 3.
+
+    Degenerate cases are handled explicitly, matching the reference: a near-zero
+    rotation returns a zero vector (axis undefined, angle 0), and a near-pi
+    rotation still resolves because ``atan2`` is used rather than ``acos``.
+    """
+    qd = quat_normalize_wxyz(quat_des)
+    qc = quat_normalize_wxyz(quat_cur)
+    q_err = quat_multiply_wxyz(quat_conj_wxyz(qd), qc)
+    q_err = quat_normalize_wxyz(q_err)
+    if q_err[0] < 0.0:
+        q_err = -q_err
+    vec = q_err[1:4]
+    sin_half = float(np.linalg.norm(vec))
+    if sin_half < 1e-12:
+        # Undefined axis at zero rotation; the error itself is zero either way.
+        return np.zeros(3, dtype=np.float64)
+    # atan2 keeps full precision as the angle approaches pi, where acos(w) loses it.
+    angle = 2.0 * float(np.arctan2(sin_half, float(q_err[0])))
+    return (angle / sin_half) * vec

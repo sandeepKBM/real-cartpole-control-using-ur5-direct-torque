@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from .kinematics_utils import orientation_error_vec_wxyz
+from .kinematics_utils import orientation_error_vec_axis_angle_wxyz, orientation_error_vec_wxyz
 from .state_types import as_impedance_robot_state
 
 
@@ -127,6 +127,41 @@ class CartesianImpedanceConfig:
     # if absent, M falls back to identity (kinematic pseudoinverse).
     task_space_inertia_shaping: bool = False
     nullspace_posture: bool = False
+    # --- Three opt-in mechanisms adapted from ian-chuang/homestri-ur5e-rl
+    # (studied 2026-08-05). All default OFF; defaults are legacy behavior.
+    #
+    # posture_inertia_scaling: their JointPositionController computes
+    #   tau = M(q) @ (kp*e_pos + kd*(-qd)) -- an inertia-weighted joint PD --
+    #   whereas this controller's tau_posture is a plain joint-space PD
+    #   (kp*(q_rest-q) - kd*qd). That is a real semantic inconsistency once
+    #   task_space_inertia_shaping is on: the TASK gains are then acceleration
+    #   gains (wrench = Lambda @ task_accel_cmd) while the POSTURE gains stay
+    #   torque gains, so the same numeric kp means different physical things in
+    #   the two terms, and a given posture error commands the same torque in a
+    #   heavy joint (shoulder_lift) as in a light one (wrist_3). Multiplying by
+    #   M(q) makes the posture term an acceleration command too, matching the
+    #   task term. Directly relevant to the -45deg directional-authority finding
+    #   in AGENTS.md section 3 (posture authority measured as asymmetric), which
+    #   is why it is worth measuring rather than assuming.
+    posture_inertia_scaling: bool = False
+    # task_velocity_saturation: their _scale_signal_vel_limited caps the task
+    #   signal so the commanded motion never exceeds a vmax, by scaling the
+    #   linear and angular blocks independently once each exceeds its own
+    #   threshold. Distinct from this repo's existing limiters: singular_scale
+    #   keys on cond(J), geometric backtracking keys on torque saturation, and
+    #   ImpedanceSafetyMonitor is a post-hoc abort -- none of them bound the
+    #   commanded task signal itself, pre-emptively, by magnitude. Applied to
+    #   the assembled wrench before Lambda shaping, so it composes with both.
+    task_velocity_saturation: bool = False
+    task_vel_sat_linear: float = 0.0
+    task_vel_sat_angular: float = 0.0
+    # orientation_error_exact_axis_angle: use the true angle*axis error
+    #   (kinematics_utils.orientation_error_vec_axis_angle_wxyz) instead of the
+    #   linearized 2*vec(q_err). NOTE the tuned configs run kp_rot=0, so this
+    #   changes the main wrench not at all; it only bites where e_rot is
+    #   actually consumed with nonzero gain -- wrist_orientation_task
+    #   (kp_rot_wrist) -- plus the reported orientation_error_norm metric.
+    orientation_error_exact_axis_angle: bool = False
     lambda_regularization: float = 1.0e-6
     # Diagonal-only Lambda for the wrench shaping step (default off = historical
     # P3 behavior). Root cause of the Z-drift/orientation-coupling ceiling found
@@ -805,6 +840,11 @@ class CartesianImpedanceConfig:
             task_resample_max_iters=int(ctrl.get("task_resample_max_iters", 14)),
             task_space_inertia_shaping=bool(ctrl.get("task_space_inertia_shaping", False)),
             nullspace_posture=bool(ctrl.get("nullspace_posture", False)),
+            posture_inertia_scaling=bool(ctrl.get("posture_inertia_scaling", False)),
+            task_velocity_saturation=bool(ctrl.get("task_velocity_saturation", False)),
+            task_vel_sat_linear=float(ctrl.get("task_vel_sat_linear", 0.0)),
+            task_vel_sat_angular=float(ctrl.get("task_vel_sat_angular", 0.0)),
+            orientation_error_exact_axis_angle=bool(ctrl.get("orientation_error_exact_axis_angle", False)),
             lambda_regularization=float(ctrl.get("lambda_regularization", 1.0e-6)),
             lambda_diagonal_shaping=bool(ctrl.get("lambda_diagonal_shaping", False)),
             lambda_adaptive_regularization=bool(ctrl.get("lambda_adaptive_regularization", False)),
@@ -1368,11 +1408,28 @@ class XAxisCartesianImpedanceController:
             Fy = self.cfg.kp_y * y_err - self.cfg.kd_y * float(v[1]) + Fy_integral
         Fz = self.cfg.kp_z * z_err - self.cfg.kd_z * float(v[2])
 
-        e_rot = orientation_error_vec_wxyz(quat_ref, quat)
+        if self.cfg.orientation_error_exact_axis_angle:
+            e_rot = orientation_error_vec_axis_angle_wxyz(quat_ref, quat)
+        else:
+            e_rot = orientation_error_vec_wxyz(quat_ref, quat)
         ori_norm = float(np.linalg.norm(e_rot))
         M = self.cfg.kp_rot * e_rot - self.cfg.kd_rot * omega
 
         wrench = np.array([Fx, Fy, Fz, M[0], M[1], M[2]], dtype=np.float64)
+        if self.cfg.task_velocity_saturation:
+            # Adapted from homestri-ur5e-rl's _scale_signal_vel_limited: scale the
+            # linear and angular blocks independently, each only once its own norm
+            # exceeds its threshold, so direction is preserved and the sub-threshold
+            # regime is bit-identical to the unsaturated law. A threshold <= 0
+            # disables that block (not "saturate everything to zero").
+            lin_sat = float(self.cfg.task_vel_sat_linear)
+            ang_sat = float(self.cfg.task_vel_sat_angular)
+            lin_norm = float(np.linalg.norm(wrench[:3]))
+            ang_norm = float(np.linalg.norm(wrench[3:]))
+            if lin_sat > 0.0 and lin_norm > lin_sat:
+                wrench[:3] *= lin_sat / lin_norm
+            if ang_sat > 0.0 and ang_norm > ang_sat:
+                wrench[3:] *= ang_sat / ang_norm
 
         # Jacobian conditioning: needed both for singular_scale below and,
         # when lambda_adaptive_regularization is on, to schedule eps.
@@ -1469,6 +1526,9 @@ class XAxisCartesianImpedanceController:
         lambda_mat: np.ndarray | None = None
         lambda_mat_nullspace: np.ndarray | None = None
         m_inv: np.ndarray | None = None
+        # Kept so posture_inertia_scaling can reuse M(q) without recomputing it.
+        # Stays None when the Lambda block below does not run.
+        m_mat_captured: np.ndarray | None = None
         use_wrench_adaptive_eps = bool(self.cfg.wrench_lambda_adaptive_regularization)
         eps_wrench = (
             self._scheduled_wrench_lambda_regularization(cond_task)
@@ -1486,6 +1546,7 @@ class XAxisCartesianImpedanceController:
             else:
                 m_mat = np.eye(6, dtype=np.float64)
             m_inv = np.linalg.inv(m_mat)
+            m_mat_captured = m_mat
             # lambda_mat (wrench shaping) uses the static, previously-validated
             # eps by default: reducing it unconditionally destabilizes the
             # shaped wrench itself (measured joint-velocity blowup at
@@ -1582,6 +1643,22 @@ class XAxisCartesianImpedanceController:
             tau_posture = kp_vec * (self._q_rest - q) - kd_vec * qd
         else:
             tau_posture = self.cfg.kp_posture * (self._q_rest - q) - self.cfg.kd_posture * qd
+        if self.cfg.posture_inertia_scaling:
+            # tau_posture becomes M(q) @ (joint-space acceleration command),
+            # matching the task term's acceleration-gain semantics under
+            # task_space_inertia_shaping. Applied BEFORE the nullspace
+            # projection below, so the projector still sees a torque -- the
+            # projector's own derivation assumes a joint torque input, and
+            # scaling after it would break the dynamic-consistency property.
+            m_posture = m_mat_captured
+            if m_posture is None:
+                m_posture = (
+                    np.asarray(st["mass_matrix"], dtype=np.float64).reshape(6, 6)
+                    if ("mass_matrix" in st and st["mass_matrix"] is not None)
+                    else None
+                )
+            if m_posture is not None:
+                tau_posture = m_posture @ tau_posture
         if use_nullspace and lambda_mat_nullspace is not None and m_inv is not None:
             # Dynamically consistent nullspace projector: posture torques can
             # no longer produce task-space acceleration. Uses
