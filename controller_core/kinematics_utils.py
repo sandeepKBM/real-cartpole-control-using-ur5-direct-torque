@@ -211,3 +211,45 @@ def orientation_error_vec_wxyz(quat_des: np.ndarray, quat_cur: np.ndarray) -> np
     if q_err[0] < 0.0:
         q_err = -q_err
     return 2.0 * q_err[1:4]
+
+
+def swing_twist_axis_error(quat_des: np.ndarray, quat_cur: np.ndarray, axis_index: int) -> float:
+    """Signed rotation angle (rad) of the TWIST component of the orientation
+    error about a single world axis (axis_index: 0=x, 1=y, 2=z) -- via the
+    standard swing-twist decomposition, exact for any rotation magnitude,
+    unlike ``orientation_error_vec_wxyz``'s ``2*vec(q_err)`` (a small-angle
+    approximation that also mixes all 3 axes together for a compound
+    rotation, not a per-axis-separable quantity).
+
+    Found necessary 2026-08-03: selecting row ``axis_index`` of
+    ``orientation_error_vec_wxyz``'s output as "the error about that axis"
+    (e.g. for reduced_task_dims' task_dim_rz) is only valid near zero error
+    -- once the OTHER two axes accumulate real rotation (e.g. from
+    redundancy-resolution null-space motion this controller intentionally
+    leaves free), that row is contaminated by them, and closing a feedback
+    loop on it can actively DRIVE further drift on the other axes instead
+    of damping it (confirmed directly: a genuine, reproducible, unbounded-
+    growth instability in CartesianVelocityController's reduced-task rz-hold
+    at some poses/displacements, root-caused to exactly this).
+
+    q_err = conj(q_des) * q_cur is decomposed as q_err = swing * twist,
+    where twist is the rotation purely about the requested axis and swing
+    is everything orthogonal to it. For axis = world Z ([0,0,1]), the twist
+    quaternion is simply normalize([w, 0, 0, z]) (the vector part of q_err
+    projected onto Z is just its own z-component, since Z is a coordinate
+    axis) -- generalizes trivially to X/Y by projecting onto x or y instead.
+    The returned angle is 2*atan2(proj, w), the EXACT twist angle (not the
+    2*component small-angle approximation), sign-consistent with
+    orientation_error_vec_wxyz's own q_err[0]<0 shortest-path convention.
+    """
+    if axis_index not in (0, 1, 2):
+        raise ValueError(f"axis_index must be 0, 1, or 2; got {axis_index}")
+    qd = quat_normalize_wxyz(quat_des)
+    qc = quat_normalize_wxyz(quat_cur)
+    q_err = quat_multiply_wxyz(quat_conj_wxyz(qd), qc)
+    q_err = quat_normalize_wxyz(q_err)
+    if q_err[0] < 0.0:
+        q_err = -q_err
+    w = float(q_err[0])
+    proj = float(q_err[1 + axis_index])
+    return 2.0 * float(np.arctan2(proj, w))

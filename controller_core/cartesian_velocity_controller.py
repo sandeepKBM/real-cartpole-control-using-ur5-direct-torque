@@ -100,25 +100,48 @@ orthogonal projector (symmetric, PSD, so the posture feedback loop is
 provably stable) only for the exact Moore-Penrose pinv -- with the damped
 one, that guarantee is lost.
 
-**OPEN, UNRESOLVED SAFETY-RELEVANT ISSUE (2026-08-03)**: even with all of
-the above, orientation error during the HOLD phase (after the move
-completes, with all guard checks disabled to observe the raw behavior) was
-measured to grow WITHOUT BOUND at dx=0.02m -- from ~0.10 rad at reanchor
-time to ~0.98 rad by t=6s, accelerating, not linear -- while dx=0.04m at
-the SAME pose is completely stable (identical orientation error at
-duration=3s and duration=10s, zero growth). This dx-dependent bifurcation
-between "genuinely stable" and "unboundedly diverging" is NOT understood --
-two root-cause attempts (damped-vs-undamped pinv for the projector; the
-reanchor no-op bug) each fixed a REAL, separately-verified problem but
-neither explains or fixes this. Suspected but NOT confirmed: the
-quaternion-based orientation-error vector (orientation_error_vec_wxyz) may
-not cleanly separate "the rz component" from rx/ry for large compound
-rotations, so holding rz via e_rot[2] could itself be coupled to (and
-destabilized by) the very rx/ry drift the null-space term is supposed to
-be independent of. DO NOT treat reduced_task_dims=True (the current
-default) as validated for real-hardware use across the full displacement
-range until this is root-caused -- it is only empirically known-stable at
-dx=0.04m at this specific pose, from a 3s and 10s sim check, nothing more.
+**Root cause of the original unbounded-hold-phase-divergence bug, found and
+fixed 2026-08-03**: the primary task's rz-row used ``kp_rot *
+orientation_error_vec_wxyz(...)[2]`` (a small-angle ``2*vec(q_err)``
+approximation of the FULL 3D rotation error) as "the yaw error" -- this
+does not decompose per-axis for large compound rotations, so once rx/ry
+(left free by reduced_task_dims) accumulated real rotation via the null-
+space motion, the "yaw correction" itself became contaminated by rx/ry,
+closing a genuine positive-feedback loop (confirmed independent of
+kp_posture: identical divergence with kp_posture=0.0, i.e. no null-space
+term at all -- proving the bug was in the PRIMARY task's own signal, not
+the posture correction). Fixed by ``swing_twist_axis_error`` (see
+``kinematics_utils.py``): an exact swing-twist decomposition, genuinely
+axis-separable for any rotation magnitude, used for all three rows of
+w_cmd instead of the coupled small-angle vector.
+
+**Remaining, NOT further fixable via gain tuning, structural finding
+(2026-08-03)**: with the swing-twist fix, orientation error no longer
+diverges -- it always converges to SOME finite equilibrium. But WHICH
+equilibrium is highly sensitive to the exact displacement, not smooth in
+dx: a fine dx sweep at this pose (0.005 to 0.045m) found settled
+orientation error jumping between "acceptable" (~0.18-0.32 rad at
+dx=0.03-0.04m) and "large" (~0.94-2.0 rad at dx=0.02, 0.025, 0.045m) with
+no smooth trend -- textbook MULTISTABILITY: minimum-norm redundancy
+resolution has multiple basins of attraction, and which one a given
+trajectory falls into depends on its exact path through configuration
+space, not just its endpoint. Confirmed NOT a gain-tuning problem: a
+kp_posture sweep from 0 to 200 left the settled value in each basin
+essentially UNCHANGED (dx=0.02 stayed ~0.94-0.98 across the entire range),
+and at kp_posture>=20 near the more singular displacements (dx=0.045) qd
+blew up to hundreds-to-thousands of rad/s instead. No RL or manual gain
+search over (kp_posture, pinv_damping, kp_rot, ...) can fix this -- the
+issue is WHICH basin the deterministic dynamics fall into, which gain
+magnitude does not change. A real fix would need a fundamentally different
+redundancy-resolution strategy that is not path-history-dependent -- e.g.
+a fresh numerical IK solve toward "nearest to q_rest" each cycle instead
+of incrementally-integrated null-space rate control -- not attempted here.
+DO NOT treat reduced_task_dims=True (the current default) as validated for
+real-hardware use across a displacement range: only specific values (e.g.
+dx=0.03-0.04m at this pose) are empirically known to land in a good basin;
+others (e.g. dx=0.02m, 0.025m, 0.045m at this same pose) are known to
+settle at unsafe orientation error, and there is currently no way to
+predict which without simulating that exact displacement first.
 
 Requires ``jacobian`` (6x6, world-frame [J_pos; J_rot], mj_jacSite's own
 convention) and ``q`` in the state dict. If reduced_task_dims is on and
@@ -135,7 +158,7 @@ from dataclasses import dataclass
 import numpy as np
 from typing import Any
 
-from .kinematics_utils import orientation_error_vec_wxyz
+from .kinematics_utils import orientation_error_vec_wxyz, swing_twist_axis_error
 from .state_types import as_robot_state
 
 
@@ -272,8 +295,25 @@ class CartesianVelocityController:
         kp_lin = np.array([self.cfg.kp_x, self.cfg.kp_y, self.cfg.kp_z], dtype=np.float64)
         v_cmd = v_ff + kp_lin * pos_err
 
-        e_rot = orientation_error_vec_wxyz(self._quat0, quat)
-        w_cmd = self.cfg.kp_rot * e_rot
+        # Swing-twist per-axis decomposition, NOT orientation_error_vec_wxyz's
+        # 2*vec(q_err) -- see swing_twist_axis_error's docstring. That
+        # small-angle vector approximation mixes all 3 axes together for a
+        # compound rotation and is not exact for large angles; naively using
+        # its row 2 as "the rz error" was found (2026-08-03) to create a
+        # genuine, reproducible, unbounded-growth instability once the other
+        # two axes accumulated real rotation from redundancy-resolution
+        # null-space motion -- confirmed independent of kp_posture (identical
+        # divergence with kp_posture=0.0, i.e. no null-space term at all),
+        # so this is a bug in the task's own orientation-error signal, not a
+        # gain-tuning problem.
+        w_cmd = self.cfg.kp_rot * np.array(
+            [
+                swing_twist_axis_error(self._quat0, quat, 0),
+                swing_twist_axis_error(self._quat0, quat, 1),
+                swing_twist_axis_error(self._quat0, quat, 2),
+            ],
+            dtype=np.float64,
+        )
 
         xd_full = np.concatenate([v_cmd, w_cmd]).astype(np.float64)
 

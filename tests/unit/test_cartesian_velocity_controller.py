@@ -17,6 +17,64 @@ from controller_core.cartesian_velocity_controller import (  # noqa: E402
     CartesianVelocityController,
     _damped_pinv,
 )
+from controller_core.kinematics_utils import (  # noqa: E402
+    orientation_error_vec_wxyz,
+    quat_multiply_wxyz,
+    rotvec_to_quat_wxyz,
+    swing_twist_axis_error,
+)
+
+
+def test_swing_twist_matches_small_angle_vector_for_small_pure_axis_rotation():
+    """For a small, pure rotation about one axis, the exact swing-twist
+    angle and the small-angle 2*vec(q_err) approximation must agree
+    closely -- confirms the new function isn't a different convention,
+    just a more exact version for large angles."""
+    theta = 0.01
+    quat_now = rotvec_to_quat_wxyz(np.array([0.0, 0.0, theta]))
+    quat0 = np.array([1.0, 0.0, 0.0, 0.0])
+    e_rot = orientation_error_vec_wxyz(quat0, quat_now)
+    twist_z = swing_twist_axis_error(quat0, quat_now, 2)
+    assert twist_z == pytest.approx(e_rot[2], abs=1e-6)
+    assert swing_twist_axis_error(quat0, quat_now, 0) == pytest.approx(0.0, abs=1e-9)
+    assert swing_twist_axis_error(quat0, quat_now, 1) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_swing_twist_is_exact_for_large_pure_axis_rotation():
+    """For a LARGE pure rotation about one axis, the exact twist angle must
+    equal that rotation exactly -- unlike 2*vec(q_err), which is only a
+    small-angle approximation and visibly deviates at this magnitude."""
+    theta = 2.5
+    quat_now = rotvec_to_quat_wxyz(np.array([0.0, 0.0, theta]))
+    quat0 = np.array([1.0, 0.0, 0.0, 0.0])
+    twist_z = swing_twist_axis_error(quat0, quat_now, 2)
+    assert twist_z == pytest.approx(theta, abs=1e-9)
+    e_rot = orientation_error_vec_wxyz(quat0, quat_now)
+    assert abs(e_rot[2] - theta) > 0.1  # the small-angle approximation is visibly wrong here
+
+
+def test_swing_twist_z_component_is_exact_regardless_of_other_axis_rotation():
+    """The real property this function guarantees (and 2*vec(q_err)'s row 2
+    does not, once rotations grow large): composing a pure-Z rotation with
+    ANY other-axis rotation, the swing-twist Z-angle recovers the pure-Z
+    contribution EXACTLY, for several other-axis magnitudes -- genuinely
+    axis-separable, not just "close enough" for one specific case."""
+    small_z = 0.02
+    quat_z_small = rotvec_to_quat_wxyz(np.array([0.0, 0.0, small_z]))
+    quat0 = np.array([1.0, 0.0, 0.0, 0.0])
+    for other_axis_theta in [0.1, 0.5, 1.0, 1.5, 2.0]:
+        quat_x = rotvec_to_quat_wxyz(np.array([other_axis_theta, 0.0, 0.0]))
+        quat_compound = quat_multiply_wxyz(quat_x, quat_z_small)
+        twist_z = swing_twist_axis_error(quat0, quat_compound, 2)
+        assert twist_z == pytest.approx(small_z, abs=1e-9), (
+            f"failed at other_axis_theta={other_axis_theta}"
+        )
+
+
+def test_swing_twist_axis_error_rejects_bad_axis_index():
+    quat0 = np.array([1.0, 0.0, 0.0, 0.0])
+    with pytest.raises(ValueError):
+        swing_twist_axis_error(quat0, quat0, 3)
 
 
 def test_damped_pinv_matches_plain_pinv_when_well_conditioned():
