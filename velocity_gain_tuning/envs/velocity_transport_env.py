@@ -81,6 +81,28 @@ ACTION_FIELDS: tuple[tuple[str, float, float, bool], ...] = (
     # tell us" search the range was widened for.
     ("pinv_damping", 1.0e-7, 1.0, True),
     ("qp_task_weight", 10.0, 1.0e10, True),
+    # ik_posture_gain added 2026-08-06: null-space posture pull toward
+    # q_rest inside compute_ik_seeded's Newton-QP solve (controller_core/
+    # cartesian_velocity_controller/modes.py), fixing a root-caused gap --
+    # the search's own found gains push pinv_damping/qp_task_weight toward
+    # near-zero-regularization/near-exact-IK, which leaves rotation axes
+    # OUTSIDE the task selection (rx/ry, since task_dim_rx/ry are False by
+    # default) essentially unconstrained; traced directly on a real
+    # hanging_alpha_0_5 failure: rz (task-constrained) tracked to 2e-4 rad
+    # while rx (unconstrained) grew to 0.25 rad and alone tripped the
+    # orientation guard. Hand-sweeping ik_posture_gain up to 128 against
+    # that EXACT prior gain vector barely moved the outcome (0.2533 ->
+    # 0.2517, never passing) -- because that vector's extreme pinv_damping/
+    # qp_task_weight already push solve_box_qp's linear system to the edge
+    # of double-precision conditioning (confirmed directly: a well-
+    # conditioned toy case shows the posture mechanism works cleanly, see
+    # tests/unit/test_cartesian_velocity_controller.py). Exposing it here
+    # lets the search find pinv_damping/qp_task_weight/ik_posture_gain
+    # jointly, rather than bolting posture onto an already-pathological
+    # point. 0.0 is a valid, meaningful value (posture off, byte-identical
+    # to before this field existed) -- linear, not log-remapped, unlike
+    # pinv_damping/qp_task_weight.
+    ("ik_posture_gain", 0.0, 50.0, False),
 )
 ACTION_DIM = len(ACTION_FIELDS)
 OBS_DIM = 12
@@ -278,6 +300,7 @@ class VelocityTransportEnv(gym.Env):
         self._controller.cfg.ik_joint_gain = gains["ik_joint_gain"]
         self._controller.cfg.pinv_damping = gains["pinv_damping"]
         self._controller.cfg.qp_task_weight = gains["qp_task_weight"]
+        self._controller.cfg.ik_posture_gain = gains["ik_posture_gain"]
 
         robot_state = {
             "time": self._t_s,

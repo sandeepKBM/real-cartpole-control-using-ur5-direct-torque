@@ -63,6 +63,17 @@ class CartesianVelocityConfig:
     joint_pos_upper: np.ndarray | None = None
     joint_vel_limit_radps: float | None = None
     qp_task_weight: float = 1.0e4
+    # Null-space posture pull toward q_rest inside compute_ik_seeded's
+    # per-iteration Newton-QP solve (added 2026-08-06) -- see modes.py's
+    # compute_ik_seeded for the full rationale. 0.0 (default) reproduces
+    # the exact prior behavior byte-for-byte; a nonzero value pulls
+    # whichever rotation axes are NOT in the task (task_dim_rx/ry when
+    # False, by default) back toward their q_rest value each Newton
+    # iteration, the same mechanism reduced_task_dims already uses via
+    # kp_posture -- kept as a SEPARATE field rather than reusing kp_posture
+    # since the two operate at different scales (kp_posture is a per-cycle
+    # rate gain; this is a per-Newton-iteration position-step fraction).
+    ik_posture_gain: float = 0.0
 
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianVelocityConfig":
@@ -101,4 +112,5 @@ class CartesianVelocityConfig:
                 float(vc["joint_vel_limit_radps"]) if "joint_vel_limit_radps" in vc else None
             ),
             qp_task_weight=float(vc.get("qp_task_weight", 1.0e4)),
+            ik_posture_gain=float(vc.get("ik_posture_gain", 0.0)),
         )

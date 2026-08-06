@@ -269,7 +269,35 @@ def compute_ik_seeded(
         # no way to represent that at all.
         hessian_qp = 2.0 * (reg * np.eye(6, dtype=np.float64) + task_w * (j_task_k.T @ j_task_k))
         linear_qp = -2.0 * task_w * (j_task_k.T @ task_err_k)
-        dq = solve_box_qp(hessian_qp, linear_qp, q_lo - q_k, q_hi - q_k)
+        dq_lo = q_lo - q_k
+        dq_hi = q_hi - q_k
+        dq = solve_box_qp(hessian_qp, linear_qp, dq_lo, dq_hi)
+
+        # Null-space posture pull toward q_rest, mirroring compute_reduced_
+        # task_dims' nullspace_posture mechanism -- fixes a real gap found
+        # 2026-08-06 (docs/status trace of a hanging_alpha_0_5 gain-search
+        # failure): the QP's reg*||dq||^2 term is the ONLY thing regularizing
+        # whatever's outside the selected task dims (e.g. rx/ry when task_
+        # dim_rx/ry are False), and it's a pure minimum-STEP-norm bias, not a
+        # pull toward q_rest specifically -- with pinv_damping near zero and
+        # qp_task_weight near-infinite (exactly the direction a real gain
+        # search pushed toward, since it sharpens task tracking), that leaves
+        # the unconstrained axes free to drift to whatever the QP's steps
+        # happen to produce. Traced directly: rz (the task-constrained axis)
+        # tracked to within 2e-4 rad throughout a failing episode while rx
+        # (unconstrained) grew to 0.25 rad and tripped the orientation guard
+        # alone. ik_posture_gain=0.0 (the default) reproduces the exact
+        # prior behavior -- this whole block is skipped, not just a no-op
+        # multiply, so there's no added compute cost when off either.
+        if cfg.ik_posture_gain != 0.0:
+            j_task_pinv_undamped = np.linalg.pinv(j_task_k)
+            nullspace_proj = np.eye(6, dtype=np.float64) - j_task_pinv_undamped @ j_task_k
+            dq_posture = cfg.ik_posture_gain * (nullspace_proj @ (q_rest - q_k))
+            # Re-clip the COMBINED step, not just dq_task, to the same box --
+            # otherwise the posture addition could push q_k+dq past a
+            # supplied joint_pos_lower/upper even though the QP step alone
+            # never would.
+            dq = np.clip(dq + dq_posture, dq_lo, dq_hi)
         q_k = q_k + dq
     q_target = q_k
 

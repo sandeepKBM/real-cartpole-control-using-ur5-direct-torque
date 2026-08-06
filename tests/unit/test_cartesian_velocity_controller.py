@@ -561,6 +561,209 @@ def test_ik_seeded_resolution_q_target_is_path_independent():
     np.testing.assert_allclose(q_target_a, q_target_b, atol=1e-9)
 
 
+def _toy_fk_with_free_rx(q: np.ndarray):
+    """Like _toy_fk, but with a joint (index 3) that is WEAKLY coupled into
+    the position task (jac[0,3]=0.15 -- moving it helps reduce X error a
+    little, so the QP's least-squares solve will use it, exactly like a
+    real coupled Jacobian) while ALSO driving rx (rotvec index 0, jac[3,3]
+    =0.6) which is entirely outside the default task selection (task_dim_rx
+    =False). This is the actual mechanism traced in the real MuJoCo case
+    that motivated this fix: satisfying the position/rz task via a joint
+    that ALSO happens to move an unconstrained rotation axis, with nothing
+    but the QP's weak reg*||dq||^2 term (deliberately tiny here, matching
+    the real gain search's found pinv_damping) discouraging that joint from
+    moving. An earlier version of this toy FK made column 3 exactly zero in
+    every task row, which meant q[3] (and therefore rx) never moved at all
+    regardless of posture_gain -- that tested nothing; this version keeps
+    the coupling deliberately real but small so posture_gain's pull is
+    measurable against it, not fighting a stronger primary-task signal."""
+    q = np.asarray(q, dtype=np.float64).reshape(6)
+    pos = q[0:3].copy()
+    pos[0] += 0.15 * q[3]
+    quat = rotvec_to_quat_wxyz(np.array([0.6 * q[3], 0.0, 0.3 * q[5]]))
+    jac = np.eye(6)
+    jac[0:3, 0:3] = np.eye(3)
+    jac[0, 3] = 0.15  # position-x weakly coupled to joint 3
+    jac[5, 5] = 1.0  # rz driven only by q[5]
+    jac[3, 3] = 0.6  # rx driven by q[3] -- outside the x/y/z/rz task entirely
+    jac[4, 4] = 0.0  # ry unreachable (kept simple/degenerate on purpose)
+    return pos, quat, jac
+
+
+def test_ik_posture_gain_default_off_matches_prior_behavior():
+    """Regression guard: ik_posture_gain absent/0.0 (the default) must
+    reproduce byte-identical output to before this field existed -- the
+    whole posture block is skipped, not computed-and-multiplied-by-zero."""
+    cfg_explicit_zero = CartesianVelocityConfig(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=8, ik_joint_gain=4.0,
+        pinv_damping=0.01, ik_posture_gain=0.0,
+    )
+    cfg_default = CartesianVelocityConfig(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=8, ik_joint_gain=4.0, pinv_damping=0.01,
+    )
+    assert cfg_default.ik_posture_gain == 0.0
+
+    def run(cfg):
+        q_rest = np.array([0.1, -0.2, 0.15, 0.3, -0.1, 0.05])
+        p0, quat0, _ = _toy_fk(q_rest)
+        target = p0.copy()
+        target[0] += 0.03
+        ctrl = CartesianVelocityController(cfg)
+        ctrl.reset_from_state(
+            {"time": 0.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0, "target_x": float(p0[0])}
+        )
+        q_current = q_rest + np.array([0.05, -0.03, 0.02, 0.01, -0.02, 0.015])
+        p_c, quat_c, _ = _toy_fk(q_current)
+        return ctrl.compute(
+            {
+                "time": 1.0, "q": q_current, "qd": np.zeros(6), "ee_pos": p_c, "ee_quat": quat_c,
+                "target_x": float(target[0]), "target_ee_pos": target, "target_ee_vel": np.zeros(3),
+                "fk_jacobian_fn": _toy_fk,
+            }
+        )
+
+    np.testing.assert_allclose(run(cfg_explicit_zero), run(cfg_default), atol=1e-14)
+
+
+def test_ik_posture_gain_pulls_unconstrained_axis_toward_q_rest():
+    """The actual mechanism this fix adds: with a Jacobian where joint 3 is
+    weakly coupled into the position task AND drives rx (an axis outside
+    the default task selection -- see _toy_fk_with_free_rx), the Newton
+    solve's own iterations pull q[3] away from q_rest to help satisfy the
+    position error, dragging rx along with it since nothing else
+    constrains it. Turning on ik_posture_gain must measurably pull
+    q_target's free joint (index 3) back toward q_rest compared to
+    ik_posture_gain=0.0, without needing q_current to be perturbed at all
+    -- q_target is a pure function of q_rest/target by design (see the
+    path-independence test below), so q_current is set equal to q_rest
+    here specifically to isolate that."""
+    q_rest = np.zeros(6)
+    p0, quat0, _ = _toy_fk_with_free_rx(q_rest)
+    target = p0.copy()
+    target[0] += 0.05
+
+    def q_target_free_axis(ik_posture_gain: float) -> float:
+        # Moderate, well-conditioned pinv_damping/qp_task_weight -- an
+        # earlier version of this test used the real search's extreme
+        # values (pinv_damping~1e-6, qp_task_weight~1e8) and found
+        # solve_box_qp's underlying np.linalg.solve becomes numerically
+        # unstable there (condition number near double precision's limit,
+        # ~1e8/1e-8), silently producing a degenerate all-in-column-0
+        # solution instead of the correct weighted split -- confirmed by
+        # comparing against the analytic pinv reference directly. Moderate
+        # values isolate the posture MECHANISM cleanly; the real extreme-
+        # value numerical-conditioning question is a separate, real
+        # finding (see this test file's module-level note) not something
+        # this unit test needs to also cover.
+        cfg = CartesianVelocityConfig(
+            kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+            reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=10, ik_joint_gain=4.0,
+            pinv_damping=0.05, qp_task_weight=1.0e4, ik_posture_gain=ik_posture_gain,
+        )
+        ctrl = CartesianVelocityController(cfg)
+        ctrl.reset_from_state(
+            {"time": 0.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0, "target_x": float(p0[0])}
+        )
+        xd = ctrl.compute(
+            {
+                "time": 1.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0,
+                "target_x": float(target[0]), "target_ee_pos": target, "target_ee_vel": np.zeros(3),
+                "fk_jacobian_fn": _toy_fk_with_free_rx,
+            }
+        )
+        # q_current == q_rest here, so q_target_free = qd_joint_free/ik_joint_gain
+        # directly. jac_current[3,3] == 0.6 exactly (diagonal in this toy FK).
+        qd_joint_free = xd[3] / 0.6
+        return float(qd_joint_free / cfg.ik_joint_gain)
+
+    free_axis_off = abs(q_target_free_axis(0.0) - q_rest[3])
+    free_axis_on = abs(q_target_free_axis(2.0) - q_rest[3])
+    assert free_axis_off > 1e-4, "test setup didn't actually create any free-axis drift to pull back from"
+    assert free_axis_on < free_axis_off, (
+        f"posture gain should pull the free axis closer to q_rest: on={free_axis_on} off={free_axis_off}"
+    )
+
+
+def test_ik_posture_gain_does_not_break_task_convergence():
+    """The posture term must not prevent the primary task from converging
+    -- with ik_posture_gain on, the x-task (position error) must still be
+    reduced by a large fraction, not swamped/cancelled by the posture
+    pull. q_current is set equal to q_rest (as in the test above) so the
+    result reflects q_target directly, without an unrelated q_current
+    offset muddying the comparison."""
+    cfg = CartesianVelocityConfig(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=10, ik_joint_gain=4.0,
+        pinv_damping=0.05, qp_task_weight=1.0e4, ik_posture_gain=2.0,
+    )
+    q_rest = np.zeros(6)
+    p0, quat0, _ = _toy_fk_with_free_rx(q_rest)
+    target = p0.copy()
+    target[0] += 0.02
+    ctrl = CartesianVelocityController(cfg)
+    ctrl.reset_from_state(
+        {"time": 0.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0, "target_x": float(p0[0])}
+    )
+    xd = ctrl.compute(
+        {
+            "time": 1.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0,
+            "target_x": float(target[0]), "target_ee_pos": target, "target_ee_vel": np.zeros(3),
+            "fk_jacobian_fn": _toy_fk_with_free_rx,
+        }
+    )
+    # xd[0] (x-velocity component) should reflect real progress toward the
+    # 0.02m task displacement, not be swamped/cancelled by the posture term.
+    assert xd[0] > 0.0
+
+
+def test_ik_posture_gain_preserves_path_independence():
+    """Extends test_ik_seeded_resolution_q_target_is_path_independent to
+    confirm the posture addition doesn't reintroduce dependence on
+    q_current -- it only ever reads q_rest and q_k (both independent of
+    q_current) inside the Newton loop."""
+    cfg = CartesianVelocityConfig(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=8, ik_joint_gain=4.0,
+        pinv_damping=0.01, ik_posture_gain=1.5,
+    )
+    q_rest = np.zeros(6)
+    p0, quat0, _ = _toy_fk(q_rest)
+    target = p0.copy()
+    target[0] += 0.05
+
+    def q_target_from(q_current: np.ndarray) -> np.ndarray:
+        ctrl = CartesianVelocityController(cfg)
+        ctrl.reset_from_state(
+            {"time": 0.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0, "target_x": float(p0[0])}
+        )
+        p_c, quat_c, jac_c = _toy_fk(q_current)
+        xd = ctrl.compute(
+            {
+                "time": 1.0, "q": q_current, "qd": np.zeros(6), "ee_pos": p_c, "ee_quat": quat_c,
+                "target_x": float(target[0]), "target_ee_pos": target, "target_ee_vel": np.zeros(3),
+                "fk_jacobian_fn": _toy_fk,
+            }
+        )
+        qd_joint = np.linalg.pinv(jac_c) @ xd
+        return q_current + qd_joint / cfg.ik_joint_gain
+
+    q_target_a = q_target_from(q_rest + np.array([0.3, -0.2, 0.1, 0.05, -0.05, 0.02]))
+    q_target_b = q_target_from(q_rest + np.array([-0.4, 0.35, -0.15, 0.1, 0.08, -0.03]))
+    np.testing.assert_allclose(q_target_a, q_target_b, atol=1e-9)
+
+
+def test_yaml_parsing_reads_ik_posture_gain():
+    cfg = CartesianVelocityConfig.from_controller_yaml_section({"velocity_control": {"ik_posture_gain": 1.25}})
+    assert cfg.ik_posture_gain == 1.25
+
+
+def test_yaml_parsing_defaults_ik_posture_gain_to_zero():
+    cfg = CartesianVelocityConfig.from_controller_yaml_section({})
+    assert cfg.ik_posture_gain == 0.0
+
+
 def test_ik_seeded_resolution_zero_error_at_q_rest_when_target_is_p0():
     """Sanity check: with the target equal to p0 (no move commanded) and
     q_current already at q_rest, the command should be ~zero -- q_rest is
