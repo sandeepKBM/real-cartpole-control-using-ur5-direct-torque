@@ -686,6 +686,65 @@ def test_ik_posture_gain_pulls_unconstrained_axis_toward_q_rest():
     )
 
 
+def test_ik_posture_gain_scales_with_task_weight_not_absolute():
+    """The actual bug this session found and fixed: a FIXED ik_posture_gain
+    (e.g. 2.0) must pull the free axis back roughly THE SAME AMOUNT
+    regardless of qp_task_weight, because it's now a fraction of task_w,
+    not an absolute QP weight. An earlier absolute-weight version failed
+    this exact property -- confirmed on the real MuJoCo-backed hanging_
+    alpha_0_5 case, sweeping an absolute ik_posture_gain up to 128 barely
+    moved a failing case's outcome once qp_task_weight was ~1.8e8, because
+    128 is negligible next to 1.8e8 (ratio ~1e-7); the SAME relative
+    ik_posture_gain value at two very different qp_task_weight scales
+    should behave comparably instead."""
+    q_rest = np.zeros(6)
+    p0, quat0, _ = _toy_fk_with_free_rx(q_rest)
+    target = p0.copy()
+    target[0] += 0.05
+
+    def free_axis_pull_fraction(qp_task_weight: float) -> float:
+        cfg_off = CartesianVelocityConfig(
+            reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=10, ik_joint_gain=4.0,
+            pinv_damping=0.05, qp_task_weight=qp_task_weight, ik_posture_gain=0.0,
+        )
+        cfg_on = CartesianVelocityConfig(
+            reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=10, ik_joint_gain=4.0,
+            pinv_damping=0.05, qp_task_weight=qp_task_weight, ik_posture_gain=2.0,
+        )
+
+        def free_axis_q_target(cfg) -> float:
+            ctrl = CartesianVelocityController(cfg)
+            ctrl.reset_from_state(
+                {"time": 0.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0, "target_x": float(p0[0])}
+            )
+            xd = ctrl.compute(
+                {
+                    "time": 1.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0,
+                    "target_x": float(target[0]), "target_ee_pos": target, "target_ee_vel": np.zeros(3),
+                    "fk_jacobian_fn": _toy_fk_with_free_rx,
+                }
+            )
+            return float((xd[3] / 0.6) / cfg.ik_joint_gain)
+
+        off = abs(free_axis_q_target(cfg_off))
+        on = abs(free_axis_q_target(cfg_on))
+        return on / off if off > 1e-12 else 0.0
+
+    # Same relative ik_posture_gain, task_w spanning 4 orders of magnitude
+    # -- the PULL FRACTION (how much closer to q_rest the posture term
+    # gets, relative to posture-off) should land in a comparable range
+    # each time, not collapse toward 1.0 (no effect) as task_w grows,
+    # which is exactly what the old absolute-weight version did.
+    fractions = [free_axis_pull_fraction(tw) for tw in (1.0e2, 1.0e4, 1.0e6)]
+    for frac in fractions:
+        assert frac < 0.9, f"ik_posture_gain should measurably pull the free axis at every task_w scale: {fractions}"
+    # And the fractions should be roughly comparable to each other (within
+    # a factor of ~3), not wildly diverging -- the whole point of scaling
+    # by task_w is that the SAME ik_posture_gain behaves similarly however
+    # large qp_task_weight is.
+    assert max(fractions) / min(fractions) < 3.0, fractions
+
+
 def test_ik_posture_gain_does_not_break_task_convergence():
     """The posture term must not prevent the primary task from converging
     -- with ik_posture_gain on, the x-task (position error) must still be

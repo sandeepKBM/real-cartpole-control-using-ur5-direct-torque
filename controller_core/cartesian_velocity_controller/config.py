@@ -63,16 +63,20 @@ class CartesianVelocityConfig:
     joint_pos_upper: np.ndarray | None = None
     joint_vel_limit_radps: float | None = None
     qp_task_weight: float = 1.0e4
-    # Null-space posture pull toward q_rest inside compute_ik_seeded's
-    # per-iteration Newton-QP solve (added 2026-08-06) -- see modes.py's
-    # compute_ik_seeded for the full rationale. 0.0 (default) reproduces
-    # the exact prior behavior byte-for-byte; a nonzero value pulls
-    # whichever rotation axes are NOT in the task (task_dim_rx/ry when
-    # False, by default) back toward their q_rest value each Newton
-    # iteration, the same mechanism reduced_task_dims already uses via
-    # kp_posture -- kept as a SEPARATE field rather than reusing kp_posture
-    # since the two operate at different scales (kp_posture is a per-cycle
-    # rate gain; this is a per-Newton-iteration position-step fraction).
+    # Posture-pull weight for compute_ik_seeded's per-iteration Newton-QP
+    # solve (added 2026-08-06), expressed as a FRACTION OF qp_task_weight,
+    # not an absolute weight (see modes.py's compute_ik_seeded for the
+    # full rationale, including why an absolute-weight version was tried
+    # first and found to need impractically large values once qp_task_
+    # weight lands anywhere near the 1e8+ range real gain searches
+    # converge toward). 0.0 (default) reproduces the exact prior behavior
+    # byte-for-byte; a nonzero value pulls whichever rotation axes are NOT
+    # in the task (task_dim_rx/ry when False, by default) back toward
+    # their q_rest value, weighted jointly with the task term in the SAME
+    # QP solve -- the same mechanism reduced_task_dims already uses via
+    # kp_posture, kept as a SEPARATE field rather than reusing kp_posture
+    # since the two operate at fundamentally different scales (kp_posture
+    # is a per-cycle rate gain; this is a task_w-relative QP weight).
     ik_posture_gain: float = 0.0
 
     @classmethod

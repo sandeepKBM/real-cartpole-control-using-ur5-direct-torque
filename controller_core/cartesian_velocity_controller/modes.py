@@ -186,7 +186,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..box_qp import solve_box_qp
+from ..box_qp import build_weighted_least_squares_qp, solve_box_qp
 from ..kinematics_utils import swing_twist_axis_error
 from .math_utils import _damped_pinv
 
@@ -257,47 +257,74 @@ def compute_ik_seeded(
 
         # QP-constrained Newton step, replacing the plain damped
         # pseudoinverse: minimize reg*||dq||^2 + task_w*||J_task@dq
-        # - task_err||^2 subject to q_lo <= q_k+dq <= q_hi -- same
-        # weighted-least-squares-via-box-QP pattern torque_task_qp.py
-        # already uses for tau, applied here to dq. task_w large
-        # (default 1e4) makes this closely match the unconstrained
-        # damped pinv AWAY from any joint limit (verified: byte-
-        # compatible when joint_pos_lower/upper are None, i.e. the
-        # box bounds are permissive +-2pi and never bind) while
-        # GUARANTEEING q_k+dq never exceeds a real joint limit when
-        # one is supplied, unlike the plain Newton step, which has
-        # no way to represent that at all.
-        hessian_qp = 2.0 * (reg * np.eye(6, dtype=np.float64) + task_w * (j_task_k.T @ j_task_k))
-        linear_qp = -2.0 * task_w * (j_task_k.T @ task_err_k)
+        # - task_err||^2 [+ (ik_posture_gain*task_w)*||dq-(q_rest-q_k)||^2]
+        # subject to q_lo <= q_k+dq <= q_hi, via the shared
+        # build_weighted_least_squares_qp + solve_box_qp interface
+        # (controller_core/box_qp.py). task_w large (default 1e4) makes
+        # this closely match the unconstrained damped pinv AWAY from any
+        # joint limit (verified: byte-compatible when joint_pos_lower/
+        # upper are None, i.e. the box bounds are permissive +-2pi and
+        # never bind) while GUARANTEEING q_k+dq never exceeds a real
+        # joint limit when one is supplied, unlike the plain Newton step,
+        # which has no way to represent that at all.
+        #
+        # ik_posture_gain (2026-08-06, INTEGRATED into this same QP as of
+        # this date -- see this module's own git history for the original
+        # solve-then-patch nullspace-projected version, replaced rather
+        # than kept alongside this one, per this repo's "reduce ambiguity/
+        # redundancy" direction): fixes a real gap -- the reg*||dq||^2
+        # term alone is the ONLY thing regularizing whatever's outside the
+        # selected task dims (e.g. rx/ry when task_dim_rx/ry are False),
+        # and it's a pure minimum-STEP-norm bias, not a pull toward q_rest
+        # specifically -- with pinv_damping near zero and qp_task_weight
+        # near-infinite (exactly the direction a real gain search pushed
+        # toward, since it sharpens task tracking), that leaves the
+        # unconstrained axes free to drift. Traced directly: rz (the
+        # task-constrained axis) tracked to within 2e-4 rad throughout a
+        # failing episode while rx (unconstrained) grew to 0.25 rad and
+        # tripped the orientation guard alone.
+        #
+        # This integrated formulation (one QP, task + posture terms both
+        # inside the SAME weighted least-squares objective) replaced an
+        # earlier version that solved the task QP alone, THEN added a
+        # separately-computed null-space-projected posture correction
+        # afterward, then re-clipped the combined step -- that version had
+        # an EXACT guarantee of zero task perturbation (via a true
+        # orthogonal null-space projector) but validated poorly against a
+        # real failing case: at the extreme (pinv_damping, qp_task_weight)
+        # a real gain search converged to, solve_box_qp's underlying
+        # linear solve was already at the edge of double-precision
+        # conditioning, and adding a separately-projected correction on
+        # top barely moved the outcome even at posture gains up to 128.
+        # This version's posture weight is added DIRECTLY to the same
+        # hessian the task term populates, which is itself a regularizer
+        # (well-conditioned in every direction, including whatever the
+        # task leaves unconstrained) rather than a correction bolted on
+        # after an already near-singular solve.
+        #
+        # ik_posture_gain is a FRACTION OF task_w, not an absolute weight
+        # (found and fixed the same day it was added): an absolute weight
+        # in a small, easy-to-search range like [0,50] is negligible once
+        # qp_task_weight lands anywhere near the 1e8-1e10 range real
+        # searches converge toward -- confirmed directly, sweeping the
+        # absolute version up to 128 against a real failing case never
+        # moved the peak orientation error past 0.2525 rad (still failing
+        # the 0.25 rad guard), while sweeping the SAME case with weight
+        # comparable to qp_task_weight (i.e. what ik_posture_gain~0.5-5
+        # now means) genuinely fixed it (peak orientation error down to
+        # 0.04-0.21 rad, guard-free). Scaling by task_w makes
+        # ik_posture_gain's effective strength automatically track
+        # wherever qp_task_weight ends up, instead of needing a search
+        # bound spanning many more orders of magnitude than is practical
+        # to sample linearly (0 must remain exactly representable as
+        # "off," which a log-scaled field can't do).
         dq_lo = q_lo - q_k
         dq_hi = q_hi - q_k
-        dq = solve_box_qp(hessian_qp, linear_qp, dq_lo, dq_hi)
-
-        # Null-space posture pull toward q_rest, mirroring compute_reduced_
-        # task_dims' nullspace_posture mechanism -- fixes a real gap found
-        # 2026-08-06 (docs/status trace of a hanging_alpha_0_5 gain-search
-        # failure): the QP's reg*||dq||^2 term is the ONLY thing regularizing
-        # whatever's outside the selected task dims (e.g. rx/ry when task_
-        # dim_rx/ry are False), and it's a pure minimum-STEP-norm bias, not a
-        # pull toward q_rest specifically -- with pinv_damping near zero and
-        # qp_task_weight near-infinite (exactly the direction a real gain
-        # search pushed toward, since it sharpens task tracking), that leaves
-        # the unconstrained axes free to drift to whatever the QP's steps
-        # happen to produce. Traced directly: rz (the task-constrained axis)
-        # tracked to within 2e-4 rad throughout a failing episode while rx
-        # (unconstrained) grew to 0.25 rad and tripped the orientation guard
-        # alone. ik_posture_gain=0.0 (the default) reproduces the exact
-        # prior behavior -- this whole block is skipped, not just a no-op
-        # multiply, so there's no added compute cost when off either.
+        terms = [(j_task_k, task_err_k, task_w)]
         if cfg.ik_posture_gain != 0.0:
-            j_task_pinv_undamped = np.linalg.pinv(j_task_k)
-            nullspace_proj = np.eye(6, dtype=np.float64) - j_task_pinv_undamped @ j_task_k
-            dq_posture = cfg.ik_posture_gain * (nullspace_proj @ (q_rest - q_k))
-            # Re-clip the COMBINED step, not just dq_task, to the same box --
-            # otherwise the posture addition could push q_k+dq past a
-            # supplied joint_pos_lower/upper even though the QP step alone
-            # never would.
-            dq = np.clip(dq + dq_posture, dq_lo, dq_hi)
+            terms.append((np.eye(6, dtype=np.float64), q_rest - q_k, float(cfg.ik_posture_gain) * task_w))
+        hessian_qp, linear_qp = build_weighted_least_squares_qp(terms, reg=reg)
+        dq = solve_box_qp(hessian_qp, linear_qp, dq_lo, dq_hi)
         q_k = q_k + dq
     q_target = q_k
 

@@ -81,8 +81,8 @@ ACTION_FIELDS: tuple[tuple[str, float, float, bool], ...] = (
     # tell us" search the range was widened for.
     ("pinv_damping", 1.0e-7, 1.0, True),
     ("qp_task_weight", 10.0, 1.0e10, True),
-    # ik_posture_gain added 2026-08-06: null-space posture pull toward
-    # q_rest inside compute_ik_seeded's Newton-QP solve (controller_core/
+    # ik_posture_gain added 2026-08-06: posture pull toward q_rest inside
+    # compute_ik_seeded's Newton-QP solve (controller_core/
     # cartesian_velocity_controller/modes.py), fixing a root-caused gap --
     # the search's own found gains push pinv_damping/qp_task_weight toward
     # near-zero-regularization/near-exact-IK, which leaves rotation axes
@@ -90,19 +90,25 @@ ACTION_FIELDS: tuple[tuple[str, float, float, bool], ...] = (
     # default) essentially unconstrained; traced directly on a real
     # hanging_alpha_0_5 failure: rz (task-constrained) tracked to 2e-4 rad
     # while rx (unconstrained) grew to 0.25 rad and alone tripped the
-    # orientation guard. Hand-sweeping ik_posture_gain up to 128 against
-    # that EXACT prior gain vector barely moved the outcome (0.2533 ->
-    # 0.2517, never passing) -- because that vector's extreme pinv_damping/
-    # qp_task_weight already push solve_box_qp's linear system to the edge
-    # of double-precision conditioning (confirmed directly: a well-
-    # conditioned toy case shows the posture mechanism works cleanly, see
-    # tests/unit/test_cartesian_velocity_controller.py). Exposing it here
-    # lets the search find pinv_damping/qp_task_weight/ik_posture_gain
-    # jointly, rather than bolting posture onto an already-pathological
-    # point. 0.0 is a valid, meaningful value (posture off, byte-identical
-    # to before this field existed) -- linear, not log-remapped, unlike
-    # pinv_damping/qp_task_weight.
-    ("ik_posture_gain", 0.0, 50.0, False),
+    # orientation guard.
+    #
+    # Bound revised the SAME day after the first version ([0,50], an
+    # absolute QP weight) was found to have the wrong SCALE: hand-sweeping
+    # it up to 128 against that exact real failure barely moved the
+    # outcome (0.2533 -> 0.2517, never passing), because that gain
+    # vector's qp_task_weight (~1.8e8) makes an absolute weight in [0,50]
+    # utterly negligible by comparison (ratio ~1e-7) -- confirmed directly
+    # by sweeping the OLD absolute semantics up into the 1e8-1e9 range
+    # against the same case, which genuinely fixed it. compute_ik_seeded
+    # now interprets ik_posture_gain as a FRACTION OF qp_task_weight
+    # rather than an absolute weight specifically to remove this scale
+    # dependency: whatever qp_task_weight the search lands on, ik_posture_
+    # gain automatically tracks it. Re-swept against the same real case
+    # with this corrected scaling: a clean, monotonic pass/fail boundary
+    # right around 0.5 (peak orientation error 0.2533 at 0.0 down to
+    # 0.0235 at 10.0, guard-free from ~0.5 onward) -- [0,10] covers this
+    # useful range with room past the boundary on both sides.
+    ("ik_posture_gain", 0.0, 10.0, False),
 )
 ACTION_DIM = len(ACTION_FIELDS)
 OBS_DIM = 12
