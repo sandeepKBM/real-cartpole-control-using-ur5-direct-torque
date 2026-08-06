@@ -419,3 +419,85 @@ def test_yaml_parsing_defaults_when_block_absent():
     assert cfg.task_dim_rz is True
     assert cfg.kp_posture == 1.0
     assert cfg.pinv_damping == 0.005
+
+
+# --------------------------------------------------------------------------- #
+# orientation_error_exact_axis_angle (opt-in, adapted from homestri-ur5e-rl).
+# Unlike the torque lane -- where kp_rot=0 makes the representation irrelevant --
+# kp_rot is nonzero here, so this directly changes the commanded angular
+# velocity every cycle.
+# --------------------------------------------------------------------------- #
+def test_exact_axis_angle_defaults_off():
+    assert CartesianVelocityConfig().orientation_error_exact_axis_angle is False
+
+
+def test_exact_axis_angle_round_trips_through_yaml():
+    cfg = CartesianVelocityConfig.from_controller_yaml_section(
+        {"velocity_control": {"orientation_error_exact_axis_angle": True}}
+    )
+    assert cfg.orientation_error_exact_axis_angle is True
+
+
+def _run_rotated(cfg, theta):
+    """Reset at identity orientation, then evaluate rotated by theta about x."""
+    ctrl = CartesianVelocityController(cfg)
+    ctrl.reset_from_state(_state([0.0, 0.0, 0.0]))
+    rotated = _state([0.0, 0.0, 0.0], ee_quat=(np.cos(theta / 2.0), np.sin(theta / 2.0), 0.0, 0.0))
+    return ctrl.compute(rotated)
+
+
+def test_exact_axis_angle_is_negligible_for_small_rotations():
+    """The two forms agree to O(theta^3); at 0.05 rad they must be ~identical."""
+    base = dict(reduced_task_dims=False)
+    lin = _run_rotated(CartesianVelocityConfig(**base), 0.05)
+    exact = _run_rotated(CartesianVelocityConfig(orientation_error_exact_axis_angle=True, **base), 0.05)
+    np.testing.assert_allclose(np.asarray(lin)[3:], np.asarray(exact)[3:], rtol=1e-3)
+
+
+def test_exact_axis_angle_is_erased_by_the_angular_speed_clamp():
+    """DECISIVE for this lane: the linearized and exact errors are PARALLEL
+    (same axis, different magnitude), so once the angular command saturates on
+    max_ang_speed_radps the two collapse to the identical vector. With default
+    gains (kp_rot=2.0, max_ang_speed_radps=0.5) that happens for any |e_rot|
+    above 0.25 rad -- i.e. throughout this lane's entire >1 rad failure regime,
+    where the representation difference would otherwise have been largest.
+    """
+    theta = 1.4  # deep in the divergence regime
+    base = dict(reduced_task_dims=False)
+    lin = np.asarray(_run_rotated(CartesianVelocityConfig(**base), theta))[3:]
+    exact = np.asarray(
+        _run_rotated(CartesianVelocityConfig(orientation_error_exact_axis_angle=True, **base), theta)
+    )[3:]
+    assert float(np.linalg.norm(lin)) == pytest.approx(0.5, rel=1e-9)  # both at the clamp
+    np.testing.assert_allclose(lin, exact, atol=1e-12)
+
+
+def test_exact_axis_angle_difference_is_bounded_below_the_clamp():
+    """Below saturation the flag can still only move the command a little: the
+    clamp engages at |e_rot|=0.25 rad, and at 0.25 rad the two forms differ by
+    only ~0.3%. So with default gains this flag is bounded at well under 1%
+    influence -- it is not a plausible fix for this lane's divergence.
+    """
+    theta = 0.25  # right at the saturation threshold
+    base = dict(reduced_task_dims=False)
+    lin = np.asarray(_run_rotated(CartesianVelocityConfig(**base), theta))[3:]
+    exact = np.asarray(
+        _run_rotated(CartesianVelocityConfig(orientation_error_exact_axis_angle=True, **base), theta)
+    )[3:]
+    lin_norm, exact_norm = float(np.linalg.norm(lin)), float(np.linalg.norm(exact))
+    assert exact_norm >= lin_norm  # linearized always understates
+    assert (exact_norm - lin_norm) / exact_norm < 0.01
+
+
+def test_exact_axis_angle_does_change_command_when_clamp_is_lifted():
+    """Sanity: the flag is wired up and does something when saturation is not
+    masking it -- otherwise the two tests above would pass trivially."""
+    theta = 1.4
+    base = dict(reduced_task_dims=False, max_ang_speed_radps=1e6)
+    lin = np.asarray(_run_rotated(CartesianVelocityConfig(**base), theta))[3:]
+    exact = np.asarray(
+        _run_rotated(CartesianVelocityConfig(orientation_error_exact_axis_angle=True, **base), theta)
+    )[3:]
+    lin_norm, exact_norm = float(np.linalg.norm(lin)), float(np.linalg.norm(exact))
+    assert exact_norm > lin_norm
+    assert (exact_norm - lin_norm) / exact_norm > 0.02

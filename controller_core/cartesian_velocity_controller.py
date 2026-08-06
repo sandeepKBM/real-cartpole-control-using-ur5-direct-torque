@@ -107,18 +107,55 @@ measured to grow WITHOUT BOUND at dx=0.02m -- from ~0.10 rad at reanchor
 time to ~0.98 rad by t=6s, accelerating, not linear -- while dx=0.04m at
 the SAME pose is completely stable (identical orientation error at
 duration=3s and duration=10s, zero growth). This dx-dependent bifurcation
-between "genuinely stable" and "unboundedly diverging" is NOT understood --
-two root-cause attempts (damped-vs-undamped pinv for the projector; the
-reanchor no-op bug) each fixed a REAL, separately-verified problem but
-neither explains or fixes this. Suspected but NOT confirmed: the
-quaternion-based orientation-error vector (orientation_error_vec_wxyz) may
-not cleanly separate "the rz component" from rx/ry for large compound
-rotations, so holding rz via e_rot[2] could itself be coupled to (and
-destabilized by) the very rx/ry drift the null-space term is supposed to
-be independent of. DO NOT treat reduced_task_dims=True (the current
-default) as validated for real-hardware use across the full displacement
-range until this is root-caused -- it is only empirically known-stable at
-dx=0.04m at this specific pose, from a 3s and 10s sim check, nothing more.
+between "genuinely stable" and "unboundedly diverging" was ROOT-CAUSED
+2026-08-05 (docs/status/velocity_control_dx_bifurcation_2026-08-05.md); the
+two earlier attempts (damped-vs-undamped pinv for the projector; the reanchor
+no-op bug) each fixed a REAL, separately-verified problem but neither
+explains this one.
+
+Cause: KINEMATIC BRANCH SELECTION near the wrist_2=0 singular surface. A small
+dx does not carry wrist_2 far enough positive, so during the hold phase it
+falls back through zero onto the negative branch and orientation error grows
+without bound; a larger dx clears the surface and stays bounded. This is why
+the SMALLER, apparently easier move is the unstable one -- the behavior is
+genuinely NON-MONOTONE in dx, so stability at one dx implies nothing about a
+smaller one. Boundary measured at dx ~= 0.028m at this pose/timing. Also
+measured: kp_posture modulates the basin of attraction but does not create
+the boundary (low-dx cases still fail at kp_posture=0), while pinv_damping is
+strongly coupled to it (0.005 -> 0.01 collapses the stable basin) -- which is
+why those two are not independently tunable. Reanchor timing was tested and
+ruled out (first reanchor at t=1.072s in every run, stable or unstable).
+
+A separate, still-OPEN suspicion, now addressable: the quaternion-based
+orientation-error vector (orientation_error_vec_wxyz) may not cleanly separate
+"the rz component" from rx/ry for large compound rotations, so holding rz via
+e_rot[2] could itself be coupled to the rx/ry drift the null-space term is
+supposed to be independent of. Since the failure reaches >1 rad, where the
+linearized 2*vec(q_err) understates the true angle by ~5-9%, the opt-in
+orientation_error_exact_axis_angle flag below was added to test exactly that.
+
+RESULT (2026-08-06): that flag CANNOT fix this lane's divergence, for a
+structural reason worth recording rather than re-testing. The linearized and
+exact errors are PARALLEL vectors -- same axis, different magnitude -- so the
+moment w_cmd saturates on max_ang_speed_radps, the norm-scaling collapses both
+to the identical command. With the default gains (kp_rot=2.0,
+max_ang_speed_radps=0.5) saturation begins at |e_rot| = 0.25 rad, i.e.
+throughout the entire >1 rad failure regime where the representation gap would
+otherwise be largest. Below saturation the gap is bounded by its value at the
+threshold, ~0.3%. So the flag's maximum possible influence at default gains is
+well under 1%, and exactly zero where it would have mattered. Kept default-off
+as a tested negative result; it only becomes meaningful if kp_rot is lowered or
+the angular clamp raised. Covered by tests in
+tests/unit/test_cartesian_velocity_controller.py.
+
+This does NOT clear the underlying suspicion about rz/rx-ry separation -- it
+only rules out this particular fix for it.
+
+DO NOT treat reduced_task_dims=True (the current default) as validated for
+real-hardware use across the displacement range: only dx=0.04m at this
+specific pose completes cleanly, dx=0.01-0.03m trips the orientation guard,
+dx=0.05m and above trips the joint-velocity guard, and nothing here has ever
+run on real hardware.
 
 Requires ``jacobian`` (6x6, world-frame [J_pos; J_rot], mj_jacSite's own
 convention) and ``q`` in the state dict. If reduced_task_dims is on and
@@ -135,7 +172,7 @@ from dataclasses import dataclass
 import numpy as np
 from typing import Any
 
-from .kinematics_utils import orientation_error_vec_wxyz
+from .kinematics_utils import orientation_error_vec_axis_angle_wxyz, orientation_error_vec_wxyz
 from .state_types import as_robot_state
 
 
@@ -176,6 +213,17 @@ class CartesianVelocityConfig:
     kp_rot: float = 2.0
     max_lin_speed_mps: float = 0.25
     max_ang_speed_radps: float = 0.5
+    # Use the exact angle*axis orientation error instead of the linearized
+    # 2*vec(q_err). Default OFF (legacy). Unlike the torque lane -- where the
+    # tuned configs run kp_rot=0 so the representation cannot matter -- kp_rot
+    # is NONZERO here, so e_rot directly drives w_cmd every cycle. The two forms
+    # differ by 2*sin(theta/2) vs theta: 0.3% at 0.25 rad but ~9% at 1.4 rad,
+    # and this lane's known failure mode is orientation error growing PAST 1 rad,
+    # i.e. exactly where the linearization is worst. This also directly targets
+    # the suspicion recorded in this module's docstring, that the quaternion
+    # error vector may not cleanly separate rz from rx/ry for large compound
+    # rotations. Adapted from ian-chuang/homestri-ur5e-rl's get_rot_angle.
+    orientation_error_exact_axis_angle: bool = False
     reduced_task_dims: bool = True
     task_dim_rx: bool = False
     task_dim_ry: bool = False
@@ -196,6 +244,9 @@ class CartesianVelocityConfig:
             kp_rot=float(vc.get("kp_rot", 2.0)),
             max_lin_speed_mps=float(vc.get("max_lin_speed_mps", 0.25)),
             max_ang_speed_radps=float(vc.get("max_ang_speed_radps", 0.5)),
+            orientation_error_exact_axis_angle=bool(
+                vc.get("orientation_error_exact_axis_angle", False)
+            ),
             reduced_task_dims=bool(vc.get("reduced_task_dims", True)),
             task_dim_rx=bool(vc.get("task_dim_rx", False)),
             task_dim_ry=bool(vc.get("task_dim_ry", False)),
@@ -272,7 +323,10 @@ class CartesianVelocityController:
         kp_lin = np.array([self.cfg.kp_x, self.cfg.kp_y, self.cfg.kp_z], dtype=np.float64)
         v_cmd = v_ff + kp_lin * pos_err
 
-        e_rot = orientation_error_vec_wxyz(self._quat0, quat)
+        if self.cfg.orientation_error_exact_axis_angle:
+            e_rot = orientation_error_vec_axis_angle_wxyz(self._quat0, quat)
+        else:
+            e_rot = orientation_error_vec_wxyz(self._quat0, quat)
         w_cmd = self.cfg.kp_rot * e_rot
 
         xd_full = np.concatenate([v_cmd, w_cmd]).astype(np.float64)
