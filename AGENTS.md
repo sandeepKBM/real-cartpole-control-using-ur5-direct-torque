@@ -201,13 +201,29 @@ Kinematic-sim findings at the -40deg / wrist_2=0.2-offset pose:
 - Max speed is set by the `max_lin_speed_mps` clamp, **not** `move_duration` (which has no
   effect below ~0.16 s). Measured ceiling ~0.45 m/s before the 3.0 rad/s joint-velocity guard
   trips at this pose.
-- **Unresolved, safety-relevant instability**: with `reduced_task_dims` on, dx=0.04 m is
-  genuinely stable (clean to a 10 s hold, zero orientation growth), but dx=0.02 m — a
-  *smaller*, supposedly easier move — **diverges**, orientation error growing unboundedly
-  during hold to ~1 rad by t=6 s with guards disabled. The dx-dependent bifurcation is **not
-  understood**. dx≥0.06 m fails on the wrist_2 joint-velocity guard.
-- Therefore: **only dx=0.04 m at this one pose is checked. Everything else is unverified and
-  dx=0.02 m is actively known-unsafe.** Do not treat this config as range-validated.
+- **The dx bifurcation — ROOT-CAUSED 2026-08-05** (was "not understood"; full evidence in
+  `docs/status/velocity_control_dx_bifurcation_2026-08-05.md`). It is **kinematic branch
+  selection near the wrist_2=0 singular surface**, not a gain problem: a small dx does not
+  carry `wrist_2` far enough positive, so during hold it falls back through zero onto the
+  negative branch and orientation error grows without bound (>1 rad); a larger dx clears it and
+  stays bounded. That is why the *smaller*, apparently easier move was the unstable one — the
+  behavior is genuinely **non-monotone in dx**, so never infer safety at one dx from a pass at
+  a larger one. Measured boundary ≈ **dx 0.028 m** (bracketed 0.0275–0.02875) at this
+  pose/timing. Reanchor timing was tested and ruled out (first reanchor at t=1.072 s in every
+  run, stable or unstable).
+- **Two tuning consequences, measured**: `kp_posture` modulates the basin of attraction but
+  does not create the boundary (low-dx cases still fail at `kp_posture=0`), while
+  `pinv_damping` is strongly coupled to it — raising it 0.005 → 0.01 collapses the stable basin
+  and pushes both boundary cases onto the bad branch. Direct measured support for this
+  controller's existing "these two are not independently tunable" warning.
+- **Usable envelope is narrower than previously recorded** (1 s move, 125 Hz, guards on): only
+  **dx=0.04 m** completes cleanly; dx=0.01–0.03 trip the orientation guard, and dx=0.05–0.08
+  trip the joint-velocity guard — i.e. the upper bound is **0.05 m, tighter than the 0.06 m**
+  this file previously carried.
+- Therefore: **only dx=0.04 m at this one pose is checked. Everything else is unverified,
+  dx=0.02 m is actively known-unsafe, and the non-monotonicity means interpolation between
+  tested points is not valid.** Do not treat this config as range-validated. Sim-only —
+  kinematic, no hardware.
 
 ## 3. Controller architecture
 
