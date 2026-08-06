@@ -171,6 +171,24 @@ def fitness(
     return -mean_reward
 
 
+def _build_seeded_population(popsize: int, seed_actions: list[np.ndarray], seed: int) -> np.ndarray:
+    """Builds a (popsize*ACTION_DIM, ACTION_DIM) initial population for
+    differential_evolution's ``init`` argument: a full Latin-hypercube
+    sample of [-1,1]^ACTION_DIM (matching the default 'latinhypercube'
+    init scipy would otherwise use), with the first len(seed_actions) rows
+    overwritten by the supplied vectors -- see run_search's seed_actions
+    docstring for why this doesn't narrow the search space. Pure numpy,
+    deliberately factored out of run_search so it's unit-testable without
+    running an actual (slow, mujoco-backed) search."""
+    from scipy.stats.qmc import LatinHypercube
+
+    n_members = popsize * ACTION_DIM
+    population = LatinHypercube(d=ACTION_DIM, seed=seed).random(n=n_members) * 2.0 - 1.0
+    for i, seed_action in enumerate(seed_actions[:n_members]):
+        population[i] = np.clip(np.asarray(seed_action, dtype=np.float64).reshape(ACTION_DIM), -1.0, 1.0)
+    return population
+
+
 def run_search(
     *,
     scenarios: tuple[PoseScenario, ...] = POSE_SCENARIOS,
@@ -182,6 +200,7 @@ def run_search(
     polish: bool = False,
     auto_evaluate: bool = True,
     eval_dx_fractions: tuple[float, ...] = (0.3, 0.6, 0.9, 1.0, 1.1, 1.3, 1.6, 2.0),
+    seed_actions: list[np.ndarray] | None = None,
 ) -> dict:
     """Returns {"gains": {...}, "action": ndarray, "result": OptimizeResult,
     "safety_summary": {...} if auto_evaluate}.
@@ -226,8 +245,26 @@ def run_search(
     environment before running with workers>1 on a shared host -- without
     that, each worker process's own numpy/scipy calls spawn a full-core-
     count BLAS thread pool, and workers*cores threads can blow through a
-    per-user process limit."""
+    per-user process limit.
+
+    seed_actions (added 2026-08-06): known-good action vectors (e.g. a
+    prior search's own result) to seed the initial population WITH,
+    without narrowing the search space around them -- this is
+    deliberately NOT a warm-start-and-shrink-bounds approach (the
+    2026-08-06 session's explicit instruction was "search space should
+    not be constrained... let us search and then see if they hit
+    guardrails"). Instead, the rest of the population is still a full
+    Latin-hypercube sample of the entire [-1,1]^ACTION_DIM box; only
+    len(seed_actions) of the popsize*ACTION_DIM members are overwritten
+    with the supplied vectors, giving differential_evolution's mutation/
+    crossover operators a productive starting point to build from (e.g.
+    exploring nearby pinv_damping/qp_task_weight combinations that might
+    close a known gap) while every other member explores the space
+    exactly as broadly as an unseeded search would."""
     bounds = [(-1.0, 1.0)] * ACTION_DIM
+    init: str | np.ndarray = "latinhypercube"
+    if seed_actions:
+        init = _build_seeded_population(popsize, seed_actions, seed)
     result = differential_evolution(
         fitness,
         bounds,
@@ -238,6 +275,7 @@ def run_search(
         workers=workers,
         polish=polish,
         updating="deferred" if workers != 1 else "immediate",
+        init=init,
     )
     gains = action_to_gains(result.x)
     outcome = {"gains": gains, "action": result.x, "result": result}
@@ -287,7 +325,20 @@ if __name__ == "__main__":
         "run it -- a search result should never be reported without knowing whether it actually "
         "holds up across poses/displacements, not just the narrower dx range the search itself used.",
     )
+    p.add_argument(
+        "--seed-from-json", action="append", default=[], metavar="PATH",
+        help="Path to a prior --output-json result (reads its 'action' field) to seed the initial "
+        "population with -- see run_search's seed_actions docstring. Repeatable to seed with "
+        "several prior results at once. Does NOT narrow the search bounds.",
+    )
     args = p.parse_args()
+
+    seed_actions = None
+    if args.seed_from_json:
+        seed_actions = []
+        for path_str in args.seed_from_json:
+            prior = json.loads(Path(path_str).read_text(encoding="utf-8"))
+            seed_actions.append(np.array(prior["action"], dtype=np.float64))
 
     t0 = time.time()
     outcome = run_search(
@@ -297,6 +348,7 @@ if __name__ == "__main__":
         workers=args.workers,
         polish=args.polish,
         auto_evaluate=not args.no_auto_evaluate,
+        seed_actions=seed_actions,
     )
     elapsed_s = time.time() - t0
 

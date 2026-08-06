@@ -34,8 +34,10 @@ from velocity_gain_tuning.evaluate import evaluate_gains, print_report, summariz
 from velocity_gain_tuning.optimize import (  # noqa: E402
     FAST_MOVE_DURATION_S,
     EpisodeResult,
+    _build_seeded_population,
     fitness,
     run_episode,
+    run_search,
 )
 from velocity_gain_tuning.poses import POSE_SCENARIOS  # noqa: E402
 
@@ -380,6 +382,73 @@ def test_summarize_safety_empty_input():
     assert summary["pass_fraction"] == 0.0
     assert summary["slow_move"]["n_total"] == 0
     assert summary["fast_move"]["n_total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# run_search -- seed_actions population seeding (2026-08-06)
+# ---------------------------------------------------------------------------
+
+
+def test_build_seeded_population_includes_seed_rows_exactly():
+    """Pure-logic unit test for the population-construction helper (kept
+    fast/deterministic on purpose -- earlier tried asserting this via a
+    full run_search() call and comparing the winning action to the seed,
+    but that's fragile: DE's mutation/crossover can and did beat an
+    arbitrary hand-picked seed within a single generation, which says
+    nothing about whether the seed was actually injected. This test
+    isolates just the injection logic instead.)"""
+    seed_actions = [np.array([0.0, 0.0, 1.0, 0.0, 0.0]), np.array([-1.0, 1.0, -1.0, 1.0, -1.0])]
+    popsize = 3
+    population = _build_seeded_population(popsize, seed_actions, seed=0)
+    assert population.shape == (popsize * ACTION_DIM, ACTION_DIM)
+    np.testing.assert_allclose(population[0], seed_actions[0])
+    np.testing.assert_allclose(population[1], seed_actions[1])
+    assert np.all(population >= -1.0) and np.all(population <= 1.0)
+
+
+def test_build_seeded_population_clips_out_of_range_seeds():
+    population = _build_seeded_population(2, [np.array([5.0, -5.0, 0.0, 0.0, 0.0])], seed=0)
+    np.testing.assert_allclose(population[0], [1.0, -1.0, 0.0, 0.0, 0.0])
+
+
+def test_build_seeded_population_truncates_more_seeds_than_population():
+    # popsize=1 -> only ACTION_DIM=5 members total; 6 seed_actions supplied
+    # must not raise or overflow -- extras are silently ignored (documented
+    # in run_search's docstring via seed_actions[:n_members]).
+    seed_actions = [np.zeros(ACTION_DIM) + i for i in range(6)]
+    population = _build_seeded_population(1, seed_actions, seed=0)
+    assert population.shape == (ACTION_DIM, ACTION_DIM)
+
+
+def test_run_search_seed_actions_end_to_end_does_not_raise():
+    # Full-pipeline smoke test (small/fast on purpose): confirms run_search
+    # actually wires seed_actions through to differential_evolution's init=
+    # without error, complementing the pure-logic tests above which cover
+    # the injection details.
+    outcome = run_search(
+        scenarios=(_UNROTATED_SCENARIO,),
+        maxiter=1,
+        popsize=2,
+        seed=0,
+        workers=1,
+        auto_evaluate=False,
+        seed_actions=[np.array([0.0, 0.0, 1.0, 0.0, 0.0])],
+    )
+    assert outcome["action"].shape == (ACTION_DIM,)
+
+
+def test_run_search_without_seed_actions_still_works():
+    # Regression guard: seed_actions=None (the default) must not change
+    # run_search's un-seeded behavior or raise.
+    outcome = run_search(
+        scenarios=(_UNROTATED_SCENARIO,),
+        maxiter=1,
+        popsize=2,
+        seed=0,
+        workers=1,
+        auto_evaluate=False,
+    )
+    assert outcome["action"].shape == (ACTION_DIM,)
 
 
 if __name__ == "__main__":
