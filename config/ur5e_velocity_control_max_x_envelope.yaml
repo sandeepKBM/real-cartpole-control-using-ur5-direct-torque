@@ -1,0 +1,125 @@
+# MAX X-ENVELOPE VARIANT, 2026-08-06 -- config/ur5e_velocity_control.yaml with ONLY
+# max_lin_speed_mps raised 0.25 -> 2.0 (a COMMAND clamp, not a safety guard; all guards
+# unchanged: max_joint_velocity_radps 3.0, max_orientation_error_rad 0.25).
+#
+# Intended for use WITH the hanging start pose, which is where the envelope gain comes from:
+#   --start-q-rad 0.0 -1.791994 0.812668 -1.288057 1.570796 0.0     (HANGING_ORIGIN_Q)
+#
+# Measured envelope at that pose vs the -40deg/wrist_2=0.2 default (sim, kinematic):
+#   max clean X distance 0.04m -> 0.18m (4.5x); absolute wall ~0.22m
+#   max clean X speed  ~0.45 -> ~1.70 m/s (3.8x, at move_duration 0.11s for dx=0.10m)
+#   peak |qd| at dx=0.10m: 3.09 (tripping) -> 0.13 rad/s
+# The clamp is 2.0 rather than the ~1.7 m/s measured ceiling so the clamp is not the binding
+# limit; the 3.0 rad/s joint-velocity guard is, deliberately.
+#
+# Evidence: docs/status/x_envelope_pose_breakthrough_2026-08-06.md
+# NOT real-hardware validated. Distance is now limited by the orientation guard, not joint
+# velocity, and kp_posture was measured to have ZERO effect on that limit (1.0 to 10.0).
+# NATIVE RTDE VELOCITY CONTROL (speedL), 2026-08-03 -- fourth
+# hardware/x_transport.py control mode, alongside position/direct_torque/
+# urscript. Uses controller_core/cartesian_velocity_controller.py: a pure
+# P-only resolved-rate Cartesian velocity law with NO dynamics (no gravity
+# comp, no Jacobian, no mass matrix, no torque) -- the robot's own firmware
+# resolves the Cartesian velocity to joint velocities via speedL.
+#
+# Why this exists: UR5e has no native torque interface. Nearly every Y-drift
+# /orientation bug this repo has fought (see AGENTS.md section 3 -- the
+# wrist_2=0 Lambda-decoupling failure, the -45/-40deg Y-drift wall, the
+# hard-constraint QP's missing orientation-restoring mechanism found
+# 2026-08-03) is a consequence of the torque/dynamics modeling those control
+# modes require, not of the transport task itself. speedL sidesteps all of
+# it -- real measured UR5e tracking accuracy on the native servo loop is
+# ~0.7-0.9mm / 0.1-0.3deg RMS, several orders of magnitude tighter than the
+# 30-50mm Y-drift this session spent hours fighting in torque control.
+#
+# The real tradeoff, not fixed by this config: ZERO force compliance. This
+# is only appropriate for pure point-to-point transport / range
+# characterization with no physical pole yet -- NOT for eventual swing-up
+# once a pole is mounted and needs to push back on the end-effector. Keep
+# the torque lane (config/ur5e_mujoco_torque_osc_*.yaml) for that phase.
+#
+# velocity_control.kp_x/kp_y/kp_z/kp_rot are 1/s VELOCITY gains, NOT the
+# impedance controller's N/m FORCE gains -- do not copy those values here,
+# they are dimensionally different. Untuned defaults below (kp=2.0 1/s,
+# i.e. a position error decays with ~0.5s time constant) -- first real
+# values to validate in sim before any real-hardware use.
+#
+# NOT yet real-hardware validated.
+#
+# Range/speed characterization (2026-08-03, kinematic-only sim, see
+# tools/diagnostics/ur5e_velocity_control_kinematic_sim.py) found a real,
+# UNRESOLVED safety-relevant instability: with reduced_task_dims on (the
+# default -- see controller_core/cartesian_velocity_controller.py's module
+# docstring for the full story), dx=0.04m at this pose is genuinely stable
+# (checked out to a 10s hold with zero orientation growth), but dx=0.02m
+# (a SMALLER, supposedly easier move) diverges -- orientation error grows
+# unboundedly during the hold phase, reaching ~1 rad by t=6s with guards
+# disabled. The dx-dependent bifurcation between stable and diverging is
+# NOT understood. dx>=0.06m fails via the wrist_2 joint-velocity guard
+# (the same kinematic singularity ceiling found for the torque-control
+# lane, just hit slightly differently here). DO NOT treat this config as
+# validated across a range -- only dx=0.04m at this specific pose has been
+# checked and found stable; anything else is unverified, and dx=0.02m is
+# actively known-unsafe.
+#
+# Use with --control-mode velocity and:
+#   --start-q-rad -0.6981317007977318 -0.8353981633974483 -1.2 -0.9853981633974482 0.2 0.0
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  velocity_control:
+    kp_x: 2.0
+    kp_y: 2.0
+    kp_z: 2.0
+    kp_rot: 2.0
+    max_lin_speed_mps: 2.0
+    max_ang_speed_radps: 0.5
+    # reduced_task_dims (default true): the primary task is X/Y/Z/rz only --
+    # rx/ry are dropped from the task pinv resolves directly, and instead
+    # absorb whatever the min-norm+null-space-posture solution needs, same
+    # fix the torque-control lane already validated (dropping rx/ry frees
+    # wrist_2 from being driven back toward its kinematic singularity).
+    # kp_posture/pinv_damping tune the null-space secondary objective (see
+    # controller_core/cartesian_velocity_controller.py's module docstring
+    # for the full sweep that picked these two values together -- they are
+    # NOT independently tunable, damping this small is what makes
+    # kp_posture actually effective instead of numerically unstable).
+    reduced_task_dims: true
+    task_dim_rx: false
+    task_dim_ry: false
+    task_dim_rz: true
+    kp_posture: 1.0
+    pinv_damping: 0.005
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.05
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
