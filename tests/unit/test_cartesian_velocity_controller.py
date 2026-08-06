@@ -477,3 +477,115 @@ def test_yaml_parsing_defaults_when_block_absent():
     assert cfg.task_dim_rz is True
     assert cfg.kp_posture == 1.0
     assert cfg.pinv_damping == 0.005
+
+
+# --------------------------------------------------------------------------- #
+# split_base_wrist_task / ik_seeded_resolution -- mutual exclusivity, and
+# ik_seeded_resolution's key property (path-independence, the actual fix for
+# reduced_task_dims'/split_base_wrist_task's multistability -- see this
+# module's own module docstring, and controller_core/cartesian_velocity_
+# controller.py's, for the full investigation this resolves).
+# --------------------------------------------------------------------------- #
+def test_more_than_one_resolution_mode_raises():
+    cfg = CartesianVelocityConfig(reduced_task_dims=True, split_base_wrist_task=True)
+    ctrl = CartesianVelocityController(cfg)
+    ctrl.reset_from_state(_state([0.0, 0.0, 0.0]))
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ctrl.compute(_state([0.0, 0.0, 0.0], target_ee_pos=[0.01, 0.0, 0.0], jacobian=np.eye(6)))
+
+
+def test_ik_seeded_resolution_without_fk_fn_raises():
+    cfg = CartesianVelocityConfig(reduced_task_dims=False, ik_seeded_resolution=True)
+    ctrl = CartesianVelocityController(cfg)
+    ctrl.reset_from_state(_state([0.0, 0.0, 0.0]))
+    with pytest.raises(ValueError, match="fk_jacobian_fn"):
+        ctrl.compute(_state([0.0, 0.0, 0.0], target_ee_pos=[0.01, 0.0, 0.0]))
+
+
+def _toy_fk(q: np.ndarray):
+    """A deterministic, nontrivial (non-block-diagonal) toy forward-
+    kinematics + Jacobian function for testing ik_seeded_resolution without
+    needing MuJoCo -- controller_core stays simulator-independent, so the
+    real fk_jacobian_fn always comes from the caller (see hardware/
+    velocity_transport.py / tools/diagnostics/ur5e_velocity_control_
+    kinematic_sim.py for the real MuJoCo-backed versions)."""
+    q = np.asarray(q, dtype=np.float64).reshape(6)
+    pos = q[0:3].copy() + 0.05 * q[3:6]
+    quat = rotvec_to_quat_wxyz(0.3 * q[3:6])
+    jac = np.eye(6) + 0.1 * np.sin(q).reshape(1, 6) * np.ones((6, 1))
+    return pos, quat, jac
+
+
+def test_ik_seeded_resolution_q_target_is_path_independent():
+    """The actual property this mode exists to guarantee: the joint-space
+    target the controller drives toward is a deterministic function of ONLY
+    (q_rest, target) -- recovering it from two completely different current
+    joint configurations (simulating two different move histories arriving
+    at the same moment) must give the identical result, unlike reduced_
+    task_dims'/split_base_wrist_task's rate-integrated null-space walks,
+    which are provably path-dependent (see the module docstring's
+    multistability findings)."""
+    cfg = CartesianVelocityConfig(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=8, ik_joint_gain=4.0, pinv_damping=0.01,
+    )
+    q_rest = np.zeros(6)
+    p0, quat0, _ = _toy_fk(q_rest)
+    target = p0.copy()
+    target[0] += 0.05
+
+    def q_target_from(q_current: np.ndarray) -> np.ndarray:
+        ctrl = CartesianVelocityController(cfg)
+        ctrl.reset_from_state(
+            {"time": 0.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0, "target_x": float(p0[0])}
+        )
+        p_c, quat_c, jac_c = _toy_fk(q_current)
+        xd = ctrl.compute(
+            {
+                "time": 1.0,
+                "q": q_current,
+                "qd": np.zeros(6),
+                "ee_pos": p_c,
+                "ee_quat": quat_c,
+                "target_x": float(target[0]),
+                "target_ee_pos": target,
+                "target_ee_vel": np.zeros(3),
+                "fk_jacobian_fn": _toy_fk,
+            }
+        )
+        qd_joint = np.linalg.pinv(jac_c) @ xd
+        return q_current + qd_joint / cfg.ik_joint_gain
+
+    q_target_a = q_target_from(q_rest + np.array([0.3, -0.2, 0.1, 0.05, -0.05, 0.02]))
+    q_target_b = q_target_from(q_rest + np.array([-0.4, 0.35, -0.15, 0.1, 0.08, -0.03]))
+    np.testing.assert_allclose(q_target_a, q_target_b, atol=1e-9)
+
+
+def test_ik_seeded_resolution_zero_error_at_q_rest_when_target_is_p0():
+    """Sanity check: with the target equal to p0 (no move commanded) and
+    q_current already at q_rest, the command should be ~zero -- q_rest is
+    already the exact solution."""
+    cfg = CartesianVelocityConfig(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=8, ik_joint_gain=4.0, pinv_damping=0.0,
+    )
+    q_rest = np.zeros(6)
+    p0, quat0, _ = _toy_fk(q_rest)
+    ctrl = CartesianVelocityController(cfg)
+    ctrl.reset_from_state(
+        {"time": 0.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0, "target_x": float(p0[0])}
+    )
+    xd = ctrl.compute(
+        {
+            "time": 1.0,
+            "q": q_rest,
+            "qd": np.zeros(6),
+            "ee_pos": p0,
+            "ee_quat": quat0,
+            "target_x": float(p0[0]),
+            "target_ee_pos": p0,
+            "target_ee_vel": np.zeros(3),
+            "fk_jacobian_fn": _toy_fk,
+        }
+    )
+    np.testing.assert_allclose(xd, np.zeros(6), atol=1e-8)

@@ -104,7 +104,7 @@ def run_x_transport_velocity(
     velocity_cfg = CartesianVelocityConfig.from_controller_yaml_section(cfg.get("controller", {}) or {})
     controller = CartesianVelocityController(velocity_cfg)
     local_dyn: LocalMujocoDynamics | None = None
-    if velocity_cfg.reduced_task_dims:
+    if velocity_cfg.reduced_task_dims or velocity_cfg.split_base_wrist_task or velocity_cfg.ik_seeded_resolution:
         local_dyn = LocalMujocoDynamics()
 
     monitor = CartesianMoveMonitor(
@@ -199,7 +199,13 @@ def run_x_transport_velocity(
                 "target_ee_pos": target_ee_pos,
                 "target_ee_vel": target_ee_vel,
             }
-            if local_dyn is not None:
+            if velocity_cfg.ik_seeded_resolution and local_dyn is not None:
+                # ik_seeded_resolution's compute() branch never reads
+                # state["jacobian"] (only fk_jacobian_fn, called repeatedly
+                # at intermediate IK-iteration configurations) -- skip the
+                # otherwise-wasted extra mj_forward call for the current q.
+                robot_state["fk_jacobian_fn"] = local_dyn.fk_and_jacobian
+            elif local_dyn is not None:
                 robot_state["jacobian"] = local_dyn.jacobian(link_state.q)
             xd_cmd = controller.compute(robot_state)
 

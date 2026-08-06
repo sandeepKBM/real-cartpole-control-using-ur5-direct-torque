@@ -62,6 +62,26 @@ class LocalMujocoDynamics:
         jacobian, _ = self.jacobian_and_mass_matrix(q)
         return jacobian
 
+    def fk_and_jacobian(self, q: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(ee_pos, ee_quat_wxyz, jacobian) at an ARBITRARY q -- one
+        mj_forward pass. Used as CartesianVelocityConfig.ik_seeded_
+        resolution's fk_jacobian_fn callback: that mode needs to evaluate
+        forward kinematics at intermediate IK-iteration configurations, not
+        just the robot's actual current q, which jacobian_and_mass_matrix
+        alone doesn't expose (it only returns J/M, no pose)."""
+        q_arr = np.asarray(q, dtype=np.float64).reshape(self.n_joints)
+        self.data.qpos[: self.n_joints] = q_arr
+        self._mujoco.mj_forward(self.model, self.data)
+        pos = np.asarray(self.data.site_xpos[self.site_id], dtype=np.float64).copy()
+        quat = np.zeros(4, dtype=np.float64)
+        self._mujoco.mju_mat2Quat(quat, self.data.site_xmat[self.site_id])
+
+        jacp = np.zeros((3, self.model.nv), dtype=np.float64)
+        jacr = np.zeros((3, self.model.nv), dtype=np.float64)
+        self._mujoco.mj_jacSite(self.model, self.data, jacp, jacr, self.site_id)
+        jacobian = np.vstack([jacp[:, : self.n_joints], jacr[:, : self.n_joints]]).astype(np.float64)
+        return pos, quat, jacobian
+
     def jacobian_and_mass_matrix(self, q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         q_arr = np.asarray(q, dtype=np.float64).reshape(self.n_joints)
         self.data.qpos[: self.n_joints] = q_arr

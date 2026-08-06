@@ -115,33 +115,73 @@ the posture correction). Fixed by ``swing_twist_axis_error`` (see
 axis-separable for any rotation magnitude, used for all three rows of
 w_cmd instead of the coupled small-angle vector.
 
-**Remaining, NOT further fixable via gain tuning, structural finding
-(2026-08-03)**: with the swing-twist fix, orientation error no longer
-diverges -- it always converges to SOME finite equilibrium. But WHICH
-equilibrium is highly sensitive to the exact displacement, not smooth in
-dx: a fine dx sweep at this pose (0.005 to 0.045m) found settled
-orientation error jumping between "acceptable" (~0.18-0.32 rad at
-dx=0.03-0.04m) and "large" (~0.94-2.0 rad at dx=0.02, 0.025, 0.045m) with
-no smooth trend -- textbook MULTISTABILITY: minimum-norm redundancy
-resolution has multiple basins of attraction, and which one a given
-trajectory falls into depends on its exact path through configuration
-space, not just its endpoint. Confirmed NOT a gain-tuning problem: a
-kp_posture sweep from 0 to 200 left the settled value in each basin
-essentially UNCHANGED (dx=0.02 stayed ~0.94-0.98 across the entire range),
-and at kp_posture>=20 near the more singular displacements (dx=0.045) qd
-blew up to hundreds-to-thousands of rad/s instead. No RL or manual gain
-search over (kp_posture, pinv_damping, kp_rot, ...) can fix this -- the
-issue is WHICH basin the deterministic dynamics fall into, which gain
-magnitude does not change. A real fix would need a fundamentally different
-redundancy-resolution strategy that is not path-history-dependent -- e.g.
-a fresh numerical IK solve toward "nearest to q_rest" each cycle instead
-of incrementally-integrated null-space rate control -- not attempted here.
-DO NOT treat reduced_task_dims=True (the current default) as validated for
-real-hardware use across a displacement range: only specific values (e.g.
-dx=0.03-0.04m at this pose) are empirically known to land in a good basin;
-others (e.g. dx=0.02m, 0.025m, 0.045m at this same pose) are known to
-settle at unsafe orientation error, and there is currently no way to
-predict which without simulating that exact displacement first.
+**Structural finding, NOT fixable via gain tuning, in reduced_task_dims and
+split_base_wrist_task (2026-08-03)**: with the swing-twist fix, orientation
+error no longer diverges -- it always converges to SOME finite equilibrium.
+But WHICH equilibrium is highly sensitive to the exact displacement, not
+smooth in dx: a fine dx sweep at this pose (0.005 to 0.045m, reduced_task_
+dims) found settled orientation error jumping between "acceptable"
+(~0.18-0.32 rad at dx=0.03-0.04m) and "large" (~0.94-2.0 rad at dx=0.02,
+0.025, 0.045m) with no smooth trend -- textbook MULTISTABILITY: minimum-
+norm redundancy resolution has multiple basins of attraction, and which
+one a given trajectory falls into depends on its exact path through
+configuration space, not just its endpoint. Confirmed NOT a gain-tuning
+problem: a kp_posture sweep from 0 to 200 left the settled value in each
+basin essentially UNCHANGED, and at kp_posture>=20 near the more singular
+displacements qd blew up to hundreds-to-thousands of rad/s instead.
+split_base_wrist_task (below) was tried as a structural alternative
+(exact, non-redundant per-joint-group mapping instead of minimum-norm) --
+it DOES eliminate the multistability (smooth, monotonic trend in dx), but
+trades it for uniformly poor orientation holding everywhere (~0.6-1.8 rad
+at every dx tested) because base-joint motion induces real, uncorrected
+rotation (jac[3:6,0:3] has Frobenius norm 1.73 at this pose, a large
+fraction of the full rotation block's own 2.45) that the wrist-only
+correction never accounts for; a follow-up task-priority compensation
+attempt (subtracting the position task's induced rotation from the
+orientation target) made this WORSE, not better (qd spiked past 20,000
+rad/s) -- reported here as a real, verified negative result, not
+speculation.
+
+**Actual fix: ik_seeded_resolution (2026-08-03)**. Neither reduced_task_
+dims/split_base_wrist_task's rate-integrated null-space walk is path-
+independent by construction -- qd is computed from q_CURRENT each cycle,
+so the redundancy resolution has memory of how the arm got there. This
+mode replaces that with a fresh Newton-Raphson IK solve, seeded from
+q_rest EVERY CYCLE (never from q_current), targeting the reduced task
+(selected position + orientation dims) via ik_iterations damped-pinv
+Newton steps -- producing a joint-space target q_target that is a
+deterministic function of ONLY (q_rest, current target pose), with zero
+dependence on path history (verified directly: recovering q_target from
+two completely different starting q_current values, simulating two
+different move histories, gives identical results to 1e-16 -- see
+test_ik_seeded_resolution_q_target_is_path_independent). The commanded
+velocity is then a plain joint-space P-controller (ik_joint_gain) driving
+q_current toward q_target, converted to Cartesian velocity via the FULL
+current Jacobian. Measured at the -40deg/wrist_2=0.2-offset pose: smooth,
+monotonic, PREDICTABLE orientation error growing from 0.04 rad (dx=0.005m)
+to 0.41 rad (dx=0.05m), with near-perfect X-tracking (>99.8%) throughout
+-- a precise, repeatable safety boundary at dx~0.029m (0.2432 rad, passes)
+vs. dx~0.03m (0.2500 rad, fails), not a chaotic jump between adjacent
+values the way reduced_task_dims showed. Compute cost measured negligible:
+~0.033ms per fk_jacobian_fn call, ~0.23ms for a full 6-iteration solve --
+~3% of the 8ms/125Hz real-time budget.
+
+Requires ``state['fk_jacobian_fn']``: a callable ``q -> (ee_pos, ee_quat,
+jacobian)`` usable at ARBITRARY q (not just the current one) -- controller_
+core stays simulator-independent (numpy only), so this callable must come
+from the caller (hardware/velocity_transport.py and tools/diagnostics/
+ur5e_velocity_control_kinematic_sim.py both wire a MuJoCo-backed version;
+hardware/local_dynamics.py::LocalMujocoDynamics.fk_and_jacobian is the
+real-hardware implementation). Mutually exclusive with reduced_task_dims
+and split_base_wrist_task (at most one of the three may be on).
+
+DO NOT treat reduced_task_dims=True (the current default) or
+split_base_wrist_task as validated for real-hardware use across a
+displacement range -- both have real, verified failure modes described
+above. ik_seeded_resolution is the one mode with a predictable, monotonic
+safety boundary measured in sim; it has NOT yet been tried on real
+hardware, and the default is still reduced_task_dims=True pending a
+decision to promote ik_seeded_resolution (not done unilaterally here).
 
 Requires ``jacobian`` (6x6, world-frame [J_pos; J_rot], mj_jacSite's own
 convention) and ``q`` in the state dict. If reduced_task_dims is on and
@@ -208,6 +248,10 @@ class CartesianVelocityConfig:
     posture_reanchor_on_settle: bool = True
     reanchor_pos_tol_m: float = 0.002
     reanchor_settle_cycles: int = 10
+    split_base_wrist_task: bool = False
+    ik_seeded_resolution: bool = False
+    ik_iterations: int = 6
+    ik_joint_gain: float = 4.0
 
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianVelocityConfig":
@@ -228,6 +272,10 @@ class CartesianVelocityConfig:
             posture_reanchor_on_settle=bool(vc.get("posture_reanchor_on_settle", True)),
             reanchor_pos_tol_m=float(vc.get("reanchor_pos_tol_m", 0.002)),
             reanchor_settle_cycles=int(vc.get("reanchor_settle_cycles", 10)),
+            split_base_wrist_task=bool(vc.get("split_base_wrist_task", False)),
+            ik_seeded_resolution=bool(vc.get("ik_seeded_resolution", False)),
+            ik_iterations=int(vc.get("ik_iterations", 6)),
+            ik_joint_gain=float(vc.get("ik_joint_gain", 4.0)),
         )
 
 
@@ -317,7 +365,115 @@ class CartesianVelocityController:
 
         xd_full = np.concatenate([v_cmd, w_cmd]).astype(np.float64)
 
-        if self.cfg.reduced_task_dims:
+        modes_on = sum([self.cfg.reduced_task_dims, self.cfg.split_base_wrist_task, self.cfg.ik_seeded_resolution])
+        if modes_on > 1:
+            raise ValueError(
+                "reduced_task_dims, split_base_wrist_task, and ik_seeded_resolution "
+                "are mutually exclusive -- enable at most one."
+            )
+
+        if self.cfg.ik_seeded_resolution:
+            fk_jacobian_fn = state.get("fk_jacobian_fn")
+            if fk_jacobian_fn is None:
+                raise ValueError(
+                    "CartesianVelocityConfig.ik_seeded_resolution=True requires "
+                    "state['fk_jacobian_fn'], a callable q -> (ee_pos, ee_quat, jacobian) "
+                    "usable at ARBITRARY q, not just the current one -- controller_core "
+                    "stays simulator-independent, so this must be supplied by the caller "
+                    "(e.g. a MuJoCo-backed forward-kinematics wrapper), not built in here."
+                )
+            q_current = np.asarray(st["q"], dtype=np.float64).reshape(6)
+            rot_flags = [self.cfg.task_dim_rx, self.cfg.task_dim_ry, self.cfg.task_dim_rz]
+            selected = [0, 1, 2] + [3 + i for i, on in enumerate(rot_flags) if on]
+
+            # Fresh Newton-Raphson IK solve SEEDED FROM q_rest every cycle --
+            # NOT from q_current. This is the actual fix for reduced_task_dims'
+            # path-dependent multistability (see this class's module
+            # docstring): q_target is a deterministic function of ONLY
+            # (p_des, q_rest) -- the same target position always produces
+            # the same q_target, regardless of how the arm got to its
+            # current configuration, because the solve never looks at
+            # q_current at all. This trades per-cycle compute cost (up to
+            # ik_iterations extra forward-kinematics/Jacobian evaluations)
+            # for eliminating the redundancy-resolution history-dependence
+            # that made reduced_task_dims' and split_base_wrist_task's rate-
+            # integrated null-space walks unpredictable.
+            q_k = self._q_rest.copy()
+            for _ in range(max(int(self.cfg.ik_iterations), 1)):
+                p_k, quat_k, jac_k = fk_jacobian_fn(q_k)
+                p_k = np.asarray(p_k, dtype=np.float64).reshape(3)
+                quat_k = np.asarray(quat_k, dtype=np.float64).reshape(4)
+                jac_k = np.asarray(jac_k, dtype=np.float64).reshape(6, 6)
+                pos_err_k = p_des - p_k
+                rot_err_k = np.array(
+                    [swing_twist_axis_error(self._quat0, quat_k, i) for i in range(3)],
+                    dtype=np.float64,
+                )
+                task_err_full_k = np.concatenate([pos_err_k, -rot_err_k])
+                j_task_k = jac_k[selected, :]
+                dq = _damped_pinv(j_task_k, self.cfg.pinv_damping) @ task_err_full_k[selected]
+                q_k = q_k + dq
+            q_target = q_k
+
+            qd_joint = self.cfg.ik_joint_gain * (q_target - q_current)
+            _, _, jac_current = fk_jacobian_fn(q_current)
+            jac_current = np.asarray(jac_current, dtype=np.float64).reshape(6, 6)
+            xd_cmd = (jac_current @ qd_joint).astype(np.float64)
+        elif self.cfg.split_base_wrist_task:
+            jacobian = st.get("jacobian")
+            if jacobian is None:
+                raise ValueError(
+                    "CartesianVelocityConfig.split_base_wrist_task=True requires "
+                    "state['jacobian'] (6x6) every cycle."
+                )
+            jac = np.asarray(jacobian, dtype=np.float64).reshape(6, 6)
+
+            # Position (X/Y/Z) routed through BASE joint columns (shoulder_pan,
+            # shoulder_lift, elbow) ONLY -- wrist columns are structurally
+            # zeroed, an EXACT 3x3 solve (no redundancy at all, unlike
+            # reduced_task_dims' minimum-norm pick over all 6 joints), ported
+            # from XAxisCartesianImpedanceController's split_base_wrist_task
+            # (same evidence: at the wrist_2=0 pose, cond(3x3 pos-rows x
+            # base-cols) ~7.8 (well-conditioned) vs. cond(full 6x6 J) ~7e16
+            # (numerically singular) -- position tracking structurally cannot
+            # be dragged into the wrist singularity because it never routes
+            # through wrist columns at all, regardless of J's conditioning
+            # there).
+            j_pos_task = np.zeros((3, 6), dtype=np.float64)
+            j_pos_task[:, 0:3] = jac[0:3, 0:3]
+            qd_pos = _damped_pinv(j_pos_task, self.cfg.pinv_damping) @ v_cmd
+
+            # Orientation routed through WRIST joint columns (wrist_1/2/3)
+            # ONLY -- qd_pos and qd_rot are disjoint in JOINT space (zero
+            # overlap: qd_pos always has exactly zero in columns 3:6, qd_rot
+            # always has exactly zero in columns 0:3), but that alone does
+            # NOT mean the resulting CARTESIAN rotation is decoupled from
+            # qd_pos: jac[3:6, 0:3] (rotation induced by BASE joint motion)
+            # is NOT structurally zero for a real arm -- measured directly
+            # at this pose: Frobenius norm 1.73, a large fraction of the
+            # full rotation block's own norm 2.45. A first version of this
+            # code solved qd_rot against the RAW target w_cmd and found
+            # uniformly poor orientation holding at every dx tested (0.7-1.8
+            # rad, vs. the 0.25 rad guard) plus degraded X-tracking and qd
+            # blowups at larger dx -- because qd_pos's own base-joint motion
+            # was inducing real, uncorrected rotation on top of whatever
+            # qd_rot was independently trying to hold. Fixed with a task-
+            # PRIORITY sequential solve: qd_rot targets the RESIDUAL
+            # rotation error after subtracting what qd_pos's own motion
+            # already induces, not the raw w_cmd.
+            rot_flags = [self.cfg.task_dim_rx, self.cfg.task_dim_ry, self.cfg.task_dim_rz]
+            rot_selected = [3 + i for i, on in enumerate(rot_flags) if on]
+            qd_rot = np.zeros(6, dtype=np.float64)
+            if rot_selected:
+                w_induced_by_pos = jac[3:6, :] @ qd_pos
+                j_rot_task = np.zeros((len(rot_selected), 6), dtype=np.float64)
+                j_rot_task[:, 3:6] = jac[np.ix_(rot_selected, [3, 4, 5])]
+                xd_rot_task = xd_full[rot_selected] - w_induced_by_pos[[i - 3 for i in rot_selected]]
+                qd_rot = _damped_pinv(j_rot_task, self.cfg.pinv_damping) @ xd_rot_task
+
+            qd = qd_pos + qd_rot
+            xd_cmd = (jac @ qd).astype(np.float64)
+        elif self.cfg.reduced_task_dims:
             jacobian = st.get("jacobian")
             if jacobian is None:
                 raise ValueError(

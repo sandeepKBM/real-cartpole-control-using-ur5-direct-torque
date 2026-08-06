@@ -69,6 +69,27 @@ def _site_pose(dyn: LocalMujocoDynamics, q: np.ndarray) -> tuple[np.ndarray, np.
     return pos, quat
 
 
+def _fk_and_jacobian(dyn: LocalMujocoDynamics, q: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Combined (ee_pos, ee_quat, jacobian) at an ARBITRARY q -- one
+    mj_forward pass, not two -- for CartesianVelocityConfig.
+    ik_seeded_resolution's fk_jacobian_fn callback, which needs to evaluate
+    forward kinematics at intermediate IK-iteration configurations, not
+    just the robot's actual current q."""
+    import mujoco
+
+    q_arr = np.asarray(q, dtype=np.float64).reshape(dyn.n_joints)
+    dyn.data.qpos[: dyn.n_joints] = q_arr
+    mujoco.mj_forward(dyn.model, dyn.data)
+    pos = np.asarray(dyn.data.site_xpos[dyn.site_id], dtype=np.float64).copy()
+    quat = np.zeros(4, dtype=np.float64)
+    mujoco.mju_mat2Quat(quat, dyn.data.site_xmat[dyn.site_id])
+    jacp = np.zeros((3, dyn.model.nv), dtype=np.float64)
+    jacr = np.zeros((3, dyn.model.nv), dtype=np.float64)
+    mujoco.mj_jacSite(dyn.model, dyn.data, jacp, jacr, dyn.site_id)
+    jacobian = np.vstack([jacp[:, : dyn.n_joints], jacr[:, : dyn.n_joints]]).astype(np.float64)
+    return pos, quat, jacobian
+
+
 def run_one(
     *,
     dyn: LocalMujocoDynamics,
@@ -130,6 +151,7 @@ def run_one(
             "target_ee_pos": target_ee_pos,
             "target_ee_vel": target_ee_vel,
             "jacobian": jacobian,
+            "fk_jacobian_fn": lambda q_arb: _fk_and_jacobian(dyn, q_arb),
         }
         xd_cmd = controller.compute(robot_state)
 
