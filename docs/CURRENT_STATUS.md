@@ -1,11 +1,59 @@
 # Current Status
 
-Last updated: 2026-07-29 (Pinocchio Jacobian/speedup, residual observer, RL 4th-attempt evidence).
+Last updated: 2026-08-05 (project goal restated — cartpole swing-up; near-term focus moved to
+native velocity control). Prior update: 2026-07-29 (Pinocchio Jacobian/speedup, residual
+observer, RL 4th-attempt evidence).
 
-## Active Objective
+## The goal (restated 2026-08-05)
+
+**Build a real cartpole on the UR5e.** A ~15 cm pole, free-hinged at the end-effector, swung
+from hanging to inverted and then balanced — the TCP is the "cart". The repo/lab-checkout names
+(`real_Cartpole`, `real-cartpole-control-using-ur5-direct-torque`) are accurate, not vestigial;
+`AGENTS.md` §1 carried a "the folder name is historical" claim from 2026-07-03 until this
+update, and that claim has now been corrected there.
+
+Two phases, and almost everything below belongs to phase 1:
+
+1. **Transport (prerequisite, where all effort has gone).** Move the TCP along a straight X
+   rail at a known range/speed/acceleration, hold pose, don't drift, don't trip guards. A pole
+   cannot be mounted until this is trustworthy on real hardware.
+2. **Swing-up + balance (the goal, not started on hardware).** No physical pole or hinge exists
+   yet. Modelling only, in `tools/swingup/` — see `AGENTS.md` §2a. Headline results: pure
+   X-only pumping **fails** (three independent optimizers plateau at 40-90° of swing; rail
+   length, not torque, is the binding constraint — ~52 m/s² is usable vs. the 10 m/s² tested),
+   while adding vertical pivot motion (X+Z, the Kapitza mechanism) flips the pendulum in the
+   model in 1.29 s at 30 m/s². That 2D result is from ad hoc interactive testing with no
+   committed CLI, no probed Z rail bound, and no validation against the real OSC controller —
+   treat it as a promising direction, not a solved problem.
+
+## Active Objective (near-term focus, changed 2026-08-05)
+
+**Native RTDE velocity control (`speedL`) for transport and rail range/speed
+characterization** — `AGENTS.md` §2b and §4 mode 4. Rationale: the UR5e has no native torque
+interface, and nearly every Y-drift/orientation failure this repo has fought is a consequence
+of the dynamics modelling needed to fake compliance, not of the transport task. `speedL` hands
+Cartesian→joint resolution to the robot's firmware (~0.7-0.9 mm / 0.1-0.3 deg RMS measured
+native tracking, vs. the 30-50 mm Y-drift fought in torque mode).
+
+Velocity lane files: `controller_core/cartesian_velocity_controller.py`,
+`hardware/velocity_transport.py`, `config/ur5e_velocity_control.yaml`,
+`tools/diagnostics/ur5e_velocity_control_kinematic_sim.py`.
+
+**Two hard caveats, both live:**
+- **Zero force compliance.** This lane is valid only while nothing pushes back on the
+  end-effector. It cannot be the swing-up lane; that work returns to the torque stack.
+- **Not real-hardware validated, and not range-validated in sim.** Only dx=0.04 m at the
+  -40deg/wrist_2=0.2-offset pose is checked. dx=0.02 m — a *smaller* move — diverges in
+  orientation during hold (~1 rad by t=6 s with guards disabled) for reasons **not
+  understood**; dx≥0.06 m trips the wrist_2 joint-velocity guard. Max speed ceiling ~0.45 m/s,
+  set by the `max_lin_speed_mps` clamp rather than move duration.
+
+## Long-term lane (still the swing-up lane, no longer the near-term focus)
 
 **MuJoCo UR5e gravity-compensated residual-torque transport** in simulation, using a
-Pinocchio-backed model-based controller (operational-space, tuned). Active lane:
+Pinocchio-backed model-based controller (operational-space, tuned). This remains the only lane
+with force compliance and is therefore the one swing-up must eventually run on — the velocity
+work above does not retire it, and its validated configs/envelope stay intact. Lane:
 
 ```text
 tools/ur5e_mujoco_torque_experiments.py    # rollout engine (owns the step loop)
@@ -297,8 +345,27 @@ the fixed-gain controller. Full evidence, mismatch audit, and per-cell analysis:
 
 ## Next
 
-Nothing is currently blocking or in-progress on the MuJoCo controller/tuning side (OSC config
-above). Open items, none urgent:
+**Current next steps (2026-08-05), in order:**
+1. **Resolve the velocity lane's dx=0.02 m divergence** before anything else in that lane — a
+   smaller move diverging while a larger one is stable is an un-understood bifurcation, and
+   un-understood instability is not something to take to real hardware.
+2. **Sim-validate the velocity lane across a real dx range**, not the single dx=0.04 m point
+   currently checked, then establish the actual rail bound and speed ceiling.
+3. **First real-hardware run of `--control-mode velocity`** — never executed. Small-first, same
+   typed-confirmation discipline as every other mode.
+4. **Swing-up modelling gaps** (`AGENTS.md` §2a): commit a rerunnable CLI for the 2D (X+Z)
+   solver, probe a real Z-axis rail bound, and validate a combined X+Z trajectory against the
+   actual OSC controller rather than a perfect-kinematic-actuator assumption.
+5. **Torque lane, still open**: the -45/-40deg Y-drift wall (root-caused as a structural X/Y
+   authority trade-off, not a gain problem — three independent investigations agree) and
+   real-hardware validation of `friction_feedforward`.
+
+*The bullets below are from the 2026-07-29 update and are partly stale — notably the
+"hardware lane ... has never touched a real robot" item, which was overtaken by the real lab
+sessions of 2026-07-31 / 08-01 / 08-02. Kept for context; verify against `git log` and
+`docs/status/` before acting on any of them.*
+
+Open items from 2026-07-29, none urgent:
 - `outputs/` still holds the pre-purge `outputs/PURGE_LIST.md` DELETE-list directories plus a
   large volume of OSC-tuning-campaign sweep output generated the same day — regenerate the
   purge list to cover them, then the user needs to run the `rm -rf` themselves (blocked from

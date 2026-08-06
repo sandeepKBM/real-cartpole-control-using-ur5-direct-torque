@@ -3,14 +3,31 @@
 Working playbook for agents operating in `/common/users/ss5772/real_Cartpole`.
 Update rule: edit in place, keep these sections, date-stamp material changes. Do not append
 chronological logs here — that pattern was retired 2026-07-03; the old log is preserved at
-`docs/archive/AGENTS_HISTORY.md`. Material hardware refresh: 2026-07-14.
+`docs/archive/AGENTS_HISTORY.md`. Material hardware refresh: 2026-07-14. Goal/focus refresh:
+2026-08-05 (§1 — the cartpole goal is real, not historical; near-term focus moved to velocity
+control).
 
 ## 1. Project reality
 
-- The folder name is historical: this is a **UR5e torque-control workspace**, not a cartpole
-  project.
-- **The active lane is MuJoCo true-torque simulation** using the custom torque-actuated UR5e
-  model. Everything CoppeliaSim is archived (see §6).
+- **The folder name is NOT historical — correcting a claim this file carried from 2026-07-03
+  to 2026-08-05.** The end goal is a **real cartpole built on a UR5e**: a ~15 cm pole,
+  free-hinged at the end-effector, swung from hanging to inverted and then balanced, with the
+  TCP acting as the "cart". The real-lab checkout is named
+  `real-cartpole-control-using-ur5-direct-torque`. See §2a for the swing-up work itself. What
+  *was* true, and is the reason for the earlier claim: no cartpole-specific code existed
+  between the CoppeliaSim archival (2026-07-03) and 2026-08-02, and the physical pole/hinge
+  still does not exist.
+- **Phase framing — read this before assuming what "the task" is.** Everything in §2/§3 (X-axis
+  transport: move the TCP along a straight rail, hold pose, don't drift) is the *prerequisite*
+  phase, not the goal. A pole cannot be mounted until the arm can traverse a known rail at a
+  known speed/acceleration without tripping guards. Swing-up is phase 2 and has not started on
+  hardware.
+- **Near-term focus, as of 2026-08-05: the native velocity-control lane** (`speedL`, §4 mode 4)
+  — see §2b for why and for the standing constraint that it *cannot* be the swing-up lane.
+- **The long-term / swing-up lane is MuJoCo true-torque simulation** using the custom
+  torque-actuated UR5e model — still the centerpiece (§2, §3), still the only lane with force
+  compliance, just not where this week's characterization work is happening. Everything
+  CoppeliaSim is archived (see §6).
 - The repo root **is a git repo** (branch `feature/ur5e-mujoco-torque-control`). `outputs/`,
   `reports/`, `third_party/` are gitignored — changes there are not git-recoverable.
 - Robot model assets live in `vendor/mujoco_menagerie/` (tracked). The full menagerie zoo
@@ -19,7 +36,11 @@ chronological logs here — that pattern was retired 2026-07-03; the old log is 
 - Python env: conda `mujoco_ur5e` (py3.12) per `environment.yml`. The cluster launchers may
   hardcode `/common/users/ss5772/miniforge3/bin/python3`.
 
-## 2. Active lane — MuJoCo true-torque UR5e
+## 2. Torque lane — MuJoCo true-torque UR5e (long-term / swing-up lane)
+
+*Retitled 2026-08-05: this was "Active lane" through 2026-08-03. It is still the only lane with
+force compliance and therefore the lane swing-up (§2a) must run on — but the near-term focus is
+now §2b. Nothing here is deprecated; the validated configs and envelope stand.*
 
 - Model: `assets/ur5e_torque/scene.xml` (includes `assets/ur5e_torque/ur5e_torque.xml`,
   meshes from `vendor/mujoco_menagerie/universal_robots_ur5e/assets`). Real per-body
@@ -59,6 +80,114 @@ commanded-vs-clipped torque and clip counts, which safety guard fired first and 
 `gravity_hold_status`, `phase_at_failure`, `outcome`, `failure_category`. New experiment
 drivers must log through `RunLogger` instead of inventing new summary schemas. Do not trust
 an MP4 or a bare exit code as success evidence — read the run record.
+
+## 2a. The end goal — cartpole swing-up (added 2026-08-05)
+
+Modelling only so far. No physical pole, no hinge, no hardware attempt. `tools/swingup/`:
+- `pendulum_model.py` — analytic Euler-Lagrange EOM for a ~15 cm pole (uniform 50 g rod +
+  200 g lumped bracket mass at radius `r_b` from the pivot) hinged at the end-effector, with
+  the TCP's position treated as a **prescribed** trajectory rather than a free coupled cart.
+  That simplification is justified and stated in the file: the pole (~250 g) is negligible
+  against the arm's measured task-space inertia (~2.3-4.8 kg) and the controller has large
+  acceleration headroom, so pendulum reaction forces do not meaningfully perturb the arm's own
+  tracking. `theta` is measured from hanging-down = 0, inverted = pi.
+  Natural frequency ~1.58-2.1 Hz depending on the (unmeasured) bracket offset — **notably
+  close to the ~2.0-2.1 Hz closed-loop resonance already found in the X-axis controller**;
+  treat that overlap as a live risk, not a coincidence, once a real pole exists.
+- `solve_swingup_trajectory.py` — bang-bang switch-timing optimizer (scipy
+  `differential_evolution`, seeded from a `theta_dot` zero-crossing greedy law).
+
+**Key result so far — pure horizontal (X-only) pumping does not solve this.** Three independent
+strategies (dE/dt-greedy, phase-zero-crossing-greedy, and the seeded global optimizer) all
+plateau around 40-90 degrees of swing and never reach inversion, at both a 0.35 m and an
+assumed 0.60 m rail. **Torque is not the bottleneck** — a real feasibility check (MuJoCo
+M(q)/J(q) at the -45deg pose vs. actual joint torque limits) shows ~52 m/s² is usable, ~5x
+more than the 10 m/s² those runs tested. The rail length is the binding constraint.
+
+**Adding vertical pivot motion solves it in the model.** `theta_ddot_2d`/`simulate_2d` couple
+`a_z` through `sin(theta)` instead of `cos(theta)` — the Kapitza-pendulum mechanism (pump by
+raising/lowering the pivot, as in timing a playground swing), a genuinely different
+energy-injection channel from X pumping, not a restatement of it. A simple greedy two-axis
+energy-pump law flips the pendulum cleanly at `a_max=30 m/s²` in 1.29 s.
+
+Do not over-trust that result — its stated gaps, all still open: no committed/rerunnable CLI
+for the 2D solver (the 1.29 s figure came from ad hoc interactive testing); no real Z-axis rail
+bound has ever been probed (unlike X); no validation against the actual OSC controller tracking
+a combined X+Z trajectory (the model still treats the EE as a perfect kinematic actuator); and
+`r_b`/`b_damping` are guesses because no physical hinge exists to measure.
+
+## 2b. Near-term focus — native velocity control (`speedL`), added 2026-08-03/05
+
+**Why the focus moved here.** The UR5e has no native torque interface. Every torque-control
+mechanism in `controller_core/` (`x_axis_cartesian_impedance.py`, `torque_task_qp.py`,
+`hard_constraint_qp.py`) exists to *fake* compliant force behavior on a robot that is natively
+position/velocity-controlled — and essentially every Y-drift/orientation failure this repo has
+fought (§3: the wrist_2=0 Λ-decoupling failure, the -45/-40deg Y-drift wall, the
+hard-constraint QP's missing orientation-restoring mechanism) is a consequence of *that
+dynamics modelling*, not of the transport task itself. `speedL` hands the Cartesian→joint
+velocity resolution to the robot's own firmware. Measured UR5e native servo tracking is
+~0.7-0.9 mm / 0.1-0.3 deg RMS, orders of magnitude tighter than the 30-50 mm Y-drift the
+torque lane spent sessions fighting.
+
+**Standing constraint — this lane cannot be the swing-up lane.** `speedL` gives **zero force
+compliance**. It is appropriate for the current phase only: point-to-point transport and
+rail range/speed characterization, with nothing pushing back on the end-effector. Once a
+physical pole is mounted and pole-arm interaction forces matter, the work must return to the
+torque lane (§2/§3). Do not let velocity-mode results be read as retiring the torque lane —
+keep `config/ur5e_mujoco_torque_osc_*.yaml` and its validated envelope intact.
+
+Where it lives:
+- `controller_core/cartesian_velocity_controller.py` — `CartesianVelocityConfig` /
+  `CartesianVelocityController`. P-only resolved-rate Cartesian velocity law, no dynamics (no
+  gravity comp, no mass matrix, no torque), but it **does** use the kinematic Jacobian — a
+  deliberate narrowing of the original "no Jacobian at all" design, required by
+  `reduced_task_dims`. Gains are **1/s velocity gains, dimensionally distinct from the
+  impedance controller's N/m force gains — never copy tuned values between them.**
+- `hardware/velocity_transport.py` — `run_x_transport_velocity()`. Shares
+  `position_transport.py`'s **exact** safety stack (`CartesianMoveMonitor`, `DeadlineMonitor`,
+  `StaleStateMonitor`, `EStopLatch`, per-cycle robot safety-status check). New command path,
+  **not** a new safety policy.
+- `hardware/link.py` — `speed_l()`/`speed_stop()`/`verify_speedl_signature()`, mirroring the
+  existing `servoL` defensive signature check. Deliberately *not* verified inside `connect()`
+  (only velocity mode needs it; making it mandatory would break every position-mode test double).
+- `config/ur5e_velocity_control.yaml` — untuned defaults (kp = 2.0 1/s).
+- `tools/diagnostics/ur5e_velocity_control_kinematic_sim.py` — **kinematic-only** sim
+  (`qd = pinv(J) @ xd_cmd`, Euler-integrated `q`; `mj_forward`/`mj_jacSite` only, no `mj_step`,
+  no torque, no mass matrix). This is the correct category of sim for `speedL`, since real
+  `speedL` is resolved by firmware IK, not rigid-body dynamics. Known simplification stated in
+  the file: plain Moore-Penrose `pinv`, not the damped/singularity-robust IK real UR firmware
+  likely uses — near a singularity this sim's `qd` can spike higher than the real arm's would.
+
+`reduced_task_dims` (default **on**): a first version P-held all three rotation axes, which
+capped safe X range at ~0.047 m via the **same** wrist_2=0 singularity the torque lane hit —
+holding full 3D orientation while translating purely in X drives wrist_2 back toward zero
+(cond(J) 29→275 over ~0.047 m). A genuine kinematic reachability constraint of this pose/task
+pair, independent of control law, not fixable by retuning. Fix mirrors the torque lane's:
+build `J_task` from the enabled rows only (x/y/z + rz; rx/ry off), solve `qd = pinv(J_task) @
+xd_task`, then project back through the **full** J so the 6D vector sent to `speedL` reflects
+real resulting motion rather than a fabricated zero. Note explicitly: zeroing `wx`/`wy` is
+**not** equivalent to dropping them — commanding zero angular velocity is still a rank-6
+constraint and drives wrist_2 the same way. Minimum-norm `pinv` alone was also tried and found
+insufficient (rx/ry drifted enough to trip the 0.25 rad orientation guard even at dx=0.02 m);
+a nullspace-projected posture objective toward `q_rest` was required. `kp_posture` and
+`pinv_damping` were tuned **together and are not independently tunable** — damping that small
+is what makes `kp_posture` effective instead of numerically unstable.
+
+**Validation status — read before trusting this lane. NOT real-hardware validated at all.**
+Kinematic-sim findings at the -40deg / wrist_2=0.2-offset pose:
+- Y-drift and orientation error are negligible across the whole tested range (<0.5 mm,
+  <0.0007 rad) — confirms the premise that velocity control sidesteps the torque lane's
+  Y-drift problem almost entirely.
+- Max speed is set by the `max_lin_speed_mps` clamp, **not** `move_duration` (which has no
+  effect below ~0.16 s). Measured ceiling ~0.45 m/s before the 3.0 rad/s joint-velocity guard
+  trips at this pose.
+- **Unresolved, safety-relevant instability**: with `reduced_task_dims` on, dx=0.04 m is
+  genuinely stable (clean to a 10 s hold, zero orientation growth), but dx=0.02 m — a
+  *smaller*, supposedly easier move — **diverges**, orientation error growing unboundedly
+  during hold to ~1 rad by t=6 s with guards disabled. The dx-dependent bifurcation is **not
+  understood**. dx≥0.06 m fails on the wrist_2 joint-velocity guard.
+- Therefore: **only dx=0.04 m at this one pose is checked. Everything else is unverified and
+  dx=0.02 m is actively known-unsafe.** Do not treat this config as range-validated.
 
 ## 3. Controller architecture
 
@@ -371,12 +500,19 @@ an MP4 or a bare exit code as success evidence — read the run record.
 `hardware/` is the real-UR5e RTDE lane (rewritten 2026-07-07; older lane in
 `archive/superseded/hardware_rtde_v1/`). **Learning map:** `docs/hardware/README.md`.
 
-Three control modes via `hardware/x_transport.py` (`--control-mode`):
+**Four** control modes via `hardware/x_transport.py` (`--control-mode`); the canonical set is
+`hardware/control_mode.py::HARDWARE_CONTROL_MODES`:
 1. **`position`** (default) — `servoL` + optional shadow OSC (`position_transport.py`);
    use on URSim / real arm to test trajectory, safety, logging without live torques.
 2. **`direct_torque`** — Python OSC @ 500 Hz → `directTorque()` (`direct_torque_transport.py`);
    URSim validates the API only (no torque physics); real arm for motion.
 3. **`urscript`** — OSC on PolyScope (`urscript_transport.py`); minimum-latency path.
+4. **`velocity`** (added 2026-08-03) — native RTDE `speedL` (`velocity_transport.py`); no
+   dynamics, firmware resolves Cartesian velocity to joint velocities. **Current near-term
+   focus — full rationale, mechanism, and validation status in §2b.** Zero force compliance,
+   so transport/characterization only, never the swing-up phase. Not real-hardware validated.
+   It reuses `position_transport.py`'s exact safety stack — a new command path, not a new
+   safety policy; hold it to the same guardrails as every other mode.
 
 Core modules:
 - `hardware/safety.py` — `UR5eSafetyLimits`, `ConnectionHealth`, one-way `EStopLatch`,
