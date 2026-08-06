@@ -109,33 +109,32 @@ ACTION_FIELDS: tuple[tuple[str, float, float, bool], ...] = (
     # 0.0235 at 10.0, guard-free from ~0.5 onward) -- [0,10] covers this
     # useful range with room past the boundary on both sides.
     ("ik_posture_gain", 0.0, 10.0, False),
-    # ik_posture_activation_error_rad added 2026-08-06, same day as
-    # ik_posture_gain above -- a real gain search with ik_posture_gain
-    # freely (and correctly-scaled) available STILL converged to 0.0,
-    # because turning it on UNCONDITIONALLY made the aggregate multi-pose
-    # fitness dramatically worse (DE's minimized value -6.8 -> ~19) even
-    # though it fixed the one pose it was built for in isolation -- an
-    # always-active soft pull perturbs every pose's task a little, all
-    # the time, even poses that never needed correcting. Gates
-    # ik_posture_gain to only activate when a real, currently-measured
-    # unconstrained-axis error already exceeds this threshold -- see
-    # controller_core/cartesian_velocity_controller/modes.py for the full
-    # mechanism, including why an earlier version (bounding the internal
-    # per-iteration solve's error relative to q_rest, not the real
-    # measured state) didn't work. Validated directly against the real
-    # failing case (hanging_alpha_0_5, dx=0.2405): a threshold of 0.10
-    # rad fixes it (peak orientation error 0.2533 -> 0.1040, guard-free)
-    # while leaving OTHER poses' peak orientation error byte-identical to
-    # posture-off wherever their own natural error never crosses the
-    # threshold (confirmed for neg40/neg45_wrist2offset at small
-    # displacements), and strictly better than posture-off (never worse)
-    # where it does cross. Bounds chosen so -1.0 (the sentinel every
-    # shorter historical action vector gets padded with) maps to 0.001 --
-    # near-zero, i.e. "trigger almost immediately," faithfully
-    # reproducing every PRIOR vector's actual behavior (posture either
-    # off entirely, or unconditionally active -- both cases padding-
-    # insensitive to this new dimension's exact value).
-    ("ik_posture_activation_error_rad", 0.001, 0.3, False),
+    # ik_posture_activation_joint_dev_rad added 2026-08-06, replaced an
+    # orientation-error-based version the SAME day. That version fixed
+    # hanging_alpha_0_5's -X failure island (a real gain search with it
+    # available found ik_posture_gain=0.816, gate=0.229 rad, and hanging's
+    # pass rate rose from 50% to 84%) but investigating the REMAINING
+    # failures found neg40/neg45_wrist2offset fail via a structurally
+    # DIFFERENT mechanism this orientation-based gate can't also serve:
+    # their joint_velocity_guard trips happen while real orientation error
+    # is still only ~0.05 rad (the failure is q_target's wrist_2 component
+    # itself running away under near-zero regularization, a joint-space
+    # phenomenon, not an orientation one) -- a ~5x mismatch vs hanging's
+    # own ~0.25 rad trigger point, too wide for one global threshold to
+    # serve both. Traced ||q_current - q_rest|| instead: comparable at
+    # both poses' trip points (0.54 vs 0.39 rad) and similar GROWTH RATE
+    # throughout both trajectories -- a genuinely pose-agnostic signal.
+    # Validated directly: gate=0.15 fixes BOTH real failing cases with the
+    # SAME threshold (neg40 dx=0.0464: peak qd 4.586->2.931 rad/s, guard-
+    # free; hanging dx=0.2405: peak orientation 0.2533->0.1877 rad,
+    # guard-free) -- something no orientation-based threshold could do.
+    # Also cheaper: no extra fk_jacobian_fn call needed. Bounds chosen so
+    # -1.0 (the sentinel every shorter historical action vector gets
+    # padded with) maps to 0.02 -- near-zero, i.e. "trigger almost
+    # immediately," faithfully reproducing every PRIOR vector's actual
+    # behavior (posture either off entirely, or unconditionally active --
+    # both cases padding-insensitive to this new dimension's exact value).
+    ("ik_posture_activation_joint_dev_rad", 0.02, 0.6, False),
 )
 ACTION_DIM = len(ACTION_FIELDS)
 OBS_DIM = 12
@@ -334,7 +333,7 @@ class VelocityTransportEnv(gym.Env):
         self._controller.cfg.pinv_damping = gains["pinv_damping"]
         self._controller.cfg.qp_task_weight = gains["qp_task_weight"]
         self._controller.cfg.ik_posture_gain = gains["ik_posture_gain"]
-        self._controller.cfg.ik_posture_activation_error_rad = gains["ik_posture_activation_error_rad"]
+        self._controller.cfg.ik_posture_activation_joint_dev_rad = gains["ik_posture_activation_joint_dev_rad"]
 
         robot_state = {
             "time": self._t_s,
