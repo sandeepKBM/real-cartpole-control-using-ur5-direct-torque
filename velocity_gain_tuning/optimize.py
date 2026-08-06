@@ -348,7 +348,19 @@ if __name__ == "__main__":
         seed_actions = []
         for path_str in args.seed_from_json:
             prior = json.loads(Path(path_str).read_text(encoding="utf-8"))
-            seed_actions.append(np.array(prior["action"], dtype=np.float64))
+            action = np.array(prior["action"], dtype=np.float64)
+            if action.shape[0] < ACTION_DIM:
+                # A prior result from before a new ACTION_FIELDS entry was
+                # added (e.g. ik_posture_gain, 2026-08-06) -- pad with -1.0
+                # (each field's own lower-bound action value) for the
+                # missing trailing dimensions, the only faithful
+                # reinterpretation of a vector from before that dimension
+                # existed (for ik_posture_gain specifically, -1.0 maps to
+                # 0.0, i.e. "off", reproducing the historical vector's
+                # original behavior byte-for-byte).
+                pad = np.full(ACTION_DIM - action.shape[0], -1.0)
+                action = np.concatenate([action, pad])
+            seed_actions.append(action)
 
     t0 = time.time()
     outcome = run_search(
