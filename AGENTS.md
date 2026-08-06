@@ -594,6 +594,14 @@ Do-not-recreate (gravity/dynamics bugs, still relevant):
   are added — don't treat it as a gate, just a sanity baseline).
 - Before long training/sweeps, run the tiny smoke first (`tests/mujoco/test_ur5e_mujoco_torque.py`
   covers model-load and a tiny move-hold subprocess run).
+- **New modules/packages ship with pytest coverage, no exceptions (2026-08-06).** Manual/inline
+  smoke checks during development are fine as a first pass but are not a substitute — every new
+  package under `controller_core/`, `hardware/`, `simulation/`, or a sibling top-level package
+  (e.g. `velocity_gain_tuning/`, `rl_gain_scheduling/`) needs real `tests/` coverage (unit-level
+  where the logic is pure-numpy/deterministic; a `mujoco`-marked smoke test where it isn't)
+  before the work is considered done, not just before it's committed. Do not skimp on this to
+  save time — a documented gap ("no formal pytest coverage yet") is a standing TODO, not an
+  acceptable resting state.
 
 ## 6. Archived lanes
 

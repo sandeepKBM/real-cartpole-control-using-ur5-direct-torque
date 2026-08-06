@@ -1,0 +1,392 @@
+"""Tests for velocity_gain_tuning/ -- the independent differential_evolution
+gain search + multi-pose evaluation gym for
+controller_core.cartesian_velocity_controller's ik_seeded_resolution mode.
+
+Added 2026-08-06 per AGENTS.md sec 5's "new modules/packages ship with
+pytest coverage" rule -- this package previously had only manual/inline
+smoke checks. Particular emphasis on the fast-move (FAST_MOVE_DURATION_S)
+stress-testing dimension added the same day: two real gain searches run
+before that fix used ONLY the default (slow, 1.0s) move_duration and
+missed a real, dangerous gap (a found gain vector produced |qd|~4.7 rad/s,
+over the 3.0 rad/s guard, at a fast move) -- these tests exist specifically
+so that gap-closing mechanism can't silently regress.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from velocity_gain_tuning.envs.velocity_transport_env import (  # noqa: E402
+    ACTION_DIM,
+    ACTION_FIELDS,
+    OBS_DIM,
+    VelocityTransportEnv,
+    VelocityTransportEnvConfig,
+    action_to_gains,
+)
+from velocity_gain_tuning.evaluate import evaluate_gains, print_report, summarize_safety  # noqa: E402
+from velocity_gain_tuning.optimize import (  # noqa: E402
+    FAST_MOVE_DURATION_S,
+    EpisodeResult,
+    fitness,
+    run_episode,
+)
+from velocity_gain_tuning.poses import POSE_SCENARIOS  # noqa: E402
+
+# The exact gain vector found by this session's second (widened-bounds) real
+# gain search -- outputs/velocity_gain_tuning/search_result_widened_20260806_023900.json.
+# Historically significant: this is the vector whose fast-move unsafety
+# (|qd|=4.74 rad/s at move_duration_s=0.01, guard=3.0) motivated adding
+# FAST_MOVE_DURATION_S stress-testing at all. Re-verified directly against
+# THIS test's own scenario/dx below (deterministic, checked 3x across fresh
+# processes): at unrotated_wrist2offset, dx=0.0245 (0.5x its max_dx_hint_m),
+# move_duration_s=FAST_MOVE_DURATION_S, it trips joint_velocity_guard at
+# |qd|=3.0805 rad/s.
+_SEARCH2_ACTION = np.array(
+    [-0.6386717612031976, 0.5023040867170563, 0.5575301222016413, -0.959391338891284, 0.9906856414248031]
+)
+_UNROTATED_SCENARIO = POSE_SCENARIOS[1]
+assert _UNROTATED_SCENARIO.name == "unrotated_wrist2offset"
+
+
+# ---------------------------------------------------------------------------
+# action_to_gains
+# ---------------------------------------------------------------------------
+
+
+def test_action_to_gains_bounds_at_extremes():
+    lo_gains = action_to_gains(np.full(ACTION_DIM, -1.0))
+    hi_gains = action_to_gains(np.full(ACTION_DIM, 1.0))
+    for name, lo, hi, _is_log in ACTION_FIELDS:
+        assert lo_gains[name] == pytest.approx(lo, rel=1e-9)
+        assert hi_gains[name] == pytest.approx(hi, rel=1e-9)
+
+
+def test_action_to_gains_midpoint_linear_vs_log():
+    mid_gains = action_to_gains(np.zeros(ACTION_DIM))
+    for name, lo, hi, is_log in ACTION_FIELDS:
+        if is_log:
+            # Geometric mean for a log-remapped field.
+            assert mid_gains[name] == pytest.approx(np.sqrt(lo * hi), rel=1e-6)
+        else:
+            assert mid_gains[name] == pytest.approx((lo + hi) / 2.0, rel=1e-9)
+
+
+def test_action_to_gains_clips_out_of_range():
+    over = action_to_gains(np.full(ACTION_DIM, 5.0))
+    under = action_to_gains(np.full(ACTION_DIM, -5.0))
+    hi_gains = action_to_gains(np.full(ACTION_DIM, 1.0))
+    lo_gains = action_to_gains(np.full(ACTION_DIM, -1.0))
+    for name, _lo, _hi, _is_log in ACTION_FIELDS:
+        assert over[name] == pytest.approx(hi_gains[name], rel=1e-9)
+        assert under[name] == pytest.approx(lo_gains[name], rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# VelocityTransportEnv
+# ---------------------------------------------------------------------------
+
+
+def test_env_reset_and_step_shapes():
+    env = VelocityTransportEnv(VelocityTransportEnvConfig())
+    obs, info = env.reset(seed=0, options={"scenario": _UNROTATED_SCENARIO, "target_x_delta_m": 0.01})
+    assert obs.shape == (OBS_DIM,)
+    assert obs.dtype == np.float32
+    assert np.all(np.isfinite(obs))
+    assert info["scenario"] == "unrotated_wrist2offset"
+    assert info["target_x_delta_m"] == pytest.approx(0.01)
+
+    action = env.action_space.sample()
+    obs, reward, terminated, truncated, info = env.step(action)
+    assert obs.shape == (OBS_DIM,)
+    assert isinstance(reward, float)
+    assert isinstance(terminated, bool)
+    assert isinstance(truncated, bool)
+    for key in (
+        "x_error", "orientation_error", "max_abs_qd_radps", "orthogonal_drift_m", "guard_reason",
+        "achieved_x_delta_m", "scenario",
+    ):
+        assert key in info
+
+
+def test_env_reset_respects_explicit_options():
+    env = VelocityTransportEnv(VelocityTransportEnvConfig())
+    env.reset(
+        seed=0,
+        options={"scenario": _UNROTATED_SCENARIO, "target_x_delta_m": 0.017, "move_duration_s": 0.5},
+    )
+    assert env._scenario_name == "unrotated_wrist2offset"
+    assert env._target_x_delta_m == pytest.approx(0.017)
+    assert env._move_duration_s == pytest.approx(0.5)
+    np.testing.assert_allclose(env._q, _UNROTATED_SCENARIO.q0)
+
+
+def test_env_step_extreme_gains_can_trip_a_guard():
+    # Not asserting WHICH guard (that's covered precisely by the real-vector
+    # regression test below) -- just that the guard machinery is reachable
+    # via step() at all, with a deliberately hostile action/scenario/dx.
+    env = VelocityTransportEnv(VelocityTransportEnvConfig())
+    env.reset(
+        seed=0,
+        options={"scenario": _UNROTATED_SCENARIO, "target_x_delta_m": 0.0049, "move_duration_s": FAST_MOVE_DURATION_S},
+    )
+    terminated = truncated = False
+    info = {}
+    for _ in range(400):
+        obs, reward, terminated, truncated, info = env.step(_SEARCH2_ACTION)
+        if terminated or truncated:
+            break
+    assert terminated, "expected the hostile action/pose/dx combination to trip a safety guard"
+    assert info["guard_reason"] is not None
+    assert reward < 0.0  # guard_trip_penalty dominates
+
+
+# ---------------------------------------------------------------------------
+# run_episode / FAST_MOVE_DURATION_S mechanism
+# ---------------------------------------------------------------------------
+
+
+def test_run_episode_move_duration_field_defaults_to_env_cfg():
+    env = VelocityTransportEnv(VelocityTransportEnvConfig())
+    action = np.zeros(ACTION_DIM)
+    result = run_episode(env, action, scenario=_UNROTATED_SCENARIO, target_x_delta_m=0.01)
+    assert result.move_duration_s == pytest.approx(env.cfg.move_duration_s)
+
+
+def test_run_episode_move_duration_field_reflects_override():
+    env = VelocityTransportEnv(VelocityTransportEnvConfig())
+    action = np.zeros(ACTION_DIM)
+    result = run_episode(
+        env, action, scenario=_UNROTATED_SCENARIO, target_x_delta_m=0.01, move_duration_s=FAST_MOVE_DURATION_S
+    )
+    assert result.move_duration_s == pytest.approx(FAST_MOVE_DURATION_S)
+    assert result.move_duration_s != pytest.approx(env.cfg.move_duration_s)
+
+
+def test_fast_move_produces_higher_peak_joint_velocity_than_slow_move():
+    """The core causal mechanism this whole fix relies on: for IDENTICAL
+    gains and target displacement, a near-step (FAST_MOVE_DURATION_S) move
+    produces a measurably higher peak joint velocity than the default slow
+    move -- confirming move_duration_s is a genuine additional stress axis
+    that a slow-only evaluation grid cannot see, independent of any
+    particular guard threshold (this case is picked well below the 3.0
+    rad/s guard on both sides, so the assertion isn't coupled to a
+    boundary-crossing that could flip with unrelated numerical noise)."""
+    env = VelocityTransportEnv(VelocityTransportEnvConfig())
+    # kp_x/kp_rot (action indices 0,1) are no-ops for ik_seeded_resolution --
+    # compute_ik_seeded never reads them, see controller_core/
+    # cartesian_velocity_controller/controller.py's compute() dispatch --
+    # so only ik_joint_gain (index 2, set to its max here) drives this.
+    action = np.array([0.0, 0.0, 1.0, 0.0, 0.0])
+    dx = 0.10
+    r_slow = run_episode(env, action, scenario=_UNROTATED_SCENARIO, target_x_delta_m=dx)
+    r_fast = run_episode(
+        env, action, scenario=_UNROTATED_SCENARIO, target_x_delta_m=dx, move_duration_s=FAST_MOVE_DURATION_S
+    )
+    assert r_fast.max_abs_qd_radps > 2.0 * r_slow.max_abs_qd_radps
+    assert r_slow.max_abs_qd_radps < 3.0  # guard is 3.0 -- confirm slow genuinely doesn't approach it here
+    assert r_fast.max_abs_qd_radps < 3.0  # and neither does fast, in this deliberately-clear-of-guard case
+
+
+def test_fast_move_regression_search2_gains_trip_joint_velocity_guard():
+    """Exact reproduction of the real finding that motivated adding
+    FAST_MOVE_DURATION_S: this session's second real gain search
+    (search_result_widened_20260806_023900.json) found gains that, evaluated
+    at a fast move, trip the joint-velocity guard -- a failure mode that
+    literally cannot appear in a slow-move-only evaluation grid, since such
+    a grid never runs an episode at this move_duration_s at all. Locks in
+    the exact deterministic numbers (verified reproducible across 3
+    independent fresh processes) so this specific historical gap can't
+    silently stop being caught."""
+    env = VelocityTransportEnv(VelocityTransportEnvConfig())
+    dx = 0.5 * _UNROTATED_SCENARIO.max_dx_hint_m  # 0.0245
+    result = run_episode(
+        env, _SEARCH2_ACTION, scenario=_UNROTATED_SCENARIO, target_x_delta_m=dx, move_duration_s=FAST_MOVE_DURATION_S
+    )
+    assert result.guard_reason is not None
+    assert "joint_velocity_guard" in result.guard_reason
+    assert result.max_abs_qd_radps > 3.0
+
+
+# ---------------------------------------------------------------------------
+# fitness() -- fast-move dimension actually affects the search objective
+# ---------------------------------------------------------------------------
+
+
+def test_fitness_fast_move_dimension_is_actually_exercised():
+    """fast_move_dx_fractions must actually change what fitness() computes
+    -- if a future edit silently dropped the fast-move loop (making the
+    parameter a dead no-op), this test would see identical fitness values
+    with vs. without it and fail. Doesn't assert a direction (which way the
+    score moves depends on how many steps a given failing episode runs
+    before its guard trips, not just pass/fail), only that the dimension is
+    genuinely wired into the objective the optimizer sees."""
+    fitness_without_fast = fitness(
+        _SEARCH2_ACTION,
+        scenarios=(_UNROTATED_SCENARIO,),
+        env_config=None,
+        seed=0,
+        dx_fractions=(1.0,),
+        fast_move_dx_fractions=(),
+    )
+    fitness_with_fast = fitness(
+        _SEARCH2_ACTION,
+        scenarios=(_UNROTATED_SCENARIO,),
+        env_config=None,
+        seed=0,
+        dx_fractions=(1.0,),
+        fast_move_dx_fractions=(0.5,),
+    )
+    assert fitness_with_fast != pytest.approx(fitness_without_fast)
+
+
+def test_fitness_direction_matches_reward_mean_for_fixed_episodes():
+    """A direction-asserting complement to the test above, without
+    depending on any particular gain/dx producing a specific pass/fail
+    pattern (found empirically fragile -- this reward's guard-trip penalty
+    interacts with how many steps ran before the trip, so "more failures"
+    does not always mean "more negative reward"): directly confirms
+    fitness()'s formula is exactly -mean(total_reward across all episodes
+    it ran), i.e. that adding the fast-move episodes to the average is a
+    real, correctly-weighted contribution, not silently dropped or
+    double-counted."""
+    result_slow_only = run_episode(
+        VelocityTransportEnv(VelocityTransportEnvConfig()),
+        _SEARCH2_ACTION,
+        scenario=_UNROTATED_SCENARIO,
+        target_x_delta_m=1.0 * _UNROTATED_SCENARIO.max_dx_hint_m,
+    )
+    result_fast = run_episode(
+        VelocityTransportEnv(VelocityTransportEnvConfig()),
+        _SEARCH2_ACTION,
+        scenario=_UNROTATED_SCENARIO,
+        target_x_delta_m=0.5 * _UNROTATED_SCENARIO.max_dx_hint_m,
+        move_duration_s=FAST_MOVE_DURATION_S,
+    )
+    expected_fitness = -float(np.mean([result_slow_only.total_reward, result_fast.total_reward]))
+    actual_fitness = fitness(
+        _SEARCH2_ACTION,
+        scenarios=(_UNROTATED_SCENARIO,),
+        env_config=None,
+        seed=0,
+        dx_fractions=(1.0,),
+        fast_move_dx_fractions=(0.5,),
+    )
+    assert actual_fitness == pytest.approx(expected_fitness, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# evaluate_gains -- both grids actually run
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_gains_runs_both_slow_and_fast_grids():
+    env_config = VelocityTransportEnvConfig()
+    results = evaluate_gains(
+        np.zeros(ACTION_DIM),
+        scenarios=(_UNROTATED_SCENARIO,),
+        dx_fractions=(1.0,),
+        fast_move_dx_fractions=(1.0,),
+        env_config=env_config,
+    )
+    assert len(results) == 2
+    durations = sorted(r.move_duration_s for r in results)
+    assert durations[0] == pytest.approx(FAST_MOVE_DURATION_S)
+    assert durations[1] == pytest.approx(env_config.move_duration_s)
+
+
+def test_print_report_does_not_raise(capsys):
+    results = evaluate_gains(
+        np.zeros(ACTION_DIM), scenarios=(_UNROTATED_SCENARIO,), dx_fractions=(1.0,), fast_move_dx_fractions=(1.0,)
+    )
+    print_report(results)
+    out = capsys.readouterr().out
+    assert "unrotated_wrist2offset" in out
+
+
+# ---------------------------------------------------------------------------
+# summarize_safety -- pure bucketing logic, no simulation needed
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_results() -> list[EpisodeResult]:
+    return [
+        EpisodeResult("posA", 0.02, 1.0, 5.0, 0.001, 0.0198, 0.05, 0.3, None),  # slow pass
+        EpisodeResult(
+            "posA", 0.03, 1.0, -10.0, 0.01, 0.025, 0.3, 0.5, "orientation_guard: 0.30 > 0.25"
+        ),  # slow fail
+        EpisodeResult("posA", 0.01, FAST_MOVE_DURATION_S, 3.0, 0.001, 0.0099, 0.05, 1.0, None),  # fast pass
+        EpisodeResult(
+            "posA", 0.02, FAST_MOVE_DURATION_S, -20.0, 0.02, 0.01, 0.05, 3.5, "joint_velocity_guard: 3.5 > 3.0"
+        ),  # fast fail
+        EpisodeResult(
+            "posB", 0.01, FAST_MOVE_DURATION_S, -20.0, 0.02, 0.005, 0.05, 4.0, "joint_velocity_guard: 4.0 > 3.0"
+        ),  # fast fail
+    ]
+
+
+def test_summarize_safety_overall_counts():
+    summary = summarize_safety(_synthetic_results())
+    assert summary["n_total"] == 5
+    assert summary["n_pass"] == 2
+    assert summary["n_fail"] == 3
+    assert summary["pass_fraction"] == pytest.approx(2 / 5)
+    assert summary["worst_orientation_error_rad"] == pytest.approx(0.3)
+    assert summary["worst_abs_qd_radps"] == pytest.approx(4.0)
+    assert len(summary["guard_trips"]) == 3
+
+
+def test_summarize_safety_slow_fast_buckets_are_disjoint_and_correct():
+    summary = summarize_safety(_synthetic_results())
+    slow = summary["slow_move"]
+    fast = summary["fast_move"]
+    assert slow["n_total"] + fast["n_total"] == 5
+    assert slow["n_total"] == 2
+    assert slow["n_pass"] == 1
+    assert slow["pass_fraction"] == pytest.approx(0.5)
+    assert slow["worst_abs_qd_radps"] == pytest.approx(0.5)
+    assert fast["n_total"] == 3
+    assert fast["n_pass"] == 1
+    assert fast["n_fail"] == 2
+    assert fast["pass_fraction"] == pytest.approx(1 / 3)
+    assert fast["worst_abs_qd_radps"] == pytest.approx(4.0)
+
+
+def test_summarize_safety_per_scenario_and_guard_trip_fields():
+    summary = summarize_safety(_synthetic_results())
+    posA = summary["per_scenario"]["posA"]
+    assert posA["pass"] == 2
+    assert posA["fail"] == 2
+    assert posA["max_passing_dx_m"] == pytest.approx(0.02)  # max of the two passing dx (0.02, 0.01)
+    posB = summary["per_scenario"]["posB"]
+    assert posB["pass"] == 0
+    assert posB["fail"] == 1
+    assert posB["max_passing_dx_m"] == pytest.approx(0.0)
+    for trip in summary["guard_trips"]:
+        assert "move_duration_s" in trip
+        assert "max_abs_qd_radps" in trip
+        assert "guard_reason" in trip
+
+
+def test_summarize_safety_empty_input():
+    summary = summarize_safety([])
+    assert summary["n_total"] == 0
+    assert summary["pass_fraction"] == 0.0
+    assert summary["slow_move"]["n_total"] == 0
+    assert summary["fast_move"]["n_total"] == 0
+
+
+if __name__ == "__main__":
+    test_action_to_gains_bounds_at_extremes()
+    test_env_reset_and_step_shapes()
+    test_fast_move_produces_higher_peak_joint_velocity_than_slow_move()
+    test_fast_move_regression_search2_gains_trip_joint_velocity_guard()
+    test_fitness_fast_move_dimension_is_actually_exercised()
+    test_summarize_safety_slow_fast_buckets_are_disjoint_and_correct()
+    print("velocity_gain_tuning tests OK")
