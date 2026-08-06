@@ -240,6 +240,38 @@ def compute_ik_seeded(
     task_w = max(float(cfg.qp_task_weight), 1.0e-6)
     reg = max(float(cfg.pinv_damping), 1.0e-9) ** 2  # matches _damped_pinv's own d^2 scale
 
+    # ik_posture_activation_error_rad (added 2026-08-06): gates the
+    # posture term ON only when at least one unconstrained rotation axis's
+    # REAL, CURRENTLY MEASURED error (via quat_current from fk_jacobian_fn
+    # (q_current), NOT this loop's own q_rest-relative rot_err_k) already
+    # exceeds the threshold -- see this module's git history for why an
+    # earlier version checked the WRONG quantity: q_target's own error
+    # relative to q_rest, computed fresh from q_rest every single cycle,
+    # stays small almost always (it's a smoothly-evolving abstract target,
+    # not the physically-lagging real arm) -- that check essentially never
+    # activated, since the real failure is the physical arm's cumulative
+    # TRACKING LAG behind a moving q_target, only visible in the REAL
+    # measured state. Fixes a real problem found the same day: an ALWAYS-
+    # ACTIVE posture term (no gate, ik_posture_activation_error_rad=None)
+    # was validated to genuinely fix the one real failing case it was
+    # built for (peak orientation error 0.2533->0.0235 rad as its weight
+    # rises to 10x task_w), but a real gain search with it freely
+    # available still converged to ik_posture_gain=0.0 -- turning it on
+    # unconditionally made the AGGREGATE multi-pose fitness dramatically
+    # worse (DE's minimized value -6.8 -> ~19), because it perturbs every
+    # pose's task a little, all the time, even poses that never needed
+    # correcting. None (default) reproduces the always-active behavior
+    # unchanged (byte-identical when ik_posture_gain is also 0.0).
+    posture_active = cfg.ik_posture_gain != 0.0
+    if posture_active and cfg.ik_posture_activation_error_rad is not None:
+        _, quat_current_for_gate, _ = fk_jacobian_fn(q_current)
+        quat_current_for_gate = np.asarray(quat_current_for_gate, dtype=np.float64).reshape(4)
+        activation_limit = abs(float(cfg.ik_posture_activation_error_rad))
+        posture_active = any(
+            not on and abs(swing_twist_axis_error(quat0, quat_current_for_gate, i)) >= activation_limit
+            for i, on in enumerate(rot_flags)
+        )
+
     q_k = q_rest.copy()
     for _ in range(max(int(cfg.ik_iterations), 1)):
         p_k, quat_k, jac_k = fk_jacobian_fn(q_k)
@@ -321,7 +353,7 @@ def compute_ik_seeded(
         dq_lo = q_lo - q_k
         dq_hi = q_hi - q_k
         terms = [(j_task_k, task_err_k, task_w)]
-        if cfg.ik_posture_gain != 0.0:
+        if posture_active:
             terms.append((np.eye(6, dtype=np.float64), q_rest - q_k, float(cfg.ik_posture_gain) * task_w))
         hessian_qp, linear_qp = build_weighted_least_squares_qp(terms, reg=reg)
         dq = solve_box_qp(hessian_qp, linear_qp, dq_lo, dq_hi)

@@ -59,7 +59,7 @@ from velocity_gain_tuning.poses import POSE_SCENARIOS  # noqa: E402
 # search that produced this vector ran, so "off" is the only faithful
 # reinterpretation.
 _SEARCH2_ACTION = np.array(
-    [-0.6386717612031976, 0.5023040867170563, 0.5575301222016413, -0.959391338891284, 0.9906856414248031, -1.0]
+    [-0.6386717612031976, 0.5023040867170563, 0.5575301222016413, -0.959391338891284, 0.9906856414248031, -1.0, -1.0]
 )
 _UNROTATED_SCENARIO = POSE_SCENARIOS[1]
 assert _UNROTATED_SCENARIO.name == "unrotated_wrist2offset"
@@ -193,7 +193,7 @@ def test_fast_move_produces_higher_peak_joint_velocity_than_slow_move():
     # compute_ik_seeded never reads them, see controller_core/
     # cartesian_velocity_controller/controller.py's compute() dispatch --
     # so only ik_joint_gain (index 2, set to its max here) drives this.
-    action = np.array([0.0, 0.0, 1.0, 0.0, 0.0, -1.0])  # -1.0 -> ik_posture_gain=0.0 (off)
+    action = np.array([0.0, 0.0, 1.0, 0.0, 0.0, -1.0, -1.0])  # -1.0 -> ik_posture_gain=0.0 (off)
     dx = 0.10
     r_slow = run_episode(env, action, scenario=_UNROTATED_SCENARIO, target_x_delta_m=dx)
     r_fast = run_episode(
@@ -351,7 +351,7 @@ def test_fitness_weighting_matches_manual_weighted_mean():
     deliberately used an unweighted scenario to isolate the fast-move
     dimension)."""
     assert _HANGING_SCENARIO.name == "hanging_alpha_0_5"
-    action = np.array([0.0, 0.0, 1.0, 0.0, 0.0, -1.0])
+    action = np.array([0.0, 0.0, 1.0, 0.0, 0.0, -1.0, -1.0])
     result_pos = run_episode(
         VelocityTransportEnv(VelocityTransportEnvConfig()),
         action, scenario=_HANGING_SCENARIO, target_x_delta_m=0.3 * _HANGING_SCENARIO.max_dx_hint_m,
@@ -375,7 +375,7 @@ def test_fitness_weighting_matches_manual_weighted_mean():
 
 
 def test_fitness_explicit_overrides_override_the_default():
-    action = np.array([0.0, 0.0, 1.0, 0.0, 0.0, -1.0])
+    action = np.array([0.0, 0.0, 1.0, 0.0, 0.0, -1.0, -1.0])
     dx_fractions = (0.3, -0.3)
     default_weighted = fitness(
         action, scenarios=(_HANGING_SCENARIO,), env_config=None, seed=0,
@@ -502,7 +502,9 @@ def test_build_seeded_population_includes_seed_rows_exactly():
     arbitrary hand-picked seed within a single generation, which says
     nothing about whether the seed was actually injected. This test
     isolates just the injection logic instead.)"""
-    seed_actions = [np.array([0.0, 0.0, 1.0, 0.0, 0.0, -1.0]), np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 0.5])]
+    seed_actions = [
+        np.array([0.0, 0.0, 1.0, 0.0, 0.0, -1.0, -1.0]), np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 0.5, 0.2]),
+    ]
     popsize = 3
     population = _build_seeded_population(popsize, seed_actions, seed=0)
     assert population.shape == (popsize * ACTION_DIM, ACTION_DIM)
@@ -512,8 +514,8 @@ def test_build_seeded_population_includes_seed_rows_exactly():
 
 
 def test_build_seeded_population_clips_out_of_range_seeds():
-    population = _build_seeded_population(2, [np.array([5.0, -5.0, 0.0, 0.0, 0.0, 0.0])], seed=0)
-    np.testing.assert_allclose(population[0], [1.0, -1.0, 0.0, 0.0, 0.0, 0.0])
+    population = _build_seeded_population(2, [np.array([5.0, -5.0, 0.0, 0.0, 0.0, 0.0, 0.0])], seed=0)
+    np.testing.assert_allclose(population[0], [1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
 
 def test_build_seeded_population_truncates_more_seeds_than_population():
@@ -537,7 +539,7 @@ def test_run_search_seed_actions_end_to_end_does_not_raise():
         seed=0,
         workers=1,
         auto_evaluate=False,
-        seed_actions=[np.array([0.0, 0.0, 1.0, 0.0, 0.0, -1.0])],
+        seed_actions=[np.array([0.0, 0.0, 1.0, 0.0, 0.0, -1.0, -1.0])],
     )
     assert outcome["action"].shape == (ACTION_DIM,)
 

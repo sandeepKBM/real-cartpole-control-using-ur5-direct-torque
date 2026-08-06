@@ -813,6 +813,199 @@ def test_ik_posture_gain_preserves_path_independence():
     np.testing.assert_allclose(q_target_a, q_target_b, atol=1e-9)
 
 
+# --------------------------------------------------------------------------- #
+# ik_posture_activation_error_rad -- gates ik_posture_gain on the REAL,
+# currently-measured axis error (via q_current), not the internal Newton
+# solve's q_rest-relative state. Added 2026-08-06 after finding an always-
+# active posture term hurt aggregate multi-pose search performance more
+# than it helped the one pose it was built for; an EARLIER version of this
+# gate checked the internal solve's own error relative to q_rest and was
+# found not to work at all (that quantity stays small almost every cycle
+# regardless of real drift, since it's recomputed fresh from q_rest each
+# cycle -- it isn't the physically-lagging real arm this needs to react to).
+# --------------------------------------------------------------------------- #
+def _real_rx_error_for_q_current(q_current: np.ndarray, quat0: np.ndarray) -> float:
+    _, quat_current, _ = _toy_fk(q_current)
+    return swing_twist_axis_error(quat0, quat_current, 0)
+
+
+def test_ik_posture_activation_stays_inactive_below_threshold():
+    """With the real (q_current-measured) rx error comfortably below the
+    activation threshold, the gated config must produce output BYTE-
+    IDENTICAL to ik_posture_gain=0.0 -- zero collateral perturbation when
+    nothing needs correcting, the entire point of this mechanism."""
+    q_rest = np.zeros(6)
+    p0, quat0, _ = _toy_fk(q_rest)
+    target = p0.copy()
+    target[0] += 0.05
+    q_current = q_rest + np.array([0.05, -0.03, 0.02, 0.01, -0.02, 0.015])  # small rx: real error << 0.2
+    real_rx_err = abs(_real_rx_error_for_q_current(q_current, quat0))
+    assert real_rx_err < 0.05, f"test setup: expected a small real rx error, got {real_rx_err}"
+
+    def run(cfg):
+        ctrl = CartesianVelocityController(cfg)
+        ctrl.reset_from_state(
+            {"time": 0.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0, "target_x": float(p0[0])}
+        )
+        p_c, quat_c, _ = _toy_fk(q_current)
+        return ctrl.compute(
+            {
+                "time": 1.0, "q": q_current, "qd": np.zeros(6), "ee_pos": p_c, "ee_quat": quat_c,
+                "target_x": float(target[0]), "target_ee_pos": target, "target_ee_vel": np.zeros(3),
+                "fk_jacobian_fn": _toy_fk,
+            }
+        )
+
+    cfg_off = CartesianVelocityConfig(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=8, ik_joint_gain=4.0,
+        pinv_damping=0.05, qp_task_weight=1.0e4, ik_posture_gain=0.0,
+    )
+    cfg_gated_inactive = CartesianVelocityConfig(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=8, ik_joint_gain=4.0,
+        pinv_damping=0.05, qp_task_weight=1.0e4, ik_posture_gain=3.0,
+        ik_posture_activation_error_rad=0.2,  # well above the ~real_rx_err measured above
+    )
+    np.testing.assert_allclose(run(cfg_gated_inactive), run(cfg_off), atol=1e-12)
+
+
+def test_ik_posture_activation_activates_above_threshold():
+    """With the real rx error above the threshold, the gated config must
+    differ from posture-off -- the mechanism actually engages once it's
+    needed, matching the always-active (ik_posture_activation_error_rad=
+    None) behavior for that same cycle."""
+    q_rest = np.zeros(6)
+    p0, quat0, _ = _toy_fk(q_rest)
+    target = p0.copy()
+    target[0] += 0.05
+    q_current = q_rest + np.array([0.05, -0.03, 0.02, 0.8, -0.02, 0.015])  # large rx: real error well above 0.2
+    real_rx_err = abs(_real_rx_error_for_q_current(q_current, quat0))
+    assert real_rx_err > 0.2, f"test setup: expected a large real rx error, got {real_rx_err}"
+
+    def run(cfg):
+        ctrl = CartesianVelocityController(cfg)
+        ctrl.reset_from_state(
+            {"time": 0.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0, "target_x": float(p0[0])}
+        )
+        p_c, quat_c, _ = _toy_fk(q_current)
+        return ctrl.compute(
+            {
+                "time": 1.0, "q": q_current, "qd": np.zeros(6), "ee_pos": p_c, "ee_quat": quat_c,
+                "target_x": float(target[0]), "target_ee_pos": target, "target_ee_vel": np.zeros(3),
+                "fk_jacobian_fn": _toy_fk,
+            }
+        )
+
+    cfg_off = CartesianVelocityConfig(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=8, ik_joint_gain=4.0,
+        pinv_damping=0.05, qp_task_weight=1.0e4, ik_posture_gain=0.0,
+    )
+    cfg_gated_active = CartesianVelocityConfig(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=8, ik_joint_gain=4.0,
+        pinv_damping=0.05, qp_task_weight=1.0e4, ik_posture_gain=3.0,
+        ik_posture_activation_error_rad=0.2,
+    )
+    cfg_always_on = CartesianVelocityConfig(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=8, ik_joint_gain=4.0,
+        pinv_damping=0.05, qp_task_weight=1.0e4, ik_posture_gain=3.0,
+        ik_posture_activation_error_rad=None,
+    )
+    out_off = run(cfg_off)
+    out_gated_active = run(cfg_gated_active)
+    out_always_on = run(cfg_always_on)
+    assert not np.allclose(out_gated_active, out_off, atol=1e-9), "gate should have activated and changed the output"
+    np.testing.assert_allclose(out_gated_active, out_always_on, atol=1e-12)
+
+
+def test_ik_posture_activation_none_matches_always_active():
+    """Default (None) must reproduce ik_posture_gain's prior always-active
+    behavior exactly -- checked at BOTH a small and a large real rx error,
+    since None means "no gating at all," not "gated with a huge
+    threshold."""
+    q_rest = np.zeros(6)
+    p0, quat0, _ = _toy_fk(q_rest)
+    target = p0.copy()
+    target[0] += 0.05
+
+    def run(cfg, q_current):
+        ctrl = CartesianVelocityController(cfg)
+        ctrl.reset_from_state(
+            {"time": 0.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0, "target_x": float(p0[0])}
+        )
+        p_c, quat_c, _ = _toy_fk(q_current)
+        return ctrl.compute(
+            {
+                "time": 1.0, "q": q_current, "qd": np.zeros(6), "ee_pos": p_c, "ee_quat": quat_c,
+                "target_x": float(target[0]), "target_ee_pos": target, "target_ee_vel": np.zeros(3),
+                "fk_jacobian_fn": _toy_fk,
+            }
+        )
+
+    cfg = CartesianVelocityConfig(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=8, ik_joint_gain=4.0,
+        pinv_damping=0.05, qp_task_weight=1.0e4, ik_posture_gain=3.0, ik_posture_activation_error_rad=None,
+    )
+    assert cfg.ik_posture_activation_error_rad is None
+    for q_current in (
+        q_rest + np.array([0.05, -0.03, 0.02, 0.01, -0.02, 0.015]),  # small real error
+        q_rest + np.array([0.05, -0.03, 0.02, 0.8, -0.02, 0.015]),   # large real error
+    ):
+        assert run(cfg, q_current) is not None  # both must compute without raising; None means unconditional
+
+
+def test_ik_posture_activation_irrelevant_when_posture_gain_is_zero():
+    """The gate check itself must be skipped entirely when ik_posture_gain
+    is 0.0 -- not just harmless, actually never evaluated (avoids an
+    extra fk_jacobian_fn call for the common case where posture is off)."""
+    calls = {"count": 0}
+
+    def counting_fk(q):
+        calls["count"] += 1
+        return _toy_fk(q)
+
+    q_rest = np.zeros(6)
+    p0, quat0, _ = _toy_fk(q_rest)
+    target = p0.copy()
+    target[0] += 0.05
+    cfg = CartesianVelocityConfig(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0, max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True, ik_iterations=3, ik_joint_gain=4.0,
+        pinv_damping=0.05, qp_task_weight=1.0e4, ik_posture_gain=0.0, ik_posture_activation_error_rad=0.1,
+    )
+    ctrl = CartesianVelocityController(cfg)
+    ctrl.reset_from_state(
+        {"time": 0.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0, "target_x": float(p0[0])}
+    )
+    ctrl.compute(
+        {
+            "time": 1.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0,
+            "target_x": float(target[0]), "target_ee_pos": target, "target_ee_vel": np.zeros(3),
+            "fk_jacobian_fn": counting_fk,
+        }
+    )
+    # ik_iterations=3 Newton steps + 1 final jac_current call = 4 expected
+    # calls if the gate check is correctly skipped; a gate check would add
+    # exactly one more.
+    assert calls["count"] == 4, f"expected the gate's extra fk call to be skipped when posture is off: {calls['count']}"
+
+
+def test_yaml_parsing_reads_ik_posture_activation_error_rad():
+    cfg = CartesianVelocityConfig.from_controller_yaml_section(
+        {"velocity_control": {"ik_posture_activation_error_rad": 0.15}}
+    )
+    assert cfg.ik_posture_activation_error_rad == 0.15
+
+
+def test_yaml_parsing_defaults_ik_posture_activation_error_rad_to_none():
+    cfg = CartesianVelocityConfig.from_controller_yaml_section({})
+    assert cfg.ik_posture_activation_error_rad is None
+
+
 def test_yaml_parsing_reads_ik_posture_gain():
     cfg = CartesianVelocityConfig.from_controller_yaml_section({"velocity_control": {"ik_posture_gain": 1.25}})
     assert cfg.ik_posture_gain == 1.25

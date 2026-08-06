@@ -78,6 +78,26 @@ class CartesianVelocityConfig:
     # since the two operate at fundamentally different scales (kp_posture
     # is a per-cycle rate gain; this is a task_w-relative QP weight).
     ik_posture_gain: float = 0.0
+    # Gates ik_posture_gain ON only when at least one unconstrained
+    # rotation axis's REAL, CURRENTLY MEASURED error already exceeds this
+    # threshold (added 2026-08-06, see modes.py's compute_ik_seeded for
+    # the full mechanism and why an earlier version -- bounding the
+    # internal per-iteration solve's error relative to q_rest, not the
+    # real measured state -- didn't work: that quantity stays small
+    # almost every cycle regardless of real drift, since q_target evolves
+    # smoothly from q_rest each cycle; it isn't the physically-lagging
+    # real arm). None (default) reproduces ik_posture_gain's prior
+    # ALWAYS-ACTIVE behavior unchanged. Fixes a real problem found the
+    # same day: an always-active posture term was validated to genuinely
+    # fix the one real failing case it was built for in isolation, but a
+    # real gain search with it freely available still converged to
+    # ik_posture_gain=0.0 -- turning it on unconditionally made the
+    # AGGREGATE multi-pose fitness dramatically worse, because it
+    # perturbs every pose's task a little, all the time, even poses that
+    # never needed correcting. Gating it to only activate when a real
+    # axis error is already significant is meant to capture the benefit
+    # without that collateral cost.
+    ik_posture_activation_error_rad: float | None = None
 
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianVelocityConfig":
@@ -117,4 +137,9 @@ class CartesianVelocityConfig:
             ),
             qp_task_weight=float(vc.get("qp_task_weight", 1.0e4)),
             ik_posture_gain=float(vc.get("ik_posture_gain", 0.0)),
+            ik_posture_activation_error_rad=(
+                float(vc["ik_posture_activation_error_rad"])
+                if "ik_posture_activation_error_rad" in vc
+                else None
+            ),
         )
