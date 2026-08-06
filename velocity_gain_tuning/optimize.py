@@ -166,13 +166,29 @@ def fitness(
     env_config: VelocityTransportEnvConfig | None,
     seed: int,
     *,
-    dx_fractions: tuple[float, ...] = (0.5, 0.9, 1.15, -0.5, -0.9, -1.15),
-    fast_move_dx_fractions: tuple[float, ...] = (0.5, 1.0, -0.5, -1.0),
+    dx_fractions: tuple[float, ...] = (0.5, 0.9, 1.15, 1.3, -0.5, -0.9, -1.15, -1.3),
+    fast_move_dx_fractions: tuple[float, ...] = (0.5, 1.0, 1.3, -0.5, -1.0, -1.3),
     cell_weight_overrides: dict[tuple[str, str], float] | None = None,
 ) -> float:
     """Negative WEIGHTED mean total_reward across (scenario x dx_fraction)
     evaluation cells -- differential_evolution minimizes, so this is what
-    it calls. cell_weight_overrides defaults to DEFAULT_CELL_WEIGHT_
+    it calls. dx_fractions/fast_move_dx_fractions extended to 1.3x/-1.3x
+    (2026-08-06, same day as ik_posture_activation_error_rad): confirmed
+    directly that a real search converged ik_posture_gain to 0.0 for the
+    THIRD time even with correctly-scaled, correctly-gated posture
+    available, because the prior max fraction (1.15x) never reached
+    hanging_alpha_0_5's actual failure zone (its post-hoc safety report,
+    which uses eval_dx_fractions out to 2.0x, showed 16/32 failures the
+    whole time) -- within fitness()'s own narrower sampling, turning
+    posture on could only match or slightly hurt the objective, so the
+    search had no incentive to ever use it, regardless of how well the
+    mechanism itself works. 1.3x is the exact fraction of the specific
+    real failing case (hanging_alpha_0_5, dx=0.2405 = 1.3x its 0.185m
+    hint) validated throughout this mechanism's development -- the search
+    can now actually observe whatever benefit gating provides there,
+    instead of being structurally blind to it.
+
+    cell_weight_overrides defaults to DEFAULT_CELL_WEIGHT_
     OVERRIDES (see its module-level docstring for the full rationale):
     without it this would be a flat, unweighted mean, which let scenarios
     that pass everywhere easily dilute a genuinely-failing scenario/
