@@ -124,6 +124,42 @@ def _get_worker_env(env_config: VelocityTransportEnvConfig | None, seed: int) ->
     return _worker_env
 
 
+# Per-(scenario, direction) reward-weight multipliers applied inside
+# fitness() before averaging (added 2026-08-06). Rationale: a flat,
+# unweighted mean lets a scenario that passes everywhere easily
+# (unrotated_wrist2offset) dilute a genuinely-failing scenario/direction's
+# contribution to the aggregate objective, simply because there are as
+# many easy-pass cells as hard-fail cells. Direct evidence this was
+# happening: three independent searches (unseeded, seeded, and one with a
+# 6th ik_posture_gain dimension freely available) all converged to nearly
+# the SAME extreme (pinv_damping, qp_task_weight) corner regardless of
+# what else was available -- the newly-added ik_posture_gain dimension
+# went entirely unused (set to exactly 0.0) even though it demonstrably
+# helps in isolated, well-conditioned tests, consistent with the mean
+# being dominated by unrotated_wrist2offset's strong reward rather than
+# genuinely trading off against hanging_alpha_0_5's -X failures (whose
+# pass rate actually dropped, 57%->50%, once -X was added to the grid).
+# 5.0x on hanging_alpha_0_5's negative-x cells specifically is a first,
+# reasoned-but-unvalidated value -- meant to meaningfully shift the
+# incentive without one failure class completely dominating the
+# objective; whether it's enough is exactly what the next search result
+# will show. Scoped to hanging_alpha_0_5/-X specifically (not a blanket
+# reweight) because that's the concrete gap this was built to close --
+# extend this dict, don't hardcode a new mechanism, if another scenario/
+# direction needs the same treatment later.
+DEFAULT_CELL_WEIGHT_OVERRIDES: dict[tuple[str, str], float] = {
+    ("hanging_alpha_0_5", "negative_x"): 5.0,
+}
+
+
+def _cell_direction(result: EpisodeResult) -> str:
+    return "negative_x" if result.target_x_delta_m < 0.0 else "positive_x"
+
+
+def _cell_weight(result: EpisodeResult, overrides: dict[tuple[str, str], float]) -> float:
+    return overrides.get((result.scenario, _cell_direction(result)), 1.0)
+
+
 def fitness(
     action: np.ndarray,
     scenarios: tuple[PoseScenario, ...],
@@ -132,9 +168,17 @@ def fitness(
     *,
     dx_fractions: tuple[float, ...] = (0.5, 0.9, 1.15, -0.5, -0.9, -1.15),
     fast_move_dx_fractions: tuple[float, ...] = (0.5, 1.0, -0.5, -1.0),
+    cell_weight_overrides: dict[tuple[str, str], float] | None = None,
 ) -> float:
-    """Negative mean total_reward across (scenario x dx_fraction) evaluation
-    cells -- differential_evolution minimizes, so this is what it calls.
+    """Negative WEIGHTED mean total_reward across (scenario x dx_fraction)
+    evaluation cells -- differential_evolution minimizes, so this is what
+    it calls. cell_weight_overrides defaults to DEFAULT_CELL_WEIGHT_
+    OVERRIDES (see its module-level docstring for the full rationale):
+    without it this would be a flat, unweighted mean, which let scenarios
+    that pass everywhere easily dilute a genuinely-failing scenario/
+    direction's contribution simply by having as many easy cells as hard
+    ones.
+
     dx_fractions default to a spread around each scenario's known boundary
     (max_dx_hint_m) so the fitness rewards gains that hold up both well
     inside the safe range (0.5x) and right at/past the edge (1.15x), not
@@ -174,8 +218,11 @@ def fitness(
                     env, action, scenario=scenario, target_x_delta_m=dx, move_duration_s=FAST_MOVE_DURATION_S
                 )
             )
-    mean_reward = float(np.mean([r.total_reward for r in results]))
-    return -mean_reward
+    overrides = DEFAULT_CELL_WEIGHT_OVERRIDES if cell_weight_overrides is None else cell_weight_overrides
+    rewards = np.array([r.total_reward for r in results], dtype=np.float64)
+    weights = np.array([_cell_weight(r, overrides) for r in results], dtype=np.float64)
+    weighted_mean_reward = float(np.average(rewards, weights=weights))
+    return -weighted_mean_reward
 
 
 def _build_seeded_population(popsize: int, seed_actions: list[np.ndarray], seed: int) -> np.ndarray:

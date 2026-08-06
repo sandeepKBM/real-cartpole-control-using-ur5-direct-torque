@@ -32,9 +32,11 @@ from velocity_gain_tuning.envs.velocity_transport_env import (  # noqa: E402
 )
 from velocity_gain_tuning.evaluate import evaluate_gains, print_report, summarize_safety  # noqa: E402
 from velocity_gain_tuning.optimize import (  # noqa: E402
+    DEFAULT_CELL_WEIGHT_OVERRIDES,
     FAST_MOVE_DURATION_S,
     EpisodeResult,
     _build_seeded_population,
+    _cell_weight,
     fitness,
     run_episode,
     run_search,
@@ -263,7 +265,10 @@ def test_fitness_direction_matches_reward_mean_for_fixed_episodes():
     fitness()'s formula is exactly -mean(total_reward across all episodes
     it ran), i.e. that adding the fast-move episodes to the average is a
     real, correctly-weighted contribution, not silently dropped or
-    double-counted."""
+    double-counted. Uses _UNROTATED_SCENARIO specifically, which has no
+    entry in DEFAULT_CELL_WEIGHT_OVERRIDES (only hanging_alpha_0_5's
+    negative-x cells do), so the WEIGHTED mean equals the plain mean here
+    -- the reweighting mechanism itself is covered separately below."""
     result_slow_only = run_episode(
         VelocityTransportEnv(VelocityTransportEnvConfig()),
         _SEARCH2_ACTION,
@@ -287,6 +292,100 @@ def test_fitness_direction_matches_reward_mean_for_fixed_episodes():
         fast_move_dx_fractions=(0.5,),
     )
     assert actual_fitness == pytest.approx(expected_fitness, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# cell_weight / DEFAULT_CELL_WEIGHT_OVERRIDES (2026-08-06) -- hanging_alpha_
+# 0_5's -X cells count more so the aggregate mean can't average them away
+# against unrotated_wrist2offset's easy passes.
+# ---------------------------------------------------------------------------
+
+
+def _episode(scenario: str, target_x_delta_m: float) -> EpisodeResult:
+    return EpisodeResult(scenario, target_x_delta_m, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, None)
+
+
+def test_cell_weight_hanging_negative_x_gets_default_override():
+    result = _episode("hanging_alpha_0_5", -0.2)
+    assert _cell_weight(result, DEFAULT_CELL_WEIGHT_OVERRIDES) == pytest.approx(5.0)
+
+
+def test_cell_weight_hanging_positive_x_is_unweighted():
+    result = _episode("hanging_alpha_0_5", 0.2)
+    assert _cell_weight(result, DEFAULT_CELL_WEIGHT_OVERRIDES) == pytest.approx(1.0)
+
+
+def test_cell_weight_other_scenarios_negative_x_are_unweighted():
+    # Only hanging_alpha_0_5 has an override -- confirms this isn't a
+    # blanket "all negative-x cells" rule for every scenario.
+    for scenario_name in ("neg40_wrist2offset", "unrotated_wrist2offset", "neg45_wrist2offset"):
+        result = _episode(scenario_name, -0.02)
+        assert _cell_weight(result, DEFAULT_CELL_WEIGHT_OVERRIDES) == pytest.approx(1.0), scenario_name
+
+
+def test_cell_weight_zero_dx_counts_as_positive_x():
+    # target_x_delta_m == 0.0 is an edge case (no move at all) -- must not
+    # be misclassified as "negative" and accidentally inherit hanging's
+    # override.
+    result = _episode("hanging_alpha_0_5", 0.0)
+    assert _cell_weight(result, DEFAULT_CELL_WEIGHT_OVERRIDES) == pytest.approx(1.0)
+
+
+def test_cell_weight_custom_overrides_replace_not_merge_with_default():
+    # Passing an explicit overrides dict to _cell_weight (as fitness()
+    # does when cell_weight_overrides is not None) uses exactly that dict
+    # -- no implicit merging with DEFAULT_CELL_WEIGHT_OVERRIDES.
+    result = _episode("hanging_alpha_0_5", -0.2)
+    assert _cell_weight(result, {}) == pytest.approx(1.0)
+    assert _cell_weight(result, {("hanging_alpha_0_5", "negative_x"): 9.0}) == pytest.approx(9.0)
+
+
+_HANGING_SCENARIO = POSE_SCENARIOS[3]
+
+
+def test_fitness_weighting_matches_manual_weighted_mean():
+    """End-to-end confirmation (real episodes, real env) that fitness()'s
+    formula is exactly -weighted_mean(reward, weight=_cell_weight(...)),
+    using a scenario mix that actually exercises the override (unlike
+    test_fitness_direction_matches_reward_mean_for_fixed_episodes, which
+    deliberately used an unweighted scenario to isolate the fast-move
+    dimension)."""
+    assert _HANGING_SCENARIO.name == "hanging_alpha_0_5"
+    action = np.array([0.0, 0.0, 1.0, 0.0, 0.0, -1.0])
+    result_pos = run_episode(
+        VelocityTransportEnv(VelocityTransportEnvConfig()),
+        action, scenario=_HANGING_SCENARIO, target_x_delta_m=0.3 * _HANGING_SCENARIO.max_dx_hint_m,
+    )
+    result_neg = run_episode(
+        VelocityTransportEnv(VelocityTransportEnvConfig()),
+        action, scenario=_HANGING_SCENARIO, target_x_delta_m=-0.3 * _HANGING_SCENARIO.max_dx_hint_m,
+    )
+    weights = np.array([1.0, 5.0])  # positive_x=1.0 (unweighted), negative_x=5.0 (default override)
+    rewards = np.array([result_pos.total_reward, result_neg.total_reward])
+    expected_fitness = -float(np.average(rewards, weights=weights))
+    actual_fitness = fitness(
+        action, scenarios=(_HANGING_SCENARIO,), env_config=None, seed=0,
+        dx_fractions=(0.3, -0.3), fast_move_dx_fractions=(),
+    )
+    assert actual_fitness == pytest.approx(expected_fitness, rel=1e-6)
+    # And the unweighted (flat mean) value must be DIFFERENT -- proof the
+    # override actually changes the result, not a silent no-op.
+    flat_mean_fitness = -float(np.mean(rewards))
+    assert actual_fitness != pytest.approx(flat_mean_fitness)
+
+
+def test_fitness_explicit_overrides_override_the_default():
+    action = np.array([0.0, 0.0, 1.0, 0.0, 0.0, -1.0])
+    dx_fractions = (0.3, -0.3)
+    default_weighted = fitness(
+        action, scenarios=(_HANGING_SCENARIO,), env_config=None, seed=0,
+        dx_fractions=dx_fractions, fast_move_dx_fractions=(),
+    )
+    explicitly_unweighted = fitness(
+        action, scenarios=(_HANGING_SCENARIO,), env_config=None, seed=0,
+        dx_fractions=dx_fractions, fast_move_dx_fractions=(), cell_weight_overrides={},
+    )
+    assert default_weighted != pytest.approx(explicitly_unweighted)
 
 
 # ---------------------------------------------------------------------------
