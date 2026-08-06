@@ -451,6 +451,39 @@ def test_run_search_without_seed_actions_still_works():
     assert outcome["action"].shape == (ACTION_DIM,)
 
 
+# ---------------------------------------------------------------------------
+# AGENTS.md sec 7 "always sweep both +X and -X" -- locked in as defaults
+# ---------------------------------------------------------------------------
+
+
+def test_fitness_default_dx_fractions_include_both_signs():
+    import inspect
+
+    defaults = inspect.signature(fitness).parameters
+    for name in ("dx_fractions", "fast_move_dx_fractions"):
+        fracs = defaults[name].default
+        assert any(f > 0 for f in fracs), f"{name} default has no positive fraction"
+        assert any(f < 0 for f in fracs), f"{name} default has no negative fraction -- X-direction asymmetry is real (AGENTS.md sec 7)"
+
+
+def test_evaluate_gains_default_dx_fractions_include_both_signs():
+    import inspect
+
+    defaults = inspect.signature(evaluate_gains).parameters
+    for name in ("dx_fractions", "fast_move_dx_fractions"):
+        fracs = defaults[name].default
+        assert any(f > 0 for f in fracs), f"{name} default has no positive fraction"
+        assert any(f < 0 for f in fracs), f"{name} default has no negative fraction -- X-direction asymmetry is real (AGENTS.md sec 7)"
+
+
+def test_run_search_default_eval_dx_fractions_include_both_signs():
+    import inspect
+
+    fracs = inspect.signature(run_search).parameters["eval_dx_fractions"].default
+    assert any(f > 0 for f in fracs)
+    assert any(f < 0 for f in fracs), "eval_dx_fractions default has no negative fraction -- X-direction asymmetry is real (AGENTS.md sec 7)"
+
+
 if __name__ == "__main__":
     test_action_to_gains_bounds_at_extremes()
     test_env_reset_and_step_shapes()

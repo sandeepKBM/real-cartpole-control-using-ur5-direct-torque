@@ -130,15 +130,22 @@ def fitness(
     env_config: VelocityTransportEnvConfig | None,
     seed: int,
     *,
-    dx_fractions: tuple[float, ...] = (0.5, 0.9, 1.15),
-    fast_move_dx_fractions: tuple[float, ...] = (0.5, 1.0),
+    dx_fractions: tuple[float, ...] = (0.5, 0.9, 1.15, -0.5, -0.9, -1.15),
+    fast_move_dx_fractions: tuple[float, ...] = (0.5, 1.0, -0.5, -1.0),
 ) -> float:
     """Negative mean total_reward across (scenario x dx_fraction) evaluation
     cells -- differential_evolution minimizes, so this is what it calls.
     dx_fractions default to a spread around each scenario's known boundary
     (max_dx_hint_m) so the fitness rewards gains that hold up both well
     inside the safe range (0.5x) and right at/past the edge (1.15x), not
-    just an easy interior case.
+    just an easy interior case. Includes BOTH signs by default (added
+    2026-08-06, AGENTS.md sec 7's "always sweep both +X and -X" rule) --
+    a real gain-search result that passed cleanly at +0.37m failed via
+    joint_velocity_guard at -0.37m, a genuine asymmetry no prior search
+    (which only ever swept positive fractions) could have seen, let alone
+    optimized against. Bidirectional sweeping is now structural to the
+    objective itself, not a manual follow-up someone has to remember to
+    run -- the same pattern already used for FAST_MOVE_DURATION_S.
 
     fast_move_dx_fractions (added 2026-08-06): every fitness evaluation
     ALSO includes episodes at FAST_MOVE_DURATION_S (a near-step move),
@@ -199,7 +206,9 @@ def run_search(
     workers: int = 1,
     polish: bool = False,
     auto_evaluate: bool = True,
-    eval_dx_fractions: tuple[float, ...] = (0.3, 0.6, 0.9, 1.0, 1.1, 1.3, 1.6, 2.0),
+    eval_dx_fractions: tuple[float, ...] = (
+        0.3, 0.6, 0.9, 1.0, 1.1, 1.3, 1.6, 2.0, -0.3, -0.6, -0.9, -1.0, -1.1, -1.3, -1.6, -2.0,
+    ),
     seed_actions: list[np.ndarray] | None = None,
 ) -> dict:
     """Returns {"gains": {...}, "action": ndarray, "result": OptimizeResult,
@@ -293,6 +302,7 @@ def run_search(
             result.x,
             scenarios=scenarios,
             dx_fractions=eval_dx_fractions,
+            fast_move_dx_fractions=eval_dx_fractions,
             env_config=env_config,
             seed=seed,
         )

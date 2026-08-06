@@ -17,8 +17,8 @@ def evaluate_gains(
     action: np.ndarray,
     *,
     scenarios: tuple[PoseScenario, ...] = POSE_SCENARIOS,
-    dx_fractions: tuple[float, ...] = (0.3, 0.6, 0.9, 1.0, 1.1, 1.3),
-    fast_move_dx_fractions: tuple[float, ...] = (0.3, 0.6, 0.9, 1.0, 1.3, 1.6),
+    dx_fractions: tuple[float, ...] = (0.3, 0.6, 0.9, 1.0, 1.1, 1.3, -0.3, -0.6, -0.9, -1.0, -1.1, -1.3),
+    fast_move_dx_fractions: tuple[float, ...] = (0.3, 0.6, 0.9, 1.0, 1.3, 1.6, -0.3, -0.6, -0.9, -1.0, -1.3, -1.6),
     env_config: VelocityTransportEnvConfig | None = None,
     seed: int = 0,
 ) -> list[EpisodeResult]:
@@ -30,7 +30,11 @@ def evaluate_gains(
     resolution's real speed governor is ik_joint_gain, not move_duration_s;
     a gain set found safe at the default 1.0s move produced qd~4.7 rad/s,
     over the 3.0 guard, at a fast move -- undetectable by the slow grid
-    alone)."""
+    alone). Both fraction defaults include NEGATIVE values too (added
+    2026-08-06, AGENTS.md sec 7's "always sweep both +X and -X" rule) --
+    found this same day: a gain vector passing cleanly at +0.37m failed via
+    joint_velocity_guard at -0.37m, an asymmetry a positive-only grid
+    structurally cannot see."""
     env = VelocityTransportEnv(env_config, seed=seed)
     results: list[EpisodeResult] = []
     for scenario in scenarios:

@@ -643,6 +643,17 @@ Do-not-recreate (gravity/dynamics bugs, still relevant):
   experiment artifacts under `outputs/`, large binaries.
 - For every final response: list files changed, tests run, tests not run, and a rollback
   command.
+- **Always sweep both +X and -X when characterizing transport range/safety (2026-08-06).**
+  X-direction asymmetry is a real, recurring, independently-confirmed phenomenon in this repo,
+  not sampling noise — see the torque-control lane's directional-ceiling/-45° base-rotation
+  findings in §3, and the velocity-control lane's `hanging_alpha_0_5` result (found this date:
+  gains passing cleanly at +0.37m failed via `joint_velocity_guard` at -0.37m, with a
+  non-mirrored failure-mode pattern in between, not just a smaller-magnitude version of the
+  same curve). A one-directional sweep can silently report a "safe range" that is only true
+  going one way. Applies to any new range/boundary characterization work, not just
+  `velocity_gain_tuning/` — build the negative direction into the default sweep/search grid
+  itself so it can't be silently skipped, the same way `FAST_MOVE_DURATION_S` stress-testing
+  was made a structural part of the gain-search pipeline rather than a manual follow-up.
 
 ## 8. Remote compute / cluster usage (added 2026-07-29)
 
