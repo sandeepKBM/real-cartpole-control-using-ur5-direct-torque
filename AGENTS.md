@@ -173,6 +173,26 @@ a nullspace-projected posture objective toward `q_rest` was required. `kp_postur
 `pinv_damping` were tuned **together and are not independently tunable** — damping that small
 is what makes `kp_posture` effective instead of numerically unstable.
 
+**Friction must NOT be modelled in this lane (2026-08-05).** On real hardware the UR5e
+firmware closes the joint velocity loop itself and compensates joint friction internally, so
+adding this repo's own friction model on top would double-count it. Verified in code, and the
+current state is already correct *by construction* rather than by configuration — there is no
+friction switch to turn off here:
+- `tools/diagnostics/ur5e_velocity_control_kinematic_sim.py` calls only `mj_forward`/`mj_jacSite`
+  (kinematics + Jacobian) and never `mj_step`, so `assets/ur5e_torque/ur5e_torque.xml`'s
+  `frictionloss`/`damping` are never integrated and cannot affect a result.
+- `friction_feedforward` (and `friction_ff_qd_deadband`, the LuGre/Karnopp variants, etc.) are
+  `CartesianImpedanceConfig` fields. Neither `controller_core/cartesian_velocity_controller.py`
+  nor `hardware/velocity_transport.py` references them — the torque lane's friction machinery
+  is structurally absent from this code path, not merely disabled.
+
+**The trap this creates**: if anyone later builds a *dynamic* velocity sim (i.e. one that
+actually calls `mj_step` so `speedL` is resolved against rigid-body physics), the model's
+calibrated joint friction WILL apply, silently simulating a disturbance the real firmware
+already cancels — making sim look worse than hardware for a reason that is purely an artifact.
+Such a sim must explicitly zero `frictionloss`/`damping`, and must say so. Do not copy the
+torque lane's friction configs into this lane for any reason.
+
 **Validation status — read before trusting this lane. NOT real-hardware validated at all.**
 Kinematic-sim findings at the -40deg / wrist_2=0.2-offset pose:
 - Y-drift and orientation error are negligible across the whole tested range (<0.5 mm,
