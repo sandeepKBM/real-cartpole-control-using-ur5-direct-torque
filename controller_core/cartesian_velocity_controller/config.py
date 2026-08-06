@@ -63,43 +63,35 @@ class CartesianVelocityConfig:
     joint_pos_upper: np.ndarray | None = None
     joint_vel_limit_radps: float | None = None
     qp_task_weight: float = 1.0e4
-    # Posture-pull weight for compute_ik_seeded's per-iteration Newton-QP
-    # solve (added 2026-08-06), expressed as a FRACTION OF qp_task_weight,
-    # not an absolute weight (see modes.py's compute_ik_seeded for the
-    # full rationale, including why an absolute-weight version was tried
-    # first and found to need impractically large values once qp_task_
-    # weight lands anywhere near the 1e8+ range real gain searches
-    # converge toward). 0.0 (default) reproduces the exact prior behavior
-    # byte-for-byte; a nonzero value pulls whichever rotation axes are NOT
-    # in the task (task_dim_rx/ry when False, by default) back toward
-    # their q_rest value, weighted jointly with the task term in the SAME
-    # QP solve -- the same mechanism reduced_task_dims already uses via
-    # kp_posture, kept as a SEPARATE field rather than reusing kp_posture
-    # since the two operate at fundamentally different scales (kp_posture
-    # is a per-cycle rate gain; this is a task_w-relative QP weight).
-    ik_posture_gain: float = 0.0
-    # Gates ik_posture_gain ON only when the REAL joint-space deviation
-    # ||q_current - q_rest|| already exceeds this threshold (added
-    # 2026-08-06, replaced an orientation-error-based version the SAME
-    # day -- see modes.py's compute_ik_seeded for the full mechanism).
-    # None (default) reproduces ik_posture_gain's prior ALWAYS-ACTIVE
-    # behavior unchanged. History: an always-active posture term was
-    # validated to genuinely fix the first real failing case it was built
-    # for (hanging_alpha_0_5's -X failure island) in isolation, but a
-    # real gain search with it freely available still converged to
-    # ik_posture_gain=0.0 -- turning it on unconditionally made the
-    # AGGREGATE multi-pose fitness dramatically worse. The first gating
-    # attempt (orientation error) fixed that pose but was found unable to
-    # ALSO catch a second, structurally different failure (neg40/neg45_
-    # wrist2offset's joint_velocity_guard trips, where real orientation
-    # error stays small -- the failure is q_target's wrist_2 component
-    # itself running away, a joint-space phenomenon): the two poses' real
-    # orientation error at their respective trip points differed ~5x, too
-    # wide a mismatch for one global threshold. Joint-space deviation is
-    # comparable across both (0.54 vs 0.39 rad at trip, similar growth
-    # rate throughout) -- a better pose-agnostic "something is going
-    # wrong" signal, and cheaper (no extra FK call).
-    ik_posture_activation_joint_dev_rad: float | None = None
+    # Hard bound (rad) on how far the REDUNDANT (null-space) part of
+    # compute_ik_seeded's per-iteration solve may wander from q_rest,
+    # enforced EXACTLY via null-space-basis coordinate clipping (added and
+    # corrected twice the SAME day, 2026-08-06 -- see modes.py for the
+    # full mechanism, both prior wrong versions, and why). None (default)
+    # reproduces the exact prior behavior byte-for-byte.
+    #
+    # Replaces ik_posture_gain/ik_posture_activation_joint_dev_rad (both
+    # REMOVED -- see this file's git history), a SOFT task_w-relative
+    # quadratic pull that real gain searches almost never converged to
+    # using even when correctly scaled and gated. This hard constraint
+    # needs no such learning: the null-space coordinate is PROVABLY
+    # confined to [-max_dev, max_dev], and task achievement (J_task @ dq)
+    # is PROVABLY unaffected by however aggressively it clips.
+    #
+    # IMPORTANT SCOPE LIMIT, discovered validating this fix (2026-08-06):
+    # this mechanism only helps failures that are genuinely REDUNDANT
+    # (null-space) phenomena -- confirmed for neg40/neg45_wrist2offset's
+    # wrist_2 runaway (a real fix, task accuracy preserved exactly). It
+    # CANNOT help hanging_alpha_0_5's -X orientation failure: a direct
+    # check found the pure minimum-norm, ZERO-null-space-component task
+    # solution for +X motion at that pose already induces real rx/ry
+    # rotation -- the coupling lives in the TASK (row) space itself, not
+    # the null space, so no null-space-projected mechanism (this one, or
+    # the removed soft pull) can fix it without a real X-tracking accuracy
+    # trade-off. Matches this repo's already-documented torque-control-
+    # lane finding for a different pose/axis (structural, not a search
+    # gap). Do not expect this field to help that failure.
+    ik_max_joint_deviation_rad: float | None = None
 
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianVelocityConfig":
@@ -138,10 +130,7 @@ class CartesianVelocityConfig:
                 float(vc["joint_vel_limit_radps"]) if "joint_vel_limit_radps" in vc else None
             ),
             qp_task_weight=float(vc.get("qp_task_weight", 1.0e4)),
-            ik_posture_gain=float(vc.get("ik_posture_gain", 0.0)),
-            ik_posture_activation_joint_dev_rad=(
-                float(vc["ik_posture_activation_joint_dev_rad"])
-                if "ik_posture_activation_joint_dev_rad" in vc
-                else None
+            ik_max_joint_deviation_rad=(
+                float(vc["ik_max_joint_deviation_rad"]) if "ik_max_joint_deviation_rad" in vc else None
             ),
         )

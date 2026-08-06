@@ -213,6 +213,39 @@ def orientation_error_vec_wxyz(quat_des: np.ndarray, quat_cur: np.ndarray) -> np
     return 2.0 * q_err[1:4]
 
 
+def null_space_basis(jacobian: np.ndarray, *, rank_tol: float = 1.0e-9) -> np.ndarray:
+    """Orthonormal basis (columns) for the null space of ``jacobian`` ((m, n),
+    m <= n expected), via SVD. Shape (n, n-rank); shape (n, 0) if jacobian
+    has full column rank (no null space).
+
+    Added 2026-08-06 for compute_ik_seeded's ik_max_joint_deviation_rad --
+    the correct way to hard-bound REDUNDANT joint motion without also
+    blocking TASK-NECESSARY motion, which a fixed/uniform per-joint bound
+    cannot do: which joints are "redundant" vs "task-critical" is a
+    property of the LOCAL JACOBIAN at the current pose and task selection,
+    not a fixed set of joint indices -- confirmed empirically two
+    real failing cases have completely disjoint dominant joints
+    (neg40_wrist2offset: shoulder_pan + wrist_2; hanging_alpha_0_5:
+    shoulder_lift + elbow + wrist_1). A step confined to this basis is
+    provably in jacobian's null space (jacobian @ (basis @ c) == 0 for any
+    coefficient vector c, to numerical precision), which is what lets
+    compute_ik_seeded clip ONLY the null-space coordinate of a step while
+    leaving its task-space image (jacobian @ step) exactly unchanged.
+
+    rank_tol is relative to the largest singular value (numerically
+    near-singular rows of jacobian, e.g. from a task that includes a
+    Jacobian row close to linearly dependent on the others, correctly
+    widen the detected null space rather than treating a tiny nonzero
+    singular value as if it were a fully independent task direction)."""
+    j = np.asarray(jacobian, dtype=np.float64)
+    if j.ndim != 2:
+        raise ValueError(f"jacobian must be 2D; got shape {j.shape}")
+    _, s, vt = np.linalg.svd(j, full_matrices=True)
+    threshold = rank_tol * float(s[0]) if s.size and s[0] > 0.0 else rank_tol
+    rank = int(np.sum(s > threshold))
+    return vt[rank:, :].T
+
+
 def swing_twist_axis_error(quat_des: np.ndarray, quat_cur: np.ndarray, axis_index: int) -> float:
     """Signed rotation angle (rad) of the TWIST component of the orientation
     error about a single world axis (axis_index: 0=x, 1=y, 2=z) -- via the

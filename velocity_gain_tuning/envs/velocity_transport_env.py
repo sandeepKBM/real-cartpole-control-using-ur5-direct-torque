@@ -81,60 +81,61 @@ ACTION_FIELDS: tuple[tuple[str, float, float, bool], ...] = (
     # tell us" search the range was widened for.
     ("pinv_damping", 1.0e-7, 1.0, True),
     ("qp_task_weight", 10.0, 1.0e10, True),
-    # ik_posture_gain added 2026-08-06: posture pull toward q_rest inside
-    # compute_ik_seeded's Newton-QP solve (controller_core/
-    # cartesian_velocity_controller/modes.py), fixing a root-caused gap --
-    # the search's own found gains push pinv_damping/qp_task_weight toward
-    # near-zero-regularization/near-exact-IK, which leaves rotation axes
-    # OUTSIDE the task selection (rx/ry, since task_dim_rx/ry are False by
-    # default) essentially unconstrained; traced directly on a real
-    # hanging_alpha_0_5 failure: rz (task-constrained) tracked to 2e-4 rad
-    # while rx (unconstrained) grew to 0.25 rad and alone tripped the
-    # orientation guard.
+    # ik_posture_gain/ik_posture_activation_joint_dev_rad (both added
+    # 2026-08-06, REMOVED the same day -- see controller_core/
+    # cartesian_velocity_controller/config.py's git history) were a SOFT,
+    # task_w-relative quadratic pull toward q_rest, gated on real joint
+    # deviation. Fixed both known real failures at specific found values
+    # (ik_posture_gain=0.816/gate=0.229 for hanging_alpha_0_5; gate=0.15
+    # alone for both hanging and neg40/neg45_wrist2offset), but repeated
+    # gain searches over this exact 2D sub-range -- even ones deliberately
+    # seeded with forced-nonzero starting values -- almost never converged
+    # to using it: the optimizer kept landing on ik_posture_gain~0 or
+    # values indistinguishable from just lowering ik_joint_gain instead.
     #
-    # Bound revised the SAME day after the first version ([0,50], an
-    # absolute QP weight) was found to have the wrong SCALE: hand-sweeping
-    # it up to 128 against that exact real failure barely moved the
-    # outcome (0.2533 -> 0.2517, never passing), because that gain
-    # vector's qp_task_weight (~1.8e8) makes an absolute weight in [0,50]
-    # utterly negligible by comparison (ratio ~1e-7) -- confirmed directly
-    # by sweeping the OLD absolute semantics up into the 1e8-1e9 range
-    # against the same case, which genuinely fixed it. compute_ik_seeded
-    # now interprets ik_posture_gain as a FRACTION OF qp_task_weight
-    # rather than an absolute weight specifically to remove this scale
-    # dependency: whatever qp_task_weight the search lands on, ik_posture_
-    # gain automatically tracks it. Re-swept against the same real case
-    # with this corrected scaling: a clean, monotonic pass/fail boundary
-    # right around 0.5 (peak orientation error 0.2533 at 0.0 down to
-    # 0.0235 at 10.0, guard-free from ~0.5 onward) -- [0,10] covers this
-    # useful range with room past the boundary on both sides.
-    ("ik_posture_gain", 0.0, 10.0, False),
-    # ik_posture_activation_joint_dev_rad added 2026-08-06, replaced an
-    # orientation-error-based version the SAME day. That version fixed
-    # hanging_alpha_0_5's -X failure island (a real gain search with it
-    # available found ik_posture_gain=0.816, gate=0.229 rad, and hanging's
-    # pass rate rose from 50% to 84%) but investigating the REMAINING
-    # failures found neg40/neg45_wrist2offset fail via a structurally
-    # DIFFERENT mechanism this orientation-based gate can't also serve:
-    # their joint_velocity_guard trips happen while real orientation error
-    # is still only ~0.05 rad (the failure is q_target's wrist_2 component
-    # itself running away under near-zero regularization, a joint-space
-    # phenomenon, not an orientation one) -- a ~5x mismatch vs hanging's
-    # own ~0.25 rad trigger point, too wide for one global threshold to
-    # serve both. Traced ||q_current - q_rest|| instead: comparable at
-    # both poses' trip points (0.54 vs 0.39 rad) and similar GROWTH RATE
-    # throughout both trajectories -- a genuinely pose-agnostic signal.
-    # Validated directly: gate=0.15 fixes BOTH real failing cases with the
-    # SAME threshold (neg40 dx=0.0464: peak qd 4.586->2.931 rad/s, guard-
-    # free; hanging dx=0.2405: peak orientation 0.2533->0.1877 rad,
-    # guard-free) -- something no orientation-based threshold could do.
-    # Also cheaper: no extra fk_jacobian_fn call needed. Bounds chosen so
-    # -1.0 (the sentinel every shorter historical action vector gets
-    # padded with) maps to 0.02 -- near-zero, i.e. "trigger almost
-    # immediately," faithfully reproducing every PRIOR vector's actual
-    # behavior (posture either off entirely, or unconditionally active --
-    # both cases padding-insensitive to this new dimension's exact value).
-    ("ik_posture_activation_joint_dev_rad", 0.02, 0.6, False),
+    # Replaced by ik_max_joint_deviation_rad: a genuine HARD bound on the
+    # null-space (redundant) part of compute_ik_seeded's solve, enforced
+    # exactly via null-space-basis coordinate clipping (controller_core/
+    # kinematics_utils.py::null_space_basis + modes.py's compute_ik_seeded
+    # -- see that module for the full 2-version history, including a
+    # first, WRONG uniform-per-joint-bound attempt that silently crippled
+    # task achievement at poses where the "redundant" joints aren't the
+    # same ones as at other poses). Unlike the soft pull, task achievement
+    # (J_task @ dq) is PROVABLY unaffected by however aggressively this
+    # clips, so there is nothing for a search to trade off against --
+    # tighter should structurally never hurt tracking, only redundant
+    # drift, removing the exact ambiguity that made the soft version hard
+    # to find via search.
+    #
+    # IMPORTANT SCOPE LIMIT (see config.py's docstring for the full
+    # finding): this mechanism only fixes REDUNDANT (null-space) failures
+    # (confirmed for neg40/neg45_wrist2offset's wrist_2 runaway). It
+    # CANNOT fix hanging_alpha_0_5's -X orientation failure -- a direct
+    # linear-algebra check found that failure's orientation coupling lives
+    # in the TASK (row) space itself, not the null space. Do not expect a
+    # search over this field alone to recover hanging's pass rate the way
+    # the old soft-pull mechanism (when it DID get used) once did.
+    #
+    # Range: log-scaled (spans orders of magnitude, like pinv_damping/
+    # qp_task_weight above), bounds DELIBERATELY ordered (lo=2.0, hi=0.01)
+    # so action=-1.0 -> 2.0 rad (loose enough that it should essentially
+    # never bind for any transport-scale move, approximating "off" without
+    # needing a special sentinel -- ik_max_joint_deviation_rad has no
+    # natural "always inactive" numeric value the way ik_posture_gain=0
+    # did) and action=+1.0 -> 0.01 rad (tight -- strongly constrains
+    # redundant drift, matching the value that fixed neg40/neg45 in direct
+    # validation). This ordering matters: -1.0 is the sentinel every
+    # SHORTER historical action vector gets padded with for a missing
+    # trailing dimension (see optimize.py's seed_from_json padding and
+    # this package's tests' _SEARCH2_ACTION), and those vectors' actual
+    # historical behavior (recorded before this field existed at all) was
+    # genuinely unconstrained -- padding them with a value that instead
+    # activates a TIGHT null-space clip would silently reinterpret their
+    # real recorded guard-trip behavior into a pass, corrupting exactly
+    # the kind of regression test this repo relies on (found the hard way:
+    # the (0.01, 2.0) ordering flipped two real historical-regression
+    # tests from fail-as-recorded to spuriously passing).
+    ("ik_max_joint_deviation_rad", 2.0, 0.01, True),
 )
 ACTION_DIM = len(ACTION_FIELDS)
 OBS_DIM = 12
@@ -332,8 +333,7 @@ class VelocityTransportEnv(gym.Env):
         self._controller.cfg.ik_joint_gain = gains["ik_joint_gain"]
         self._controller.cfg.pinv_damping = gains["pinv_damping"]
         self._controller.cfg.qp_task_weight = gains["qp_task_weight"]
-        self._controller.cfg.ik_posture_gain = gains["ik_posture_gain"]
-        self._controller.cfg.ik_posture_activation_joint_dev_rad = gains["ik_posture_activation_joint_dev_rad"]
+        self._controller.cfg.ik_max_joint_deviation_rad = gains["ik_max_joint_deviation_rad"]
 
         robot_state = {
             "time": self._t_s,

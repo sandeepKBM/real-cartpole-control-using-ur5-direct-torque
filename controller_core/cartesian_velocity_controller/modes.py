@@ -187,7 +187,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..box_qp import build_weighted_least_squares_qp, solve_box_qp
-from ..kinematics_utils import swing_twist_axis_error
+from ..kinematics_utils import null_space_basis, swing_twist_axis_error
 from .math_utils import _damped_pinv
 
 
@@ -240,34 +240,6 @@ def compute_ik_seeded(
     task_w = max(float(cfg.qp_task_weight), 1.0e-6)
     reg = max(float(cfg.pinv_damping), 1.0e-9) ** 2  # matches _damped_pinv's own d^2 scale
 
-    # ik_posture_activation_joint_dev_rad (added 2026-08-06, replaced an
-    # orientation-error-based version the SAME day -- see this module's
-    # git history): gates the posture term ON only when the REAL, joint-
-    # space deviation ||q_current - q_rest|| already exceeds the
-    # threshold. An earlier version gated on real orientation error
-    # instead (fixing a first, even earlier bug -- gating on the internal
-    # solve's q_rest-relative error, which stays small regardless of real
-    # drift). Orientation error genuinely fixed the one real case it was
-    # built for (hanging_alpha_0_5's -X failure island), but root-causing
-    # a SECOND real failure class (neg40/neg45_wrist2offset's joint_
-    # velocity_guard trips) found it structurally can't serve both: at
-    # neg40's trip, real orientation error was only 0.053 rad (the
-    # failure is q_target's wrist_2 component itself running away, a
-    # joint-space phenomenon, not an orientation one) while hanging's own
-    # trip needed ~0.25 rad -- a ~5x mismatch no single global threshold
-    # can serve. Traced directly: ||q-q_rest|| at the moment of failure is
-    # far more comparable across the two cases (0.54 vs 0.39 rad) AND
-    # grows at a similar RATE throughout both trajectories (e.g. both
-    # reach ~0.2 by roughly the same elapsed time), making it a much
-    # better pose-agnostic "something is going wrong" signal -- and it's
-    # cheaper too: no extra fk_jacobian_fn call needed, q_current and
-    # q_rest are already function arguments. None (default) reproduces
-    # ik_posture_gain's unconditional prior behavior unchanged.
-    posture_active = cfg.ik_posture_gain != 0.0
-    if posture_active and cfg.ik_posture_activation_joint_dev_rad is not None:
-        activation_limit = abs(float(cfg.ik_posture_activation_joint_dev_rad))
-        posture_active = float(np.linalg.norm(q_current - q_rest)) >= activation_limit
-
     q_k = q_rest.copy()
     for _ in range(max(int(cfg.ik_iterations), 1)):
         p_k, quat_k, jac_k = fk_jacobian_fn(q_k)
@@ -285,8 +257,7 @@ def compute_ik_seeded(
 
         # QP-constrained Newton step, replacing the plain damped
         # pseudoinverse: minimize reg*||dq||^2 + task_w*||J_task@dq
-        # - task_err||^2 [+ (ik_posture_gain*task_w)*||dq-(q_rest-q_k)||^2]
-        # subject to q_lo <= q_k+dq <= q_hi, via the shared
+        # - task_err||^2 subject to q_lo <= q_k+dq <= q_hi, via the shared
         # build_weighted_least_squares_qp + solve_box_qp interface
         # (controller_core/box_qp.py). task_w large (default 1e4) makes
         # this closely match the unconstrained damped pinv AWAY from any
@@ -295,64 +266,80 @@ def compute_ik_seeded(
         # never bind) while GUARANTEEING q_k+dq never exceeds a real
         # joint limit when one is supplied, unlike the plain Newton step,
         # which has no way to represent that at all.
-        #
-        # ik_posture_gain (2026-08-06, INTEGRATED into this same QP as of
-        # this date -- see this module's own git history for the original
-        # solve-then-patch nullspace-projected version, replaced rather
-        # than kept alongside this one, per this repo's "reduce ambiguity/
-        # redundancy" direction): fixes a real gap -- the reg*||dq||^2
-        # term alone is the ONLY thing regularizing whatever's outside the
-        # selected task dims (e.g. rx/ry when task_dim_rx/ry are False),
-        # and it's a pure minimum-STEP-norm bias, not a pull toward q_rest
-        # specifically -- with pinv_damping near zero and qp_task_weight
-        # near-infinite (exactly the direction a real gain search pushed
-        # toward, since it sharpens task tracking), that leaves the
-        # unconstrained axes free to drift. Traced directly: rz (the
-        # task-constrained axis) tracked to within 2e-4 rad throughout a
-        # failing episode while rx (unconstrained) grew to 0.25 rad and
-        # tripped the orientation guard alone.
-        #
-        # This integrated formulation (one QP, task + posture terms both
-        # inside the SAME weighted least-squares objective) replaced an
-        # earlier version that solved the task QP alone, THEN added a
-        # separately-computed null-space-projected posture correction
-        # afterward, then re-clipped the combined step -- that version had
-        # an EXACT guarantee of zero task perturbation (via a true
-        # orthogonal null-space projector) but validated poorly against a
-        # real failing case: at the extreme (pinv_damping, qp_task_weight)
-        # a real gain search converged to, solve_box_qp's underlying
-        # linear solve was already at the edge of double-precision
-        # conditioning, and adding a separately-projected correction on
-        # top barely moved the outcome even at posture gains up to 128.
-        # This version's posture weight is added DIRECTLY to the same
-        # hessian the task term populates, which is itself a regularizer
-        # (well-conditioned in every direction, including whatever the
-        # task leaves unconstrained) rather than a correction bolted on
-        # after an already near-singular solve.
-        #
-        # ik_posture_gain is a FRACTION OF task_w, not an absolute weight
-        # (found and fixed the same day it was added): an absolute weight
-        # in a small, easy-to-search range like [0,50] is negligible once
-        # qp_task_weight lands anywhere near the 1e8-1e10 range real
-        # searches converge toward -- confirmed directly, sweeping the
-        # absolute version up to 128 against a real failing case never
-        # moved the peak orientation error past 0.2525 rad (still failing
-        # the 0.25 rad guard), while sweeping the SAME case with weight
-        # comparable to qp_task_weight (i.e. what ik_posture_gain~0.5-5
-        # now means) genuinely fixed it (peak orientation error down to
-        # 0.04-0.21 rad, guard-free). Scaling by task_w makes
-        # ik_posture_gain's effective strength automatically track
-        # wherever qp_task_weight ends up, instead of needing a search
-        # bound spanning many more orders of magnitude than is practical
-        # to sample linearly (0 must remain exactly representable as
-        # "off," which a log-scaled field can't do).
         dq_lo = q_lo - q_k
         dq_hi = q_hi - q_k
         terms = [(j_task_k, task_err_k, task_w)]
-        if posture_active:
-            terms.append((np.eye(6, dtype=np.float64), q_rest - q_k, float(cfg.ik_posture_gain) * task_w))
         hessian_qp, linear_qp = build_weighted_least_squares_qp(terms, reg=reg)
         dq = solve_box_qp(hessian_qp, linear_qp, dq_lo, dq_hi)
+
+        # ik_max_joint_deviation_rad (added 2026-08-06, corrected TWICE the
+        # SAME day -- see this module's git history for both prior
+        # versions and why each was wrong): a genuine hard bound on how
+        # far the REDUNDANT (null-space) part of the solve may wander from
+        # q_rest, WITHOUT blocking task-necessary motion.
+        #
+        # v1 applied |q_k[i]-q_rest[i]| <= max_dev to EVERY joint uniformly
+        # via a tightened box -- fixed both known real failures' guard
+        # trips, but silently crippled task achievement at the SAME bound
+        # values (e.g. hanging_alpha_0_5 at dx=0.2405m only reached 0.073m,
+        # 30% of target): a uniform bound can't distinguish "joint doing
+        # real task work" from "joint drifting harmfully in the null
+        # space," and which joints are which is POSE-DEPENDENT (neg40_
+        # wrist2offset's dominant deviation is shoulder_pan+wrist_2,
+        # hanging_alpha_0_5's is shoulder_lift+elbow+wrist_1 -- disjoint),
+        # so no fixed per-joint exemption list works either.
+        #
+        # v2 (this version) fixes v1 exactly: solves the task normally
+        # (dq above), projects dq's null-space component into an
+        # orthonormal basis (kinematics_utils.null_space_basis, via SVD of
+        # j_task_k -- the pose-relative, CORRECT notion of "redundant,"
+        # not a fixed axis list), clips ONLY that basis's coordinates to
+        # +-max_dev, and reconstructs dq with its task-space (row-space)
+        # component UNCHANGED. Because the null-space basis is, by
+        # construction, exactly annihilated by j_task_k, J_task@dq_final
+        # == J_task@dq EXACTLY -- task achievement is provably unaffected
+        # by however aggressively max_dev clips. Re-validated: neg40_
+        # wrist2offset dx=0.0464m at max_dev=0.03 now passes guard-free
+        # AND reaches ~100% of its target (0.0464/0.0464m) -- v1's
+        # collapse is genuinely fixed for the case this mechanism targets.
+        #
+        # hanging_alpha_0_5's -X failure, however, is UNAFFECTED by this
+        # mechanism at ANY max_dev (down to 0.01, tried both q_rest- and
+        # q_current-referenced variants) -- confirmed why with a direct
+        # linear-algebra check, not just more trial and error: computing
+        # the PURE minimum-norm, ZERO-null-space-component step for +X
+        # motion at this pose (pinv(J_task) @ [dx,0,0,0], no null-space
+        # contribution at all) still induces real rx/ry rotation. This
+        # means hanging's orientation-vs-X-tracking coupling lives in the
+        # TASK (row) space itself, not the null space -- a fundamentally
+        # different, structural phenomenon that no null-space-projected
+        # mechanism (this one, or the earlier soft posture-pull) can fix
+        # without a REAL X-tracking accuracy trade-off, matching this
+        # repo's already-documented torque-control-lane finding for a
+        # different pose/axis ("no P, D, or I gain... can hold Y without
+        # breaking X-tracking at this pose/displacement -- structural, not
+        # a search gap"). Do not expect ik_max_joint_deviation_rad (or any
+        # future null-space mechanism) to help hanging_alpha_0_5's -X
+        # failure specifically -- that would need either accepting the
+        # accuracy trade-off deliberately, or a different pose/approach
+        # entirely, not another controller-side redundancy-resolution fix.
+        if cfg.ik_max_joint_deviation_rad is not None:
+            max_dev = abs(float(cfg.ik_max_joint_deviation_rad))
+            basis = null_space_basis(j_task_k)
+            if basis.shape[1] > 0:
+                c_current = basis.T @ (q_k - q_rest)
+                c_proposed = basis.T @ (q_k + dq - q_rest)
+                c_clipped = np.clip(c_proposed, -max_dev, max_dev)
+                row_space_dq = dq - basis @ (basis.T @ dq)
+                dq = row_space_dq + basis @ (c_clipped - c_current)
+                # Joint limits are a harder physical constraint than this
+                # heuristic deviation bound -- re-clip to the box as a
+                # final safety net. Only ever binds in the rare case where
+                # the two genuinely conflict (a real joint limit sits
+                # inside the deviation band); costs the exact-task-
+                # preservation guarantee ONLY in that edge case, not in
+                # general.
+                dq = np.clip(dq, dq_lo, dq_hi)
         q_k = q_k + dq
     q_target = q_k
 
