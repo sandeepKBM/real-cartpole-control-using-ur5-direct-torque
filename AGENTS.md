@@ -531,6 +531,38 @@ Kinematic-sim findings at the -40deg / wrist_2=0.2-offset pose:
     now fixed above; the -45° Y-drift trade-off, still open above) is a trajectory-reference
     problem a smarter planner could reach — both are torque-path/authority problems.
 
+### External-codebase study: ian-chuang/homestri-ur5e-rl (2026-08-05)
+
+Surveyed for anything worth borrowing. **Verdict: almost nothing — we are ahead.** Its OSC is
+textbook Khatib (`Mx = inv(J M⁻¹ Jᵀ)`, `u = -Jᵀ Mx u_task`, dynamically consistent nullspace
+projector) — the same math as our `nullspace_posture`, minus our Λ shaping, adaptive
+regularization, backtracking, friction feedforward and Pinocchio dynamics. Its singularity
+handling is a single `det < 1e-3 → pinv` fallback; its nullspace term only *damps* null-space
+velocity rather than pulling toward a rest posture; its MJCF has **no torque limits at all** on
+shoulder_pan/lift/elbow and **zero** joint friction. It is also unmaintained (last commit
+2023-08) and its Gymnasium env does not import here (`gymnasium_robotics` absent). Do **not**
+take a dependency on it. Record kept so this survey is not repeated.
+
+Three non-redundant ideas were extracted and landed **flag-gated, all default off**
+(`controller_core/x_axis_cartesian_impedance.py`, tests in
+`tests/unit/test_homestri_borrowed_features.py`):
+- `posture_inertia_scaling` — **TESTED, REGRESSES, do not enable.** Canonical grid 9/24 → 3/24,
+  and no improvement at the -45deg pose it was designed for. Evidence and the checked
+  gain-retune confound: `docs/status/posture_inertia_scaling_ab_2026-08-05.md`. It did expose a
+  real semantic inconsistency worth knowing about — with `task_space_inertia_shaping` on, the
+  task gains are acceleration gains while the posture gains are torque gains — but fixing that
+  inconsistency measurably makes transport worse, so the inconsistency is evidently not what
+  limits this controller.
+- `task_velocity_saturation` (+`task_vel_sat_linear`/`_angular`) — bounds the commanded task
+  signal itself, pre-emptively, by magnitude. Distinct from every limiter here (`singular_scale`
+  keys on cond(J), backtracking on torque saturation, `ImpedanceSafetyMonitor` is a post-hoc
+  abort). **Landed and unit-tested, but NOT yet A/B'd on any sweep** — unevaluated, not endorsed.
+- `orientation_error_exact_axis_angle` — true `angle*axis` instead of the linearized
+  `2*vec(q_err)` (0.3% apart at 0.25 rad, 4.1% at 1.0 rad). **Structurally cannot help the tuned
+  configs**: they run `kp_rot=0`, so `e_rot` is multiplied by zero in the main wrench. It only
+  bites through `wrist_orientation_task` (`kp_rot_wrist`) and the reported
+  `orientation_error_norm`. Recorded here so this is not re-derived.
+
 ## 4. Safety & guardrails (hardware — do not weaken)
 
 `hardware/` is the real-UR5e RTDE lane (rewritten 2026-07-07; older lane in
