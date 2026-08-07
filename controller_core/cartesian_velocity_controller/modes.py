@@ -188,7 +188,7 @@ import numpy as np
 
 from ..box_qp import build_weighted_least_squares_qp, solve_box_qp
 from ..kinematics_utils import null_space_basis, swing_twist_axis_error
-from .math_utils import _damped_pinv, smooth_falloff
+from .math_utils import _damped_pinv, singularity_speed_scale, smooth_falloff
 
 
 def _ik_newton_solve(
@@ -229,6 +229,22 @@ def _ik_newton_solve(
             dtype=np.float64,
         )
         task_err_full_k = np.concatenate([pos_err_k, -rot_err_k])
+
+        # singularity_velocity_scaling (added 2026-08-07, default off --
+        # see config.py for the full rationale, including the measured
+        # evidence for why this keys off the FULL Jacobian's sigma_min,
+        # not J_task's). Scales the TARGET task residual itself, before it
+        # ever reaches the QP -- throttling the input, not just damping
+        # its inversion. With the flag off, sigma_min_scale stays exactly
+        # 1.0 and task_err_full_k is bit-for-bit unchanged.
+        if cfg.singularity_velocity_scaling:
+            sigma_min_full_k = float(np.linalg.svd(jac_k, compute_uv=False)[-1])
+            sigma_min_scale = singularity_speed_scale(
+                sigma_min_full_k, cfg.singularity_sigma_min_stop,
+                cfg.singularity_sigma_min_full_speed, cfg.singularity_scale_power,
+            )
+            task_err_full_k = task_err_full_k * sigma_min_scale
+
         j_task_k = jac_k[selected, :]
         task_err_k = task_err_full_k[selected]
 
@@ -470,11 +486,78 @@ def compute_ik_seeded(
             elif blend > 0.0:
                 q_target = q_target + blend * (q_promoted - q_target)
 
-    qd_joint = cfg.ik_joint_gain * (q_target - q_current)
-    if cfg.joint_vel_limit_radps is not None:
-        qd_joint = np.clip(qd_joint, -abs(cfg.joint_vel_limit_radps), abs(cfg.joint_vel_limit_radps))
+    # jac_current/scale_current are computed BEFORE qd_joint below (reordered
+    # 2026-08-07 from this mode's original top-to-bottom shape, purely to let
+    # singularity_windup_clamp_rad -- see it just below -- know whether this
+    # cycle is actually being throttled; the arithmetic result for
+    # xd_cmd/qd_joint scaling itself is unchanged).
     _, _, jac_current = fk_jacobian_fn(q_current)
     jac_current = np.asarray(jac_current, dtype=np.float64).reshape(6, 6)
+
+    # singularity_velocity_scaling, second application point (see config.py
+    # and this module's earlier comment in _ik_newton_solve): this is the
+    # one that actually fixes both documented spikes, since q_rest itself
+    # never leaves a safe pose in either case -- the real danger is
+    # entirely in how q_current (NOT q_rest, and NOT the Newton solve
+    # above) drifts toward the singularity over many control cycles.
+    # jac_current is exactly the matrix a real robot's speedL firmware (or
+    # this repo's own downstream qd-reconstruction/integration step) would
+    # have to invert to realize whatever Cartesian velocity gets returned
+    # here, so scaling qd_joint by ITS sigma_min directly throttles the
+    # commanded velocity in proportion to real singularity proximity,
+    # rather than only damping some later inversion of a fixed-magnitude
+    # command. With the flag off, scale stays exactly 1.0.
+    scale_current = 1.0
+    if cfg.singularity_velocity_scaling:
+        sigma_min_current = float(np.linalg.svd(jac_current, compute_uv=False)[-1])
+        scale_current = singularity_speed_scale(
+            sigma_min_current, cfg.singularity_sigma_min_stop,
+            cfg.singularity_sigma_min_full_speed, cfg.singularity_scale_power,
+        )
+
+    # singularity_windup_clamp_rad (added 2026-08-07, singularity_velocity_
+    # scaling only, default off -- see config.py for the full rationale
+    # and measured evidence). q_target is recomputed FRESH from (q_rest,
+    # p_des) every cycle, independent of q_current -- while scale_current
+    # throttles q_current's real progress near a singularity, q_target
+    # keeps advancing at the caller's nominal rate regardless, so the gap
+    # (q_target - q_current) can grow unboundedly for as long as the
+    # throttle stays active. The moment sigma_min(jac_current) recovers
+    # and scale_current snaps back toward 1.0, it multiplies against that
+    # now-large gap at close to full ik_joint_gain strength -- a
+    # windup/release spike, the same failure shape as classic PID integral
+    # windup even though there is no explicit integrator here. Fix: clip
+    # the gap itself (per-joint, inf-norm) to a fixed bound BEFORE it is
+    # ever multiplied by ik_joint_gain, so the eventual command can never
+    # spike beyond that bound regardless of how large the underlying
+    # geometric gap grew while throttled.
+    #
+    # Gated on ``scale_current < 1.0`` (actively throttled THIS cycle), not
+    # merely on the flag being on -- an unconditional clamp (the first
+    # version of this fix) was measured to also bind on cycles that were
+    # never throttled at all (e.g. large hanging_alpha_0_5 moves, whose
+    # naturally large per-cycle gap has nothing to do with a singularity),
+    # which introduced 4 new orientation-guard regressions on the full
+    # 128-cell grid -- a real, measured regression, not a hypothetical
+    # one. Scoping to the throttled cycles only removed all 4 while
+    # leaving the windup fix itself fully intact, since the windup this
+    # mechanism targets can only accumulate while scale_current < 1.0 in
+    # the first place.
+    q_target_error = q_target - q_current
+    if (
+        cfg.singularity_velocity_scaling
+        and cfg.singularity_windup_clamp_rad is not None
+        and scale_current < 1.0
+    ):
+        clamp = abs(float(cfg.singularity_windup_clamp_rad))
+        q_target_error = np.clip(q_target_error, -clamp, clamp)
+
+    qd_joint = cfg.ik_joint_gain * q_target_error
+    if cfg.joint_vel_limit_radps is not None:
+        qd_joint = np.clip(qd_joint, -abs(cfg.joint_vel_limit_radps), abs(cfg.joint_vel_limit_radps))
+    if cfg.singularity_velocity_scaling:
+        qd_joint = qd_joint * scale_current
+
     xd_cmd = (jac_current @ qd_joint).astype(np.float64)
     return xd_cmd
 

@@ -1083,3 +1083,304 @@ def test_orientation_priority_yaml_round_trip():
 def test_orientation_priority_absent_from_yaml_defaults_off():
     cfg = CartesianVelocityConfig.from_controller_yaml_section({"velocity_control": {}})
     assert cfg.orientation_priority is False
+
+
+# --------------------------------------------------------------------------- #
+# singularity_velocity_scaling (added 2026-08-07) -- throttles the commanded
+# task velocity/error itself as the FULL 6x6 Jacobian approaches a
+# singularity (sigma_min -> 0), rather than only damping some later
+# inversion of a fixed-magnitude command. See config.py's docstring for the
+# full rationale, including the measured evidence for why this keys off the
+# full Jacobian rather than J_task's own (well-conditioned at both
+# documented spikes) submatrix.
+# --------------------------------------------------------------------------- #
+
+
+def _singularity_speed_scale():
+    from controller_core.cartesian_velocity_controller.math_utils import singularity_speed_scale
+
+    return singularity_speed_scale
+
+
+def test_singularity_speed_scale_is_one_at_or_above_full_speed_threshold():
+    f = _singularity_speed_scale()
+    assert f(0.03, 0.003, 0.03) == pytest.approx(1.0)
+    assert f(0.05, 0.003, 0.03) == pytest.approx(1.0)
+    assert f(1.0e9, 0.003, 0.03) == pytest.approx(1.0)
+
+
+def test_singularity_speed_scale_is_zero_at_or_below_stop_threshold():
+    f = _singularity_speed_scale()
+    assert f(0.003, 0.003, 0.03) == pytest.approx(0.0)
+    assert f(0.001, 0.003, 0.03) == pytest.approx(0.0)
+    assert f(0.0, 0.003, 0.03) == pytest.approx(0.0)
+
+
+def test_singularity_speed_scale_is_monotonically_increasing_with_sigma_min():
+    f = _singularity_speed_scale()
+    xs = np.linspace(0.003, 0.03, 40)
+    ys = [f(x, 0.003, 0.03) for x in xs]
+    assert all(0.0 <= y <= 1.0 for y in ys)
+    assert all(ys[i + 1] >= ys[i] - 1.0e-12 for i in range(len(ys) - 1))
+    assert ys[0] == pytest.approx(0.0)
+    assert ys[-1] == pytest.approx(1.0)
+
+
+def test_singularity_speed_scale_stays_in_unit_interval_for_out_of_range_inputs():
+    f = _singularity_speed_scale()
+    assert 0.0 <= f(-1.0, 0.003, 0.03) <= 1.0  # a negative sigma_min should never occur, but must not blow up
+    assert 0.0 <= f(100.0, 0.003, 0.03) <= 1.0
+
+
+def test_singularity_velocity_scaling_defaults_off():
+    cfg = CartesianVelocityConfig()
+    assert cfg.singularity_velocity_scaling is False
+    assert cfg.singularity_sigma_min_stop == pytest.approx(0.003)
+    assert cfg.singularity_sigma_min_full_speed == pytest.approx(0.03)
+    assert cfg.singularity_scale_power == pytest.approx(2.0)
+
+
+def test_singularity_velocity_scaling_off_is_bit_for_bit_prior_behavior():
+    """The exactness bar every mechanism in this file is held to: with the
+    flag off, output must be IDENTICAL to before the mechanism existed --
+    not merely close. Uses a jacobian that is deliberately near-singular
+    (so the mechanism would visibly do SOMETHING if it were mistakenly
+    active) to make sure the flag, not merely a lucky sigma_min, is what
+    gates it off."""
+    q_rest = np.zeros(6)
+    q_current = q_rest + np.array([0.05, -0.03, 0.02, 0.01, -0.02, 0.015])
+    target = _toy_fk_with_free_rx(q_rest)[0].copy()
+    target[0] += 0.05
+
+    off = _run_ik_seeded(_op_cfg(), _toy_fk_with_free_rx, q_rest, q_current, target)
+    off_explicit = _run_ik_seeded(
+        _op_cfg(
+            singularity_velocity_scaling=False,
+            singularity_sigma_min_stop=0.5, singularity_sigma_min_full_speed=0.9,
+        ),
+        _toy_fk_with_free_rx, q_rest, q_current, target,
+    )
+    np.testing.assert_array_equal(off, off_explicit)
+
+
+def test_singularity_velocity_scaling_reduces_command_near_a_singular_jacobian():
+    """The mechanism's actual purpose: a toy FK whose Jacobian's smallest
+    singular value sits inside the throttle band must produce a strictly
+    smaller-magnitude command with the mechanism on than off."""
+
+    def _toy_fk_near_singular(q: np.ndarray):
+        q = np.asarray(q, dtype=np.float64).reshape(6)
+        pos = q[0:3].copy()
+        quat = rotvec_to_quat_wxyz(0.1 * q[3:6])
+        jac = np.eye(6)
+        jac[2, 2] = 0.01  # one row nearly degenerate -> full-J sigma_min small
+        return pos, quat, jac
+
+    q_rest = np.zeros(6)
+    q_current = q_rest.copy()
+    target = _toy_fk_near_singular(q_rest)[0].copy()
+    target[0] += 0.05
+    target[2] += 0.05
+
+    off = _run_ik_seeded(_op_cfg(), _toy_fk_near_singular, q_rest, q_current, target)
+    on = _run_ik_seeded(
+        _op_cfg(
+            singularity_velocity_scaling=True,
+            singularity_sigma_min_stop=0.001, singularity_sigma_min_full_speed=0.5,
+        ),
+        _toy_fk_near_singular, q_rest, q_current, target,
+    )
+    assert float(np.linalg.norm(on)) < float(np.linalg.norm(off))
+
+
+def test_singularity_velocity_scaling_matches_full_speed_far_from_singularity():
+    """Conversely, a comfortably well-conditioned Jacobian (sigma_min above
+    the full-speed threshold everywhere the solve visits) must reproduce the
+    mechanism-off command exactly -- not merely closely -- since scale is
+    EXACTLY 1.0 throughout. Uses _toy_fk (near-identity, well-conditioned),
+    NOT _toy_fk_with_free_rx -- that toy is DELIBERATELY singular in the
+    full Jacobian (jac[4,4]=0.0, "ry unreachable... on purpose" per its own
+    docstring), so it is the wrong fixture for a "far from singularity"
+    check (confirmed directly: the mechanism correctly collapses the
+    command to zero there, which is the CORRECT behavior for a genuinely
+    singular Jacobian, not a bug in this test's premise)."""
+    q_rest = np.zeros(6)
+    q_current = q_rest + np.array([0.05, -0.03, 0.02, 0.01, -0.02, 0.015])
+    target = _toy_fk(q_rest)[0].copy()
+    target[0] += 0.05
+
+    off = _run_ik_seeded(_op_cfg(), _toy_fk, q_rest, q_current, target)
+    on = _run_ik_seeded(
+        _op_cfg(
+            singularity_velocity_scaling=True,
+            singularity_sigma_min_stop=1.0e-6, singularity_sigma_min_full_speed=1.0e-5,
+        ),
+        _toy_fk, q_rest, q_current, target,
+    )
+    np.testing.assert_array_equal(off, on)
+
+
+def test_singularity_velocity_scaling_yaml_round_trip():
+    cfg = CartesianVelocityConfig.from_controller_yaml_section(
+        {
+            "velocity_control": {
+                "singularity_velocity_scaling": True,
+                "singularity_sigma_min_stop": 0.001,
+                "singularity_sigma_min_full_speed": 0.02,
+                "singularity_scale_power": 3.0,
+            }
+        }
+    )
+    assert cfg.singularity_velocity_scaling is True
+    assert cfg.singularity_sigma_min_stop == pytest.approx(0.001)
+    assert cfg.singularity_sigma_min_full_speed == pytest.approx(0.02)
+    assert cfg.singularity_scale_power == pytest.approx(3.0)
+
+
+def test_singularity_velocity_scaling_absent_from_yaml_defaults_off():
+    cfg = CartesianVelocityConfig.from_controller_yaml_section({"velocity_control": {}})
+    assert cfg.singularity_velocity_scaling is False
+
+
+# --------------------------------------------------------------------------- #
+# singularity_windup_clamp_rad (added 2026-08-07) -- anti-windup fix for
+# singularity_velocity_scaling's own throttle-then-release dynamic: q_target
+# is recomputed fresh from (q_rest, p_des) every cycle regardless of
+# throttling, so the gap (q_target - q_current) can grow unboundedly while
+# scale_current < 1.0, then release a large spike the instant scale_current
+# recovers toward 1.0. See config.py for the full rationale and the measured
+# 128-cell grid evidence (105/128 tie -> 111/128, zero new regressions, at
+# clamp=0.03 rad gated on scale_current < 1.0).
+# --------------------------------------------------------------------------- #
+
+
+def _toy_fk_near_singular_const(q: np.ndarray):
+    """Jacobian is near-singular (jac[2,2]=0.01) for EVERY q -- unlike a
+    real robot, this toy fixture guarantees scale_current < 1.0 regardless
+    of q_current, which is exactly what's needed to test the windup
+    clamp's "actively throttled" gate in isolation, independent of any
+    particular pose."""
+    q = np.asarray(q, dtype=np.float64).reshape(6)
+    pos = q[0:3].copy()
+    quat = rotvec_to_quat_wxyz(0.1 * q[3:6])
+    jac = np.eye(6)
+    jac[2, 2] = 0.01
+    return pos, quat, jac
+
+
+def test_singularity_windup_clamp_defaults_off():
+    cfg = CartesianVelocityConfig()
+    assert cfg.singularity_windup_clamp_rad is None
+
+
+def test_singularity_windup_clamp_off_is_bit_for_bit_prior_behavior():
+    """With singularity_velocity_scaling on but singularity_windup_clamp_rad
+    left at its default (None), output must be IDENTICAL to a config that
+    never mentions the field at all -- the exactness bar every mechanism in
+    this file is held to."""
+    q_rest = np.zeros(6)
+    q_current = q_rest + np.array([0.3, -0.03, 0.02, 0.01, -0.02, 0.015])
+    target = _toy_fk_near_singular_const(q_rest)[0].copy()
+    target[0] += 0.05
+    target[2] += 0.05
+
+    kw = dict(
+        singularity_velocity_scaling=True,
+        singularity_sigma_min_stop=0.001, singularity_sigma_min_full_speed=0.5,
+    )
+    default = _run_ik_seeded(_op_cfg(**kw), _toy_fk_near_singular_const, q_rest, q_current, target)
+    explicit_off = _run_ik_seeded(
+        _op_cfg(singularity_windup_clamp_rad=None, **kw),
+        _toy_fk_near_singular_const, q_rest, q_current, target,
+    )
+    np.testing.assert_array_equal(default, explicit_off)
+
+
+def test_singularity_windup_clamp_reduces_command_when_actively_throttled():
+    """The mechanism's actual purpose: with the arm actively throttled
+    (scale_current < 1.0, guaranteed by _toy_fk_near_singular_const) and a
+    large gap between q_target and q_current (simulating the windup this
+    mechanism targets -- q_current deliberately far from where the Newton
+    solve places q_target), clamping the gap before it is multiplied by
+    ik_joint_gain must produce a strictly smaller-magnitude command than
+    leaving it unclamped."""
+    q_rest = np.zeros(6)
+    q_current = q_rest + np.array([0.4, 0.0, 0.0, 0.0, 0.0, 0.0])  # large gap, well-conditioned direction
+    target = _toy_fk_near_singular_const(q_rest)[0].copy()
+    target[0] += 0.05
+
+    kw = dict(
+        singularity_velocity_scaling=True,
+        singularity_sigma_min_stop=0.001, singularity_sigma_min_full_speed=0.5,
+    )
+    no_clamp = _run_ik_seeded(_op_cfg(**kw), _toy_fk_near_singular_const, q_rest, q_current, target)
+    clamped = _run_ik_seeded(
+        _op_cfg(singularity_windup_clamp_rad=0.03, **kw),
+        _toy_fk_near_singular_const, q_rest, q_current, target,
+    )
+    assert float(np.linalg.norm(clamped)) < float(np.linalg.norm(no_clamp))
+
+
+def test_singularity_windup_clamp_inactive_when_singularity_velocity_scaling_off():
+    """The clamp is purpose-built anti-windup for singularity_velocity_
+    scaling's own dynamic -- with that flag off, setting singularity_
+    windup_clamp_rad must have ZERO effect, even with a huge gap that
+    would clearly bind if the clamp were active."""
+    q_rest = np.zeros(6)
+    q_current = q_rest + np.array([0.4, 0.0, 0.0, 0.0, 0.0, 0.0])
+    target = _toy_fk_near_singular_const(q_rest)[0].copy()
+    target[0] += 0.05
+
+    off = _run_ik_seeded(_op_cfg(), _toy_fk_near_singular_const, q_rest, q_current, target)
+    off_with_clamp_set = _run_ik_seeded(
+        _op_cfg(singularity_velocity_scaling=False, singularity_windup_clamp_rad=0.001),
+        _toy_fk_near_singular_const, q_rest, q_current, target,
+    )
+    np.testing.assert_array_equal(off, off_with_clamp_set)
+
+
+def test_singularity_windup_clamp_inactive_when_not_actively_throttled():
+    """Real regression this gating fixes (see config.py's docstring): a
+    first version of this mechanism clamped whenever the flag was on,
+    regardless of whether this cycle was actually throttled -- which was
+    measured to also bind on ordinary, never-near-a-singularity moves with
+    a naturally large gap, introducing new guard regressions unrelated to
+    the windup this mechanism targets. Using _toy_fk (well-conditioned
+    everywhere) with a loose enough threshold that scale_current is
+    EXACTLY 1.0, a huge gap, and a tiny clamp (0.001 rad, which would
+    obviously bind if active) must still reproduce the mechanism-on-no-
+    clamp output exactly -- the clamp must not engage at all when this
+    cycle isn't actively throttled."""
+    q_rest = np.zeros(6)
+    q_current = q_rest + np.array([0.4, -0.3, 0.2, 0.1, -0.2, 0.15])
+    target = _toy_fk(q_rest)[0].copy()
+    target[0] += 0.05
+
+    kw = dict(
+        singularity_velocity_scaling=True,
+        singularity_sigma_min_stop=1.0e-6, singularity_sigma_min_full_speed=1.0e-5,
+    )
+    no_clamp = _run_ik_seeded(_op_cfg(**kw), _toy_fk, q_rest, q_current, target)
+    tiny_clamp = _run_ik_seeded(
+        _op_cfg(singularity_windup_clamp_rad=0.001, **kw),
+        _toy_fk, q_rest, q_current, target,
+    )
+    np.testing.assert_array_equal(no_clamp, tiny_clamp)
+
+
+def test_singularity_windup_clamp_rad_yaml_round_trip():
+    cfg = CartesianVelocityConfig.from_controller_yaml_section(
+        {
+            "velocity_control": {
+                "singularity_velocity_scaling": True,
+                "singularity_windup_clamp_rad": 0.03,
+            }
+        }
+    )
+    assert cfg.singularity_velocity_scaling is True
+    assert cfg.singularity_windup_clamp_rad == pytest.approx(0.03)
+
+
+def test_singularity_windup_clamp_rad_absent_from_yaml_defaults_off():
+    cfg = CartesianVelocityConfig.from_controller_yaml_section({"velocity_control": {}})
+    assert cfg.singularity_windup_clamp_rad is None

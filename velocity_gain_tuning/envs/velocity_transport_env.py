@@ -182,6 +182,25 @@ class VelocityTransportEnvConfig:
     orientation_priority_residual_tol_m: float = 0.0001
     orientation_priority_residual_falloff_m: float = 0.0005
     orientation_priority_falloff_power: float = 2.0
+    # singularity_velocity_scaling (added 2026-08-07, default OFF = exact
+    # prior behavior). Exposed as ENV CONFIG, not a new ACTION_FIELDS
+    # dimension, for the identical reason orientation_priority is above --
+    # every historical search_result_*.json's action vector must stay
+    # interpretable, and this makes "same gains, mechanism on vs off" an
+    # apples-to-apples comparison. See controller_core/cartesian_velocity_
+    # controller/config.py for the mechanism and its measured evidence.
+    singularity_velocity_scaling: bool = False
+    singularity_sigma_min_stop: float = 0.003
+    singularity_sigma_min_full_speed: float = 0.03
+    singularity_scale_power: float = 2.0
+    # singularity_windup_clamp_rad (added 2026-08-07, default OFF = exact
+    # prior behavior, same reasoning as the two fields above): anti-windup
+    # fix for singularity_velocity_scaling's own throttle-then-release
+    # dynamic, see controller_core/cartesian_velocity_controller/config.py
+    # and modes.py for the mechanism and its measured evidence (a 128-cell
+    # grid regression this field fixes without losing the mechanism's real
+    # win or introducing new regressions).
+    singularity_windup_clamp_rad: float | None = None
     # Damping for the bare-pinv(jac) @ xd_cmd reconstruction step() uses to
     # ESTIMATE joint velocity for joint_velocity_guard (and to integrate
     # self._q forward -- see step()'s docstring-adjacent comment there).
@@ -344,6 +363,11 @@ class VelocityTransportEnv(gym.Env):
             orientation_priority_residual_tol_m=self.cfg.orientation_priority_residual_tol_m,
             orientation_priority_residual_falloff_m=self.cfg.orientation_priority_residual_falloff_m,
             orientation_priority_falloff_power=self.cfg.orientation_priority_falloff_power,
+            singularity_velocity_scaling=self.cfg.singularity_velocity_scaling,
+            singularity_sigma_min_stop=self.cfg.singularity_sigma_min_stop,
+            singularity_sigma_min_full_speed=self.cfg.singularity_sigma_min_full_speed,
+            singularity_scale_power=self.cfg.singularity_scale_power,
+            singularity_windup_clamp_rad=self.cfg.singularity_windup_clamp_rad,
         )
         self._controller = CartesianVelocityController(gain_cfg)
         self._controller.reset_from_state(
