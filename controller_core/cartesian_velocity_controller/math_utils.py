@@ -27,3 +27,48 @@ def _damped_pinv(j: np.ndarray, damping: float) -> np.ndarray:
     d2 = float(damping) ** 2
     gram = j @ j.T + d2 * np.eye(j.shape[0], dtype=np.float64)
     return j.T @ np.linalg.inv(gram)
+
+
+def smooth_falloff(value: float, full_below: float, zero_above: float, power: float = 2.0) -> float:
+    """Smooth [0, 1] blend weight, EXACTLY 1.0 at or below ``full_below`` and
+    EXACTLY 0.0 at or above ``zero_above``, falling off as ``power`` in
+    between:
+
+        u = (|value| - full_below) / (zero_above - full_below), clipped to [0, 1]
+        weight = (1 - u) ** power
+
+    Pure scalar math with no simulator dependency, deliberately factored out
+    here so its SHAPE is unit-testable on its own.
+
+    Used by ``modes.py``'s ``compute_ik_seeded`` for ``orientation_priority``
+    (see ``config.py``): ``value`` is the orientation-prioritised IK solve's
+    own POSITION residual, so the blend is 1.0 (orientation fully promoted)
+    exactly where promoting it costs no position accuracy, and decays to 0.0
+    (today's position-only behaviour, bit-for-bit) where it would.
+
+    Both exact endpoints matter. The exact 0.0 above ``zero_above`` is what
+    lets the caller skip the blend entirely and return the unmodified
+    position-only solution, so a case the mechanism cannot help is not
+    perturbed by it at all -- the same exactness-preservation discipline
+    ``ik_max_joint_deviation_rad`` (null-space clipping that provably cannot
+    change ``J_task @ dq``) was held to. The exact 1.0 below ``full_below``
+    is what makes the common, comfortably-reachable case a single clean
+    branch rather than a near-1 blend of two nearly-identical solutions.
+
+    ``power`` defaults to 2.0 rather than 1.0 so the blend stays close to
+    fully-promoted over most of the band and only drops off sharply as the
+    residual approaches the point where orientation genuinely conflicts with
+    position.
+
+    Degenerate ``zero_above <= full_below`` collapses to a step at
+    ``full_below`` rather than dividing by zero.
+    """
+    v = abs(float(value))
+    lo = float(full_below)
+    hi = float(zero_above)
+    if v <= lo:
+        return 1.0
+    if hi <= lo or v >= hi:
+        return 0.0
+    u = (v - lo) / (hi - lo)
+    return float((1.0 - u) ** max(float(power), 0.0))

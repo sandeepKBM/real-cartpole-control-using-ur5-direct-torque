@@ -93,6 +93,80 @@ class CartesianVelocityConfig:
     # gap). Do not expect this field to help that failure.
     ik_max_joint_deviation_rad: float | None = None
 
+    # --- orientation_priority (added 2026-08-06, ik_seeded_resolution only,
+    # default OFF -- reproduces the exact prior behavior bit-for-bit) ---
+    #
+    # Why a NEW mechanism family was needed: every redundancy-resolution
+    # mechanism this controller has (the removed soft posture pull, and
+    # ik_max_joint_deviation_rad above) acts on the NULL space of J_task,
+    # and a direct linear-algebra check proved hanging_alpha_0_5's -X
+    # orientation failure lives in the ROW space -- the pure minimum-norm,
+    # zero-null-space-component task step already induces real rx/ry
+    # rotation there. Independently confirmed by search: the per-cell
+    # differential_evolution oracle (velocity_gain_tuning/scheduling/,
+    # searching the FULL 6D gain space per cell) found NO guard-clean
+    # solution anywhere for that cell. Structural to the COST FUNCTION, not
+    # a tuning gap: with task_dim_rx/task_dim_ry both False (the default),
+    # rx/ry are checked by the safety guard but appear nowhere in what the
+    # QP actually minimizes.
+    #
+    # What this does: runs compute_ik_seeded's Newton solve a SECOND time
+    # with the disabled rotation axes PROMOTED to co-primary task rows
+    # (weight = qp_task_weight * orientation_priority_weight; 1.0, i.e.
+    # equal weight, is the validated default), then blends between the two
+    # solutions by how much position accuracy that promotion actually cost:
+    #
+    #   blend = smooth_falloff(|p_des - FK(q_promoted)|,
+    #                          residual_tol_m, residual_falloff_m, power)
+    #   q_target = q_position_only + blend * (q_promoted - q_position_only)
+    #
+    # Where the full 6-DOF pose is reachable the promoted solve hits the
+    # position target exactly AND drives orientation error to ~0, so it wins
+    # outright (blend == 1.0). Where it is not, the residual grows, the
+    # blend decays to EXACTLY 0.0, and behaviour is bit-for-bit today's.
+    #
+    # Why not simply flip task_dim_rx/task_dim_ry on -- the zero-code
+    # alternative, which IS what the promoted solve computes? Because
+    # unconditionally is the problem, not the promotion itself: measured at
+    # hanging_alpha_0_5, always-on rx/ry drives orientation error to exactly
+    # 0.0000 and recovers a real failing case at 100% X-tracking, but at
+    # displacements past the reach boundary the square, essentially-undamped
+    # 6-row solve goes ill-conditioned, the arm RETREATS in X, and the
+    # orientation trips become worse orthogonal-drift trips. The residual
+    # gate is precisely the "is this promotion free here?" test that
+    # distinguishes the two regimes.
+    #
+    # The blend gate reads only the promoted solve's own residual, never
+    # q_current, so ik_seeded_resolution's path-independence property (see
+    # modes.py) is preserved exactly.
+    #
+    # THE DEFAULT BAND IS DELIBERATELY VERY TIGHT (0.1 mm to 0.5 mm), i.e.
+    # very nearly a hard accept/reject rather than a gradual blend -- and
+    # that is a MEASURED choice, not a guess. Sweeping the band over the full
+    # 128-cell grid (tools/evaluate_orientation_priority.py, see
+    # docs/status/task_priority_orientation_hanging_2026-08-06.md) found a
+    # clean monotone trend: the wider the band, the worse the result --
+    # 111/128 at (1e-4, 5e-4), 107 at (2e-4, 2e-3), 99 at (2e-3, 1e-2), 95 at
+    # (5e-4, 5e-2), 85 at (2e-3, 1e-1, linear) -- against a 104/128 baseline.
+    # Cause, traced: a PARTIAL blend emits a q_target that neither solve
+    # endorses, and worse, the blend weight sweeps through the band DURING a
+    # move as the commanded target advances, so q_target migrates between two
+    # different IK branches mid-move. The joint-space P law chases that
+    # migration at ik_joint_gain and trips the joint-velocity guard -- every
+    # single one of the 12 cells the wide band broke was a
+    # joint_velocity_guard trip at 3.00-3.22 rad/s against a 3.0 limit, all
+    # of them cells the tight band leaves untouched. Widen this band only
+    # with grid evidence in hand.
+    #
+    # Tightening further makes no difference (a pure-step gate scores the
+    # same 111/128), so the small residual band is kept purely as robustness
+    # against floating-point noise in the residual, not for its blending.
+    orientation_priority: bool = False
+    orientation_priority_weight: float = 1.0
+    orientation_priority_residual_tol_m: float = 0.0001
+    orientation_priority_residual_falloff_m: float = 0.0005
+    orientation_priority_falloff_power: float = 2.0
+
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianVelocityConfig":
         vc = ctrl.get("velocity_control", {}) or {}
@@ -133,4 +207,11 @@ class CartesianVelocityConfig:
             ik_max_joint_deviation_rad=(
                 float(vc["ik_max_joint_deviation_rad"]) if "ik_max_joint_deviation_rad" in vc else None
             ),
+            orientation_priority=bool(vc.get("orientation_priority", False)),
+            orientation_priority_weight=float(vc.get("orientation_priority_weight", 1.0)),
+            orientation_priority_residual_tol_m=float(vc.get("orientation_priority_residual_tol_m", 0.002)),
+            orientation_priority_residual_falloff_m=float(
+                vc.get("orientation_priority_residual_falloff_m", 0.010)
+            ),
+            orientation_priority_falloff_power=float(vc.get("orientation_priority_falloff_power", 2.0)),
         )

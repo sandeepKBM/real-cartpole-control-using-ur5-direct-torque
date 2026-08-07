@@ -831,3 +831,255 @@ def test_ik_seeded_resolution_zero_error_at_q_rest_when_target_is_p0():
         }
     )
     np.testing.assert_allclose(xd, np.zeros(6), atol=1e-8)
+
+
+# --------------------------------------------------------------------------- #
+# orientation_priority -- promote the DISABLED rotation axes to co-primary IK
+# task rows in a second solve, then blend by how much position accuracy that
+# promotion actually cost. Added 2026-08-06 after a direct linear-algebra
+# check proved hanging_alpha_0_5's -X orientation failure lives in the TASK
+# (row) space, out of reach of every null-space mechanism this controller had
+# (see modes.py / config.py). Default off; when off, bit-for-bit prior
+# behaviour, which is the first thing these tests pin down.
+# --------------------------------------------------------------------------- #
+def _smooth_falloff():
+    from controller_core.cartesian_velocity_controller.math_utils import smooth_falloff
+
+    return smooth_falloff
+
+
+def test_smooth_falloff_is_exactly_one_below_the_tolerance():
+    f = _smooth_falloff()
+    assert f(0.0, 0.002, 0.010) == 1.0
+    assert f(0.0015, 0.002, 0.010) == 1.0
+    assert f(0.002, 0.002, 0.010) == 1.0
+    # Sign-independent: it is a residual MAGNITUDE.
+    assert f(-0.0015, 0.002, 0.010) == 1.0
+
+
+def test_smooth_falloff_is_exactly_zero_above_the_falloff():
+    """The exact-zero endpoint is the mechanism's no-regression guarantee:
+    past this point the promoted solve is discarded outright rather than
+    blended in at some small weight, so a case orientation_priority cannot
+    help is not perturbed by it at all."""
+    f = _smooth_falloff()
+    assert f(0.010, 0.002, 0.010) == 0.0
+    assert f(0.05, 0.002, 0.010) == 0.0
+    assert f(1.0e9, 0.002, 0.010) == 0.0
+
+
+def test_smooth_falloff_is_monotonically_decreasing_in_between():
+    f = _smooth_falloff()
+    xs = np.linspace(0.002, 0.010, 40)
+    ys = [f(x, 0.002, 0.010) for x in xs]
+    assert all(0.0 <= y <= 1.0 for y in ys)
+    assert all(ys[i + 1] <= ys[i] + 1.0e-12 for i in range(len(ys) - 1))
+    assert ys[0] == 1.0
+    assert ys[-1] == 0.0
+
+
+def test_smooth_falloff_power_shapes_the_curve():
+    """power > 1 keeps the blend closer to fully-promoted over most of the
+    band (the point of defaulting to 2.0) -- at the midpoint, quadratic is
+    0.25 where linear is 0.50."""
+    f = _smooth_falloff()
+    mid = 0.006  # midpoint of [0.002, 0.010]
+    assert f(mid, 0.002, 0.010, power=1.0) == pytest.approx(0.5)
+    assert f(mid, 0.002, 0.010, power=2.0) == pytest.approx(0.25)
+    assert f(mid, 0.002, 0.010, power=3.0) == pytest.approx(0.125)
+
+
+def test_smooth_falloff_degenerate_band_is_a_step_not_a_division_by_zero():
+    f = _smooth_falloff()
+    assert f(0.001, 0.002, 0.002) == 1.0
+    assert f(0.003, 0.002, 0.002) == 0.0
+    assert f(0.003, 0.010, 0.002) == 1.0  # zero_above < full_below: still no blow-up
+
+
+def _op_cfg(**kwargs):
+    base = dict(
+        kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0,
+        max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0,
+        reduced_task_dims=False, ik_seeded_resolution=True,
+        ik_iterations=8, ik_joint_gain=4.0, pinv_damping=0.05, qp_task_weight=1.0e4,
+    )
+    base.update(kwargs)
+    return CartesianVelocityConfig(**base)
+
+
+def _run_ik_seeded(cfg, fk, q_rest, q_current, target):
+    p0, quat0, _ = fk(q_rest)
+    ctrl = CartesianVelocityController(cfg)
+    ctrl.reset_from_state(
+        {"time": 0.0, "q": q_rest, "qd": np.zeros(6), "ee_pos": p0, "ee_quat": quat0, "target_x": float(p0[0])}
+    )
+    p_c, quat_c, _ = fk(q_current)
+    return ctrl.compute(
+        {
+            "time": 1.0, "q": q_current, "qd": np.zeros(6), "ee_pos": p_c, "ee_quat": quat_c,
+            "target_x": float(target[0]), "target_ee_pos": target, "target_ee_vel": np.zeros(3),
+            "fk_jacobian_fn": fk,
+        }
+    )
+
+
+def test_orientation_priority_defaults_off():
+    cfg = CartesianVelocityConfig()
+    assert cfg.orientation_priority is False
+    assert cfg.orientation_priority_weight == 1.0
+    assert cfg.orientation_priority_residual_tol_m == 0.0001
+    assert cfg.orientation_priority_residual_falloff_m == 0.0005
+    assert cfg.orientation_priority_falloff_power == 2.0
+
+
+def test_orientation_priority_off_is_bit_for_bit_prior_behavior():
+    """The exactness bar every mechanism in this file has been held to:
+    with the flag off, the controller output must be IDENTICAL to what it
+    was before the mechanism existed -- not merely close. Compared here
+    against a config that also has a large weight and thresholds set, to
+    prove the flag alone gates everything."""
+    q_rest = np.zeros(6)
+    q_current = q_rest + np.array([0.05, -0.03, 0.02, 0.01, -0.02, 0.015])
+    target = _toy_fk_with_free_rx(q_rest)[0].copy()
+    target[0] += 0.05
+
+    off = _run_ik_seeded(_op_cfg(), _toy_fk_with_free_rx, q_rest, q_current, target)
+    off_explicit = _run_ik_seeded(
+        _op_cfg(
+            orientation_priority=False, orientation_priority_weight=25.0,
+            orientation_priority_residual_tol_m=10.0, orientation_priority_residual_falloff_m=20.0,
+        ),
+        _toy_fk_with_free_rx, q_rest, q_current, target,
+    )
+    np.testing.assert_array_equal(off, off_explicit)
+
+
+def test_orientation_priority_zero_weight_is_bit_for_bit_prior_behavior():
+    """orientation_priority_weight == 0 means "no promoted rows," which must
+    short-circuit the whole second solve rather than promote rows at zero
+    weight (a zero-weight term still perturbs nothing mathematically, but
+    the blend would still fire -- this pins the short-circuit)."""
+    q_rest = np.zeros(6)
+    q_current = q_rest + np.array([0.05, -0.03, 0.02, 0.01, -0.02, 0.015])
+    target = _toy_fk_with_free_rx(q_rest)[0].copy()
+    target[0] += 0.05
+    off = _run_ik_seeded(_op_cfg(), _toy_fk_with_free_rx, q_rest, q_current, target)
+    zero_w = _run_ik_seeded(
+        _op_cfg(orientation_priority=True, orientation_priority_weight=0.0),
+        _toy_fk_with_free_rx, q_rest, q_current, target,
+    )
+    np.testing.assert_array_equal(off, zero_w)
+
+
+def test_orientation_priority_is_a_no_op_when_all_rotation_axes_already_selected():
+    """With task_dim_rx/ry/rz all True there are no DISABLED rotation axes
+    left to promote, so the mechanism has nothing to add and must not
+    perturb the solve."""
+    q_rest = np.zeros(6)
+    q_current = q_rest + np.array([0.05, -0.03, 0.02, 0.01, -0.02, 0.015])
+    target = _toy_fk_with_free_rx(q_rest)[0].copy()
+    target[0] += 0.05
+    kw = dict(task_dim_rx=True, task_dim_ry=True, task_dim_rz=True)
+    off = _run_ik_seeded(_op_cfg(**kw), _toy_fk_with_free_rx, q_rest, q_current, target)
+    on = _run_ik_seeded(
+        _op_cfg(orientation_priority=True, orientation_priority_weight=1.0, **kw),
+        _toy_fk_with_free_rx, q_rest, q_current, target,
+    )
+    np.testing.assert_array_equal(off, on)
+
+
+def test_orientation_priority_reduces_unselected_axis_rotation_in_q_target():
+    """The mechanism's actual purpose: rx is outside the default task
+    (task_dim_rx=False) but IS checked by the safety guard, and satisfying
+    the position task through the coupled joint 3 drags it along. Promoting
+    it must leave q_target with less rx excursion than the position-only
+    solve does."""
+    q_rest = np.zeros(6)
+    q_current = q_rest.copy()
+    target = _toy_fk_with_free_rx(q_rest)[0].copy()
+    target[0] += 0.05
+
+    def rx_of_q_target(cfg):
+        xd = _run_ik_seeded(cfg, _toy_fk_with_free_rx, q_rest, q_current, target)
+        _, _, jac_c = _toy_fk_with_free_rx(q_current)
+        qd_joint = np.linalg.pinv(jac_c) @ xd
+        q_target = q_current + qd_joint / cfg.ik_joint_gain
+        return abs(float(q_target[3]))  # joint 3 is the one driving rx
+
+    rx_off = rx_of_q_target(_op_cfg())
+    rx_on = rx_of_q_target(
+        _op_cfg(
+            orientation_priority=True, orientation_priority_weight=1.0,
+            orientation_priority_residual_tol_m=1.0, orientation_priority_residual_falloff_m=2.0,
+        )
+    )
+    assert rx_off > 1.0e-6, "toy FK must actually induce rx, or this tests nothing"
+    assert rx_on < rx_off
+
+
+def test_orientation_priority_q_target_stays_path_independent():
+    """ik_seeded_resolution's defining property must survive the new
+    mechanism: the blend gate reads the PROMOTED SOLVE's own residual, never
+    q_current, so q_target is still a deterministic function of (q_rest,
+    p_des, quat0) alone. Scheduling on the MEASURED orientation error
+    instead -- the obvious first design -- would break exactly this."""
+    cfg = _op_cfg(
+        orientation_priority=True, orientation_priority_weight=1.0,
+        orientation_priority_residual_tol_m=1.0, orientation_priority_residual_falloff_m=2.0,
+    )
+    q_rest = np.zeros(6)
+    target = _toy_fk(q_rest)[0].copy()
+    target[0] += 0.05
+
+    def q_target_from(q_current):
+        xd = _run_ik_seeded(cfg, _toy_fk, q_rest, q_current, target)
+        _, _, jac_c = _toy_fk(q_current)
+        return q_current + (np.linalg.pinv(jac_c) @ xd) / cfg.ik_joint_gain
+
+    a = q_target_from(q_rest + np.array([0.3, -0.2, 0.1, 0.05, -0.05, 0.02]))
+    b = q_target_from(q_rest + np.array([-0.4, 0.35, -0.15, 0.1, 0.08, -0.03]))
+    np.testing.assert_allclose(a, b, atol=1e-9)
+
+
+def test_orientation_priority_falls_back_exactly_when_residual_exceeds_falloff():
+    """The gate's whole point: where promoting orientation costs real
+    position accuracy, the promoted solve is discarded and behaviour returns
+    to the position-only solve EXACTLY. Forced here by setting the falloff
+    threshold to zero, so any nonzero residual demotes."""
+    q_rest = np.zeros(6)
+    q_current = q_rest.copy()
+    target = _toy_fk_with_free_rx(q_rest)[0].copy()
+    target[0] += 0.05
+    off = _run_ik_seeded(_op_cfg(), _toy_fk_with_free_rx, q_rest, q_current, target)
+    demoted = _run_ik_seeded(
+        _op_cfg(
+            orientation_priority=True, orientation_priority_weight=1.0,
+            orientation_priority_residual_tol_m=-1.0, orientation_priority_residual_falloff_m=0.0,
+        ),
+        _toy_fk_with_free_rx, q_rest, q_current, target,
+    )
+    np.testing.assert_array_equal(off, demoted)
+
+
+def test_orientation_priority_yaml_round_trip():
+    cfg = CartesianVelocityConfig.from_controller_yaml_section(
+        {
+            "velocity_control": {
+                "orientation_priority": True,
+                "orientation_priority_weight": 0.5,
+                "orientation_priority_residual_tol_m": 0.004,
+                "orientation_priority_residual_falloff_m": 0.02,
+                "orientation_priority_falloff_power": 3.0,
+            }
+        }
+    )
+    assert cfg.orientation_priority is True
+    assert cfg.orientation_priority_weight == pytest.approx(0.5)
+    assert cfg.orientation_priority_residual_tol_m == pytest.approx(0.004)
+    assert cfg.orientation_priority_residual_falloff_m == pytest.approx(0.02)
+    assert cfg.orientation_priority_falloff_power == pytest.approx(3.0)
+
+
+def test_orientation_priority_absent_from_yaml_defaults_off():
+    cfg = CartesianVelocityConfig.from_controller_yaml_section({"velocity_control": {}})
+    assert cfg.orientation_priority is False

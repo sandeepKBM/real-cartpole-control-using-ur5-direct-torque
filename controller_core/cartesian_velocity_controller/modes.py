@@ -188,58 +188,35 @@ import numpy as np
 
 from ..box_qp import build_weighted_least_squares_qp, solve_box_qp
 from ..kinematics_utils import null_space_basis, swing_twist_axis_error
-from .math_utils import _damped_pinv
+from .math_utils import _damped_pinv, smooth_falloff
 
 
-def compute_ik_seeded(
+def _ik_newton_solve(
     cfg,
     fk_jacobian_fn,
-    q_current: np.ndarray,
     p_des: np.ndarray,
     quat0: np.ndarray,
     q_rest: np.ndarray,
+    selected: list[int],
+    q_lo: np.ndarray,
+    q_hi: np.ndarray,
+    task_w: float,
+    reg: float,
+    extra_rot: list[int],
+    extra_w: float,
 ) -> np.ndarray:
-    """ik_seeded_resolution mode. See this module's docstring ("Actual fix:
-    ik_seeded_resolution") for the full design rationale."""
-    if fk_jacobian_fn is None:
-        raise ValueError(
-            "CartesianVelocityConfig.ik_seeded_resolution=True requires "
-            "state['fk_jacobian_fn'], a callable q -> (ee_pos, ee_quat, jacobian) "
-            "usable at ARBITRARY q, not just the current one -- controller_core "
-            "stays simulator-independent, so this must be supplied by the caller "
-            "(e.g. a MuJoCo-backed forward-kinematics wrapper), not built in here."
-        )
-    rot_flags = [cfg.task_dim_rx, cfg.task_dim_ry, cfg.task_dim_rz]
-    selected = [0, 1, 2] + [3 + i for i, on in enumerate(rot_flags) if on]
+    """One full ``ik_iterations``-step Newton-Raphson IK solve seeded from
+    ``q_rest``, returning ``q_target``.
 
-    # Fresh Newton-Raphson IK solve SEEDED FROM q_rest every cycle --
-    # NOT from q_current. This is the actual fix for reduced_task_dims'
-    # path-dependent multistability (see this module's docstring): q_target
-    # is a deterministic function of ONLY (p_des, q_rest) -- the same
-    # target position always produces the same q_target, regardless of how
-    # the arm got to its current configuration, because the solve never
-    # looks at q_current at all. This trades per-cycle compute cost (up to
-    # ik_iterations extra forward-kinematics/Jacobian evaluations) for
-    # eliminating the redundancy-resolution history-dependence that made
-    # reduced_task_dims' and split_base_wrist_task's rate-integrated
-    # null-space walks unpredictable.
-    # Joint position bounds for the QP step below -- permissive
-    # (effectively unconstrained) unless the caller supplied real
-    # UR5e limits, since controller_core has no hardware knowledge
-    # of its own.
-    q_lo = (
-        cfg.joint_pos_lower
-        if cfg.joint_pos_lower is not None
-        else np.full(6, -2.0 * np.pi, dtype=np.float64)
-    )
-    q_hi = (
-        cfg.joint_pos_upper
-        if cfg.joint_pos_upper is not None
-        else np.full(6, 2.0 * np.pi, dtype=np.float64)
-    )
-    task_w = max(float(cfg.qp_task_weight), 1.0e-6)
-    reg = max(float(cfg.pinv_damping), 1.0e-9) ** 2  # matches _damped_pinv's own d^2 scale
+    Extracted from ``compute_ik_seeded`` (2026-08-06) purely so
+    ``orientation_priority`` can run the SAME solve twice with two different
+    row sets -- position-only and orientation-promoted -- without duplicating
+    the loop. Called once with ``extra_rot=[]`` this is the exact,
+    unmodified pre-existing solve.
 
+    ``extra_rot``/``extra_w`` are the orientation-priority rows and their
+    absolute QP weight; empty/zero means no extra term is built at all.
+    """
     q_k = q_rest.copy()
     for _ in range(max(int(cfg.ik_iterations), 1)):
         p_k, quat_k, jac_k = fk_jacobian_fn(q_k)
@@ -269,6 +246,16 @@ def compute_ik_seeded(
         dq_lo = q_lo - q_k
         dq_hi = q_hi - q_k
         terms = [(j_task_k, task_err_k, task_w)]
+
+        # orientation_priority's promoted rotation rows (added 2026-08-06,
+        # default off -- ``extra_rot`` is empty unless the caller asked for
+        # it, in which case the terms list, and therefore the Hessian and
+        # linear term handed to solve_box_qp, are bit-for-bit what they were
+        # before this mechanism existed). See ``compute_ik_seeded`` and
+        # config.py for the full rationale and measured evidence.
+        if extra_rot and extra_w > 0.0:
+            terms.append((jac_k[extra_rot, :], task_err_full_k[extra_rot], extra_w))
+
         hessian_qp, linear_qp = build_weighted_least_squares_qp(terms, reg=reg)
         dq = solve_box_qp(hessian_qp, linear_qp, dq_lo, dq_hi)
 
@@ -325,7 +312,17 @@ def compute_ik_seeded(
         # entirely, not another controller-side redundancy-resolution fix.
         if cfg.ik_max_joint_deviation_rad is not None:
             max_dev = abs(float(cfg.ik_max_joint_deviation_rad))
-            basis = null_space_basis(j_task_k)
+            # The "redundant" directions are those of the task ACTUALLY being
+            # solved -- so when orientation_priority has promoted extra
+            # rotation rows into this solve, they count as task rows here
+            # too. Getting this wrong is not cosmetic: clipping against the
+            # position-only null space silently discards the promoted
+            # solve's entire orientation correction (it lives precisely in
+            # the position task's null space), which measured as the
+            # promoted solve behaving no differently from the position-only
+            # one. With extra_rot empty this is exactly ``j_task_k``, i.e.
+            # bit-for-bit the pre-existing behaviour.
+            basis = null_space_basis(jac_k[selected + extra_rot, :] if extra_rot else j_task_k)
             if basis.shape[1] > 0:
                 c_current = basis.T @ (q_k - q_rest)
                 c_proposed = basis.T @ (q_k + dq - q_rest)
@@ -341,7 +338,137 @@ def compute_ik_seeded(
                 # general.
                 dq = np.clip(dq, dq_lo, dq_hi)
         q_k = q_k + dq
-    q_target = q_k
+    return q_k
+
+
+def compute_ik_seeded(
+    cfg,
+    fk_jacobian_fn,
+    q_current: np.ndarray,
+    p_des: np.ndarray,
+    quat0: np.ndarray,
+    q_rest: np.ndarray,
+) -> np.ndarray:
+    """ik_seeded_resolution mode. See this module's docstring ("Actual fix:
+    ik_seeded_resolution") for the full design rationale."""
+    if fk_jacobian_fn is None:
+        raise ValueError(
+            "CartesianVelocityConfig.ik_seeded_resolution=True requires "
+            "state['fk_jacobian_fn'], a callable q -> (ee_pos, ee_quat, jacobian) "
+            "usable at ARBITRARY q, not just the current one -- controller_core "
+            "stays simulator-independent, so this must be supplied by the caller "
+            "(e.g. a MuJoCo-backed forward-kinematics wrapper), not built in here."
+        )
+    rot_flags = [cfg.task_dim_rx, cfg.task_dim_ry, cfg.task_dim_rz]
+    selected = [0, 1, 2] + [3 + i for i, on in enumerate(rot_flags) if on]
+
+    # Fresh Newton-Raphson IK solve SEEDED FROM q_rest every cycle --
+    # NOT from q_current. This is the actual fix for reduced_task_dims'
+    # path-dependent multistability (see this module's docstring): q_target
+    # is a deterministic function of ONLY (p_des, q_rest) -- the same
+    # target position always produces the same q_target, regardless of how
+    # the arm got to its current configuration, because the solve never
+    # looks at q_current at all. This trades per-cycle compute cost (up to
+    # ik_iterations extra forward-kinematics/Jacobian evaluations) for
+    # eliminating the redundancy-resolution history-dependence that made
+    # reduced_task_dims' and split_base_wrist_task's rate-integrated
+    # null-space walks unpredictable.
+    # Joint position bounds for the QP step below -- permissive
+    # (effectively unconstrained) unless the caller supplied real
+    # UR5e limits, since controller_core has no hardware knowledge
+    # of its own.
+    q_lo = (
+        cfg.joint_pos_lower
+        if cfg.joint_pos_lower is not None
+        else np.full(6, -2.0 * np.pi, dtype=np.float64)
+    )
+    q_hi = (
+        cfg.joint_pos_upper
+        if cfg.joint_pos_upper is not None
+        else np.full(6, 2.0 * np.pi, dtype=np.float64)
+    )
+    task_w = max(float(cfg.qp_task_weight), 1.0e-6)
+    reg = max(float(cfg.pinv_damping), 1.0e-9) ** 2  # matches _damped_pinv's own d^2 scale
+
+    q_target = _ik_newton_solve(
+        cfg, fk_jacobian_fn, p_des, quat0, q_rest, selected,
+        q_lo, q_hi, task_w, reg, extra_rot=[], extra_w=0.0,
+    )
+
+    # orientation_priority (added 2026-08-06, default OFF -- when off, none
+    # of the code below runs and q_target above is bit-for-bit the
+    # pre-existing solve). Full rationale and measured evidence in
+    # config.py; the short version:
+    #
+    # With task_dim_rx/task_dim_ry False (the default), rx/ry are CHECKED by
+    # the safety guard but appear nowhere in what this QP minimizes -- and
+    # at the searched gains (pinv_damping ~1.2e-5 => reg ~1.5e-10 against
+    # task_w ~3e8, a relative regularization of ~5e-19) the redundant part
+    # of q_target is not merely unweighted, it is set by little more than
+    # the linear solver's own rounding. Every prior mechanism here acted on
+    # the null space, and hanging_alpha_0_5's -X failure was proven to be a
+    # ROW-space coupling, so none of them could reach it.
+    #
+    # This mechanism instead PROMOTES the disabled rotation axes to
+    # co-primary task rows -- a second, independent solve with the same
+    # weight structure -- and then decides between the two solutions by the
+    # only criterion that matters: what promoting orientation actually COSTS
+    # in position. Where the full 6-DOF pose is reachable, the promoted
+    # solve achieves the position target exactly AND drives orientation
+    # error to ~0, so it is strictly better and is taken outright. Where the
+    # pose is not reachable, the promoted solve's position residual grows,
+    # the blend weight falls off, and behaviour returns exactly to today's
+    # position-first solve rather than degrading into the retreat-and-drift
+    # the equal-weight square solve produces near the reach boundary
+    # (measured: flipping task_dim_rx/ry on outright converts
+    # hanging_alpha_0_5's orientation trips into WORSE orthogonal-drift
+    # trips, because the essentially-undamped square system goes
+    # ill-conditioned there).
+    #
+    # Three properties this deliberately preserves:
+    #  * PATH-INDEPENDENCE. Both solves are seeded from q_rest and read only
+    #    (q_rest, p_des, quat0); the blend weight is a function of the
+    #    promoted solve's own residual, never of q_current. q_target remains
+    #    a deterministic function of the target alone, which is the entire
+    #    reason ik_seeded_resolution exists (see this module's docstring).
+    #    Scheduling on the MEASURED orientation error instead -- the obvious
+    #    first design, and the one tried first here -- would have silently
+    #    reintroduced the path-dependent multistability this mode was built
+    #    to remove.
+    #  * NO PERTURBATION WHERE IT CANNOT HELP. smooth_falloff returns
+    #    EXACTLY 0.0 past the falloff threshold, so the promoted solve is
+    #    discarded outright rather than blended in at some small weight.
+    #  * CONTINUITY. The blend is smooth in the residual, so q_target does
+    #    not jump between the two IK branches mid-move (a discontinuity the
+    #    joint-space P-controller would chase at ik_joint_gain, straight
+    #    into the joint-velocity guard).
+    #
+    # Cost: one extra ik_iterations-step solve per cycle when enabled (~0.23
+    # ms measured for a 6-iteration solve), i.e. roughly 6% rather than 3%
+    # of the 8 ms / 125 Hz budget.
+    if cfg.orientation_priority and float(cfg.orientation_priority_weight) > 0.0:
+        extra_rot = [3 + i for i, on in enumerate(rot_flags) if not on]
+        if extra_rot:
+            q_promoted = _ik_newton_solve(
+                cfg, fk_jacobian_fn, p_des, quat0, q_rest, selected,
+                q_lo, q_hi, task_w, reg,
+                extra_rot=extra_rot,
+                extra_w=task_w * float(cfg.orientation_priority_weight),
+            )
+            p_promoted, _, _ = fk_jacobian_fn(q_promoted)
+            pos_residual = float(
+                np.linalg.norm(p_des - np.asarray(p_promoted, dtype=np.float64).reshape(3))
+            )
+            blend = smooth_falloff(
+                pos_residual,
+                cfg.orientation_priority_residual_tol_m,
+                cfg.orientation_priority_residual_falloff_m,
+                cfg.orientation_priority_falloff_power,
+            )
+            if blend >= 1.0:
+                q_target = q_promoted
+            elif blend > 0.0:
+                q_target = q_target + blend * (q_promoted - q_target)
 
     qd_joint = cfg.ik_joint_gain * (q_target - q_current)
     if cfg.joint_vel_limit_radps is not None:
