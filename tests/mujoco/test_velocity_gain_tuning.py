@@ -41,7 +41,7 @@ from velocity_gain_tuning.optimize import (  # noqa: E402
     run_episode,
     run_search,
 )
-from velocity_gain_tuning.poses import POSE_SCENARIOS  # noqa: E402
+from velocity_gain_tuning.poses import POSE_SCENARIOS, scenario_by_name  # noqa: E402
 
 # The exact gain vector found by this session's second (widened-bounds) real
 # gain search -- outputs/velocity_gain_tuning/search_result_widened_20260806_023900.json.
@@ -687,6 +687,264 @@ def test_qd_estimate_damping_fixes_documented_unrotated_wrist2offset_spike():
     assert result_damped.guard_reason is None
     assert result_damped.max_abs_qd_radps < 3.0
     assert abs(result_damped.achieved_x_delta_m - dx) < 0.01  # reasonable tracking of the target
+
+
+# ---------------------------------------------------------------------------
+# singularity_velocity_scaling (2026-08-07) -- reproduction of the SECOND
+# documented spike (161.57 rad/s, docs/status/
+# nullspace_v2_search_results_2026-08-06.md's "root-caused directly"
+# section): neg45_wrist2offset, dx=-0.029m (1.0x its max_dx_hint_m), the
+# DEFAULT (slow, 1.0s) move_duration, with ik_max_joint_deviation_rad=0.01
+# (tight) -- a real wrist_2=0 crossing where the tight null-space bound
+# removes the redundant part's naturally singularity-avoiding drift,
+# forcing the task-only component through the singularity. Confirmed
+# (controller_core/cartesian_velocity_controller/config.py's
+# singularity_velocity_scaling docstring) that this specific case is a
+# GENUINE kinematic hazard, not merely qd_estimate_damping's reporting-side
+# false positive: even after that fix, this case still trips the guard.
+# ---------------------------------------------------------------------------
+
+
+def _neg45_wrist2offset_scenario():
+    for scenario in POSE_SCENARIOS:
+        if scenario.name == "neg45_wrist2offset":
+            return scenario
+    raise AssertionError("neg45_wrist2offset scenario not found")
+
+
+# The known-good gain vector from outputs/velocity_gain_tuning/
+# search_result_nullspace_v2_20260806_194402.json (104/128 on the full eval
+# grid), used throughout this session's validation of the mechanism -- see
+# docs/status/nullspace_v2_search_results_2026-08-06.md. ik_max_joint_
+# deviation_rad's action dimension (index 5) is overridden to +1.0 below
+# (-> 0.01 rad, the tight end) to reproduce the exact 161.57 rad/s case,
+# which used a DIFFERENT deviation bound than this vector's own found
+# value (0.312 rad).
+_NULLSPACE_V2_ACTION = np.array(
+    [-0.5452930656195676, -0.31201103390079576, 0.19603435480606923,
+     -0.40319481871903273, 0.6634521666673519, -0.29877165734428546]
+)
+
+
+def test_singularity_velocity_scaling_fixes_documented_neg45_wrist2offset_spike():
+    """Direct, real (mujoco-backed) reproduction: WITHOUT the mechanism, this
+    exact (scenario, dx, move_duration, ik_max_joint_deviation_rad) trips
+    joint_velocity_guard partway through the move (achieving only a
+    fraction of the target before the episode terminates early). WITH the
+    mechanism on (same gains, same everything else), the guard does not
+    trip, peak |qd| drops well under the 3.0 rad/s limit, AND achieved
+    tracking is BETTER (not just "didn't crash") because the episode runs
+    to completion instead of terminating early on the guard trip."""
+    scenario = _neg45_wrist2offset_scenario()
+    action = _NULLSPACE_V2_ACTION.copy()
+    action[5] = 1.0  # ik_max_joint_deviation_rad -> 0.01 rad (tight end)
+    dx = -1.0 * scenario.max_dx_hint_m  # -0.029
+
+    env_off = VelocityTransportEnv(VelocityTransportEnvConfig(singularity_velocity_scaling=False))
+    result_off = run_episode(env_off, action, scenario=scenario, target_x_delta_m=dx)
+    assert result_off.guard_reason is not None
+    assert "joint_velocity_guard" in result_off.guard_reason
+    assert result_off.max_abs_qd_radps > 3.0
+    assert abs(result_off.achieved_x_delta_m) < 0.8 * abs(dx)  # early termination -> partial progress
+
+    env_on = VelocityTransportEnv(VelocityTransportEnvConfig(singularity_velocity_scaling=True))
+    result_on = run_episode(env_on, action, scenario=scenario, target_x_delta_m=dx)
+    assert result_on.guard_reason is None
+    assert result_on.max_abs_qd_radps < 3.0
+    assert result_on.max_abs_qd_radps < 0.5 * result_off.max_abs_qd_radps  # a real, large reduction, not marginal
+    assert abs(result_on.achieved_x_delta_m) > abs(result_off.achieved_x_delta_m)  # better, not just "didn't crash"
+
+
+def test_singularity_velocity_scaling_field_defaults_off_in_env_config():
+    cfg = VelocityTransportEnvConfig()
+    assert cfg.singularity_velocity_scaling is False
+    assert cfg.singularity_sigma_min_stop == pytest.approx(0.003)
+    assert cfg.singularity_sigma_min_full_speed == pytest.approx(0.03)
+    assert cfg.singularity_scale_power == pytest.approx(2.0)
+
+
+def test_singularity_velocity_scaling_off_is_bit_for_bit_identical_via_env():
+    """The env-level wiring must gate exactly like the controller_core flag
+    it forwards -- with the field at its (off) default, results must be
+    IDENTICAL to a config that never mentions the field at all."""
+    scenario = _neg45_wrist2offset_scenario()
+    action = _NULLSPACE_V2_ACTION.copy()
+    action[5] = 1.0
+    dx = -1.0 * scenario.max_dx_hint_m
+
+    result_default = run_episode(
+        VelocityTransportEnv(VelocityTransportEnvConfig()), action, scenario=scenario, target_x_delta_m=dx
+    )
+    result_explicit_off = run_episode(
+        VelocityTransportEnv(VelocityTransportEnvConfig(singularity_velocity_scaling=False)),
+        action, scenario=scenario, target_x_delta_m=dx,
+    )
+    assert result_default.max_abs_qd_radps == pytest.approx(result_explicit_off.max_abs_qd_radps, rel=1e-12)
+    assert result_default.achieved_x_delta_m == pytest.approx(result_explicit_off.achieved_x_delta_m, rel=1e-12)
+    assert result_default.guard_reason == result_explicit_off.guard_reason
+
+
+# ---------------------------------------------------------------------------
+# singularity_windup_clamp_rad (2026-08-07) -- anti-windup fix for a real,
+# measured net-neutral regression in singularity_velocity_scaling itself: a
+# full 128-cell grid re-evaluation (velocity_gain_tuning.evaluate.
+# evaluate_gains, gains from the nullspace_v2 search result, the SAME action
+# vector used above) found singularity_velocity_scaling alone a 105/128 tie
+# against the mechanism fully off -- 2 cells fixed, but 2 DIFFERENT cells
+# (neg40_wrist2offset and neg45_wrist2offset, both dx=-0.0464m, the DEFAULT
+# 1.0s move duration) newly broke via joint_velocity_guard. Root cause:
+# q_target is recomputed fresh from (q_rest, p_des) every cycle regardless
+# of throttling, so the gap (q_target - q_current) grows unboundedly while
+# scale_current < 1.0, then releases a spike the instant scale_current
+# recovers -- classic PID-integral-windup shape without an explicit
+# integrator. See config.py and modes.py for the full mechanism.
+# ---------------------------------------------------------------------------
+
+
+def test_singularity_windup_clamp_fixes_neg40_and_neg45_wrist2offset_regressions():
+    """Direct, real (mujoco-backed) reproduction of BOTH documented
+    regression cells at once: singularity_velocity_scaling alone (no
+    clamp) trips joint_velocity_guard at dx=-0.0464m (1.6x max_dx_hint_m,
+    since both scenarios' max_dx_hint_m is 0.029m) for both
+    neg40_wrist2offset and neg45_wrist2offset, a case the mechanism-OFF
+    baseline passes cleanly. Adding singularity_windup_clamp_rad=0.03 (the
+    validated value) at the SAME gains fixes both without needing any
+    other change."""
+    action = _NULLSPACE_V2_ACTION.copy()
+
+    for scenario_name in ("neg40_wrist2offset", "neg45_wrist2offset"):
+        scenario = scenario_by_name(scenario_name)
+        dx = -1.6 * scenario.max_dx_hint_m
+
+        result_off = run_episode(
+            VelocityTransportEnv(VelocityTransportEnvConfig(singularity_velocity_scaling=False)),
+            action, scenario=scenario, target_x_delta_m=dx,
+        )
+        assert result_off.guard_reason is None, f"{scenario_name}: baseline (mechanism off) must pass"
+
+        result_no_clamp = run_episode(
+            VelocityTransportEnv(VelocityTransportEnvConfig(singularity_velocity_scaling=True)),
+            action, scenario=scenario, target_x_delta_m=dx,
+        )
+        assert result_no_clamp.guard_reason is not None, (
+            f"{scenario_name}: documented regression must still reproduce without the clamp"
+        )
+        assert "joint_velocity_guard" in result_no_clamp.guard_reason
+
+        result_clamped = run_episode(
+            VelocityTransportEnv(
+                VelocityTransportEnvConfig(singularity_velocity_scaling=True, singularity_windup_clamp_rad=0.03)
+            ),
+            action, scenario=scenario, target_x_delta_m=dx,
+        )
+        assert result_clamped.guard_reason is None, f"{scenario_name}: clamp must fix the regression"
+        assert result_clamped.max_abs_qd_radps < 3.0
+
+
+def test_singularity_windup_clamp_preserves_the_documented_real_win():
+    """The clamp must not disturb the mechanism's own originally-documented
+    fix (neg45_wrist2offset, dx=-0.029m, tight ik_max_joint_deviation_rad=
+    0.01 via action[5]=1.0): both must still pass cleanly, with peak |qd|
+    and achieved tracking both close to the no-clamp result (this case
+    does briefly enter the throttled regime near the singularity crossing
+    itself, so the clamp can engage a little here too -- not exact
+    bit-for-bit equality, but nowhere near the magnitude of a real windup
+    spike either)."""
+    scenario = scenario_by_name("neg45_wrist2offset")
+    action = _NULLSPACE_V2_ACTION.copy()
+    action[5] = 1.0
+    dx = -1.0 * scenario.max_dx_hint_m
+
+    result_no_clamp = run_episode(
+        VelocityTransportEnv(VelocityTransportEnvConfig(singularity_velocity_scaling=True)),
+        action, scenario=scenario, target_x_delta_m=dx,
+    )
+    result_clamped = run_episode(
+        VelocityTransportEnv(
+            VelocityTransportEnvConfig(singularity_velocity_scaling=True, singularity_windup_clamp_rad=0.03)
+        ),
+        action, scenario=scenario, target_x_delta_m=dx,
+    )
+    assert result_no_clamp.guard_reason is None
+    assert result_clamped.guard_reason is None
+    assert result_clamped.max_abs_qd_radps == pytest.approx(result_no_clamp.max_abs_qd_radps, rel=0.05)
+    assert result_clamped.achieved_x_delta_m == pytest.approx(result_no_clamp.achieved_x_delta_m, rel=0.01)
+
+
+def test_singularity_windup_clamp_field_defaults_off_in_env_config():
+    cfg = VelocityTransportEnvConfig()
+    assert cfg.singularity_windup_clamp_rad is None
+
+
+def test_singularity_windup_clamp_off_is_bit_for_bit_identical_via_env():
+    """Same wiring-parity bar as singularity_velocity_scaling's own env
+    test above: with the field at its (off) default, results must be
+    IDENTICAL to a config that never mentions the field at all."""
+    scenario = scenario_by_name("neg40_wrist2offset")
+    action = _NULLSPACE_V2_ACTION.copy()
+    dx = -1.0 * scenario.max_dx_hint_m
+
+    result_default = run_episode(
+        VelocityTransportEnv(VelocityTransportEnvConfig(singularity_velocity_scaling=True)),
+        action, scenario=scenario, target_x_delta_m=dx,
+    )
+    result_explicit_off = run_episode(
+        VelocityTransportEnv(
+            VelocityTransportEnvConfig(singularity_velocity_scaling=True, singularity_windup_clamp_rad=None)
+        ),
+        action, scenario=scenario, target_x_delta_m=dx,
+    )
+    assert result_default.max_abs_qd_radps == pytest.approx(result_explicit_off.max_abs_qd_radps, rel=1e-12)
+    assert result_default.achieved_x_delta_m == pytest.approx(result_explicit_off.achieved_x_delta_m, rel=1e-12)
+    assert result_default.guard_reason == result_explicit_off.guard_reason
+
+
+def test_singularity_windup_clamp_full_grid_net_improvement_no_new_regressions():
+    """The validation bar this mechanism was built to clear: re-run the
+    same full 128-cell grid (velocity_gain_tuning.evaluate.evaluate_gains,
+    same nullspace_v2 gains, eval_dx_fractions widened to the 16-fraction
+    grid matching run_search's own default) with the clamp on and confirm
+    (a) a real net improvement over the mechanism-off/no-clamp 105/128 tie,
+    and (b) ZERO cells flip pass->fail anywhere in the grid relative to the
+    mechanism-off baseline -- a net-neutral trade would not satisfy this
+    session's own validation bar (see config.py's docstring)."""
+    eval_dx_fractions = (
+        0.3, 0.6, 0.9, 1.0, 1.1, 1.3, 1.6, 2.0, -0.3, -0.6, -0.9, -1.0, -1.1, -1.3, -1.6, -2.0,
+    )
+    action = _NULLSPACE_V2_ACTION.copy()
+
+    def _key(r):
+        return (r.scenario, round(r.target_x_delta_m, 5), round(r.move_duration_s, 4))
+
+    off_results = {
+        _key(r): r
+        for r in evaluate_gains(
+            action, dx_fractions=eval_dx_fractions, fast_move_dx_fractions=eval_dx_fractions,
+            env_config=VelocityTransportEnvConfig(singularity_velocity_scaling=False), seed=0,
+        )
+    }
+    clamped_results = {
+        _key(r): r
+        for r in evaluate_gains(
+            action, dx_fractions=eval_dx_fractions, fast_move_dx_fractions=eval_dx_fractions,
+            env_config=VelocityTransportEnvConfig(
+                singularity_velocity_scaling=True, singularity_windup_clamp_rad=0.03
+            ),
+            seed=0,
+        )
+    }
+    assert set(off_results) == set(clamped_results)
+
+    n_pass_off = sum(1 for r in off_results.values() if r.guard_reason is None)
+    n_pass_clamped = sum(1 for r in clamped_results.values() if r.guard_reason is None)
+    assert n_pass_off == 105, f"baseline drifted from the documented 105/128 tie ({n_pass_off}/128)"
+    assert n_pass_clamped > n_pass_off, "clamp must be a real net improvement, not a net-neutral trade"
+
+    regressions = [
+        k for k in off_results
+        if off_results[k].guard_reason is None and clamped_results[k].guard_reason is not None
+    ]
+    assert regressions == [], f"clamp introduced new pass->fail regressions: {regressions}"
 
 
 # ---------------------------------------------------------------------------

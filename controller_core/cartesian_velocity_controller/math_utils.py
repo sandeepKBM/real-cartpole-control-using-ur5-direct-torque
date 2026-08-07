@@ -72,3 +72,30 @@ def smooth_falloff(value: float, full_below: float, zero_above: float, power: fl
         return 0.0
     u = (v - lo) / (hi - lo)
     return float((1.0 - u) ** max(float(power), 0.0))
+
+
+def singularity_speed_scale(
+    sigma_min: float, sigma_min_stop: float, sigma_min_full_speed: float, power: float = 2.0
+) -> float:
+    """Smooth [0, 1] speed-scaling factor from a Jacobian's smallest singular
+    value: EXACTLY 1.0 (full speed) at or above ``sigma_min_full_speed``,
+    EXACTLY 0.0 (stopped) at or below ``sigma_min_stop``, ramping as
+    ``power`` in between. This is the mirror image of ``smooth_falloff``
+    (danger GROWS as ``sigma_min`` shrinks, rather than as a residual
+    grows), so it is implemented directly in terms of it:
+    ``1.0 - smooth_falloff(sigma_min, sigma_min_stop, sigma_min_full_speed, power)``.
+
+    Used by ``modes.py``'s ``singularity_velocity_scaling`` (see
+    ``config.py``) to throttle the commanded task velocity/error as the
+    controller approaches a kinematic (Jacobian) singularity, rather than
+    only damping the pseudoinverse used to invert it -- the standard
+    "adaptive Cartesian velocity scaling near singularities" fix: bound
+    joint velocity by reducing the INPUT, not just by regularizing the
+    inversion of a fixed-magnitude one.
+
+    Both exact endpoints matter for the same reason as ``smooth_falloff``'s:
+    a case comfortably far from any singularity (``sigma_min >=
+    sigma_min_full_speed``) is byte-identical to the mechanism being off,
+    and a case at/inside the stop threshold gets EXACTLY zero commanded
+    velocity rather than some small residual crawl."""
+    return 1.0 - smooth_falloff(sigma_min, sigma_min_stop, sigma_min_full_speed, power)
