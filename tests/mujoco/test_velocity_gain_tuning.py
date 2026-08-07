@@ -562,6 +562,134 @@ def test_run_search_without_seed_actions_still_works():
 
 
 # ---------------------------------------------------------------------------
+# qd_estimate_damping (2026-08-07) -- fixes a bare-pinv(FULL jacobian)
+# numerical blowup in step()'s joint-velocity-guard ESTIMATE at the
+# wrist_2=0 kinematic singularity, confirmed independent of the
+# controller's own (separately, already-damped) reduced task-space
+# Jacobian. See velocity_transport_env.py's qd_estimate_damping docstring
+# and docs/status/nullspace_v2_search_results_2026-08-06.md for the two
+# real spikes (18.14/161.57 rad/s) this closes. Pure-math property tests
+# for the underlying _damped_pinv behavior live in tests/unit/
+# test_velocity_gain_tuning_qd_estimate_damping.py (no mujoco needed
+# there); the tests below cover the actual env field/default and a real,
+# exact reproduction of one of the two documented spike cases.
+# ---------------------------------------------------------------------------
+
+
+def test_qd_estimate_damping_field_default_matches_unit_test_literal():
+    """VelocityTransportEnvConfig.qd_estimate_damping's real default must
+    match the literal QD_ESTIMATE_DAMPING hardcoded in the mujoco-import-free
+    unit test (tests/unit/test_velocity_gain_tuning_qd_estimate_damping.py)
+    -- that file deliberately avoids importing this module (to stay
+    mujoco-free), so this is the one place the two are cross-checked
+    against silent drift."""
+    assert VelocityTransportEnvConfig().qd_estimate_damping == pytest.approx(1.0e-3)
+
+
+def test_qd_estimate_damping_positive_default_is_actually_used_in_step():
+    """qd_estimate_damping is genuinely wired into step()'s qd
+    reconstruction (not a dead config knob): a much heavier damping value
+    must measurably change the reported max_abs_qd_radps relative to the
+    class default, at a dx large enough to be meaningfully non-trivial.
+    (Does NOT use qd_estimate_damping=0.0 as a stand-in for "the old bare
+    np.linalg.pinv behavior" -- found directly while writing this test that
+    the two are NOT equivalent near a real singularity: _damped_pinv(jac,
+    0.0) inverts J@J.T directly, which squares cond(J) and can produce
+    numerically UNSTABLE, not just unregularized, results very different
+    from SVD-based np.linalg.pinv. See the spike-reproduction test below
+    for the real bare-pinv comparison, done via direct reimplementation
+    instead.)"""
+    action = np.zeros(ACTION_DIM)
+    env_light = VelocityTransportEnv(VelocityTransportEnvConfig(qd_estimate_damping=1.0e-3))
+    env_heavy = VelocityTransportEnv(VelocityTransportEnvConfig(qd_estimate_damping=0.5))
+    for env in (env_light, env_heavy):
+        env.reset(seed=0, options={"scenario": _UNROTATED_SCENARIO, "target_x_delta_m": 0.03})
+    # t=0 of a min-jerk profile starts at zero velocity/error (qd == 0 for
+    # both), so take a few cycles to reach a nontrivial command before
+    # comparing.
+    info_light = info_heavy = None
+    for _ in range(5):
+        _, _, _, _, info_light = env_light.step(action)
+        _, _, _, _, info_heavy = env_heavy.step(action)
+    assert info_light["max_abs_qd_radps"] > 0.0
+    assert info_light["max_abs_qd_radps"] != pytest.approx(info_heavy["max_abs_qd_radps"], rel=1e-6)
+
+
+def test_qd_estimate_damping_fixes_documented_unrotated_wrist2offset_spike():
+    """Reproduction of the real, documented 18.14 rad/s false-positive
+    guard trip (docs/status/nullspace_v2_search_results_2026-08-06.md,
+    outputs/velocity_gain_tuning/search_result_nullspace_v2_seeded108_20260806_201419.json's
+    exact saved gains/action) at unrotated_wrist2offset,
+    dx=-1.6*max_dx_hint_m, FAST_MOVE_DURATION_S -- a wrist_2=0 crossing
+    where the bare-pinv reconstruction (NOT the controller's own
+    internals) blows up.
+
+    dx is computed as ``-1.6 * scenario.max_dx_hint_m`` (matching
+    evaluate_gains()'s own fast_move_dx_fractions computation) rather than
+    the rounded literal -0.0784 -- found directly while writing this test
+    that this specific case is CHAOTICALLY sensitive to that last bit of
+    floating-point precision: ``-1.6 * 0.049 == -0.07840000000000001``,
+    differing from the literal ``-0.0784`` by ~1.4e-17, yet that is enough
+    to flip which side of the wrist_2=0 crossing the trajectory falls on
+    (18.14 rad/s vs. a clean 1.58 rad/s pass, confirmed reproducibly both
+    ways). This is real evidence for why qd_estimate_damping's docstring
+    frames the guard's PRE-fix numbers as "numerical artifacts, not a
+    faithful estimate of physical risk" -- a result this sensitive to the
+    17th decimal digit of a target displacement was never a meaningful
+    safety signal in the first place.
+
+    The "before" (bare pinv) ground truth is obtained by monkeypatching the
+    ``_damped_pinv`` symbol this module imported, to fall back to literal
+    ``np.linalg.pinv`` regardless of the damping argument -- exercises the
+    REAL step() code path exactly (all guards, termination/truncation
+    logic unchanged) rather than a hand-reimplementation, which was tried
+    first and found unreliable for exactly the chaotic-sensitivity reason
+    above (a reimplementation float-for-float identical to step() should
+    work, but a shorter/refactored one is a real risk of silently taking a
+    different bifurcation branch)."""
+    import velocity_gain_tuning.envs.velocity_transport_env as vte_mod
+
+    # search_result_nullspace_v2_seeded108_20260806_201419.json's own saved
+    # "action" array, used verbatim (not re-derived by hand) to avoid any
+    # transcription/rounding mismatch.
+    gains_action = np.array(
+        [0.4960278430173135, 0.12578844407520084, -0.6130064343833146, -0.20556635071129348, 0.6595114242714273, -0.8063915773455297]
+    )
+    gains = action_to_gains(gains_action)
+    assert gains["kp_x"] == pytest.approx(22.465616253108838, rel=1e-4)
+    assert gains["ik_max_joint_deviation_rad"] == pytest.approx(1.197514006313666, rel=1e-4)
+
+    unrotated_scenario = _UNROTATED_SCENARIO
+    dx = -1.6 * unrotated_scenario.max_dx_hint_m
+
+    # Ground truth: the old, pre-fix bare-pinv reconstruction really does
+    # blow up here (matches the documented 18.14 rad/s finding exactly).
+    original_damped_pinv = vte_mod._damped_pinv
+    vte_mod._damped_pinv = lambda jac, damping: np.linalg.pinv(jac)
+    try:
+        result_bare = run_episode(
+            VelocityTransportEnv(VelocityTransportEnvConfig()),
+            gains_action, scenario=unrotated_scenario, target_x_delta_m=dx, move_duration_s=FAST_MOVE_DURATION_S,
+        )
+    finally:
+        vte_mod._damped_pinv = original_damped_pinv
+    assert result_bare.guard_reason is not None
+    assert "joint_velocity_guard" in result_bare.guard_reason
+    assert result_bare.max_abs_qd_radps == pytest.approx(18.14201498863372, rel=1e-6)
+
+    # The FIXED env (qd_estimate_damping default): no longer trips on this
+    # numerical artifact, and achieved tracking is still reasonable -- not
+    # just "guard didn't trip".
+    result_damped = run_episode(
+        VelocityTransportEnv(VelocityTransportEnvConfig()),
+        gains_action, scenario=unrotated_scenario, target_x_delta_m=dx, move_duration_s=FAST_MOVE_DURATION_S,
+    )
+    assert result_damped.guard_reason is None
+    assert result_damped.max_abs_qd_radps < 3.0
+    assert abs(result_damped.achieved_x_delta_m - dx) < 0.01  # reasonable tracking of the target
+
+
+# ---------------------------------------------------------------------------
 # AGENTS.md sec 7 "always sweep both +X and -X" -- locked in as defaults
 # ---------------------------------------------------------------------------
 

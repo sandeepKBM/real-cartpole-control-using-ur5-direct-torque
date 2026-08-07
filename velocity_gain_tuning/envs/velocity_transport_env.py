@@ -40,6 +40,7 @@ from controller_core.cartesian_velocity_controller import (
     CartesianVelocityConfig,
     CartesianVelocityController,
 )
+from controller_core.cartesian_velocity_controller.math_utils import _damped_pinv
 from controller_core.kinematics_utils import swing_twist_axis_error
 from hardware.local_dynamics import LocalMujocoDynamics
 from simulation.ur5e_mujoco_torque import x_profile_target
@@ -165,6 +166,64 @@ class VelocityTransportEnvConfig:
     task_dim_ry: bool = False
     max_lin_speed_mps: float = 0.25
     max_ang_speed_radps: float = 0.5
+    # orientation_priority (added 2026-08-06, default OFF = exact prior
+    # behavior). Exposed as ENV CONFIG rather than as new ACTION_FIELDS
+    # dimensions on purpose: every historical search_result_*.json in
+    # outputs/velocity_gain_tuning/ is an action vector of the current
+    # length, and widening the action space would force those vectors to be
+    # padded and silently reinterpreted -- the exact corruption
+    # ACTION_FIELDS' own comment on ik_max_joint_deviation_rad's bound
+    # ordering documents. Keeping it here makes "baseline gains, mechanism
+    # on vs. off" a genuinely apples-to-apples comparison at the SAME
+    # action vector. See controller_core/cartesian_velocity_controller/
+    # config.py for the mechanism itself.
+    orientation_priority: bool = False
+    orientation_priority_weight: float = 1.0
+    orientation_priority_residual_tol_m: float = 0.0001
+    orientation_priority_residual_falloff_m: float = 0.0005
+    orientation_priority_falloff_power: float = 2.0
+    # Damping for the bare-pinv(jac) @ xd_cmd reconstruction step() uses to
+    # ESTIMATE joint velocity for joint_velocity_guard (and to integrate
+    # self._q forward -- see step()'s docstring-adjacent comment there).
+    # Added 2026-08-07 fixing a confirmed false-positive: step()'s pinv is on
+    # the FULL 6x6 Jacobian, purely a downstream reporting/integration
+    # reconstruction -- a DIFFERENT matrix from the reduced task-space
+    # Jacobian CartesianVelocityConfig.pinv_damping (default 0.005) damps
+    # inside the controller's own QP, sized for a different purpose. Direct
+    # trace of both documented spikes (docs/status/
+    # nullspace_v2_search_results_2026-08-06.md's 18.14/161.57 rad/s cases)
+    # confirmed BOTH are wrist_2=0 crossings where cond(FULL J) reaches
+    # ~6500+ (sigma_min ~3.25e-4) while the controller's own reduced-task
+    # Jacobian stays well-conditioned (cond~15) throughout -- the controller
+    # never sees an ill-conditioned matrix; only this reconstruction does.
+    #
+    # Value chosen from measured data, not a guess or a reuse of
+    # pinv_damping's 0.005 (that value is sized for the reduced-task matrix,
+    # not this one -- confirmed NOT automatically correct here, see below):
+    #   - Sampled sigma_min of the FULL Jacobian across 6063 steps of the
+    #     128-cell evaluation grid's well-conditioned population (no step
+    #     had cond>100): 1st/5th/25th/50th percentile = 0.038/0.046/
+    #     0.065/0.072. At qd_estimate_damping=1e-3, the damped-pinv relative
+    #     error in the worst (1st-percentile) direction is
+    #     (1e-3/0.038)^2 ~= 7e-4 (0.07%) -- negligible, i.e. the estimate is
+    #     essentially unchanged away from singularities, the same
+    #     "byte-identical off the edge case" bar this session's other
+    #     mechanisms were held to. Reusing pinv_damping=0.005 here instead
+    #     would give ~1.7% relative error at that same population's worst
+    #     percentile -- meaningfully looser, evidence the two matrices
+    #     really do need different values.
+    #   - At the neg45_wrist2offset tight-null-space-bound spike (wrist_2
+    #     crossing 0, sigma_min~3.25e-4, guard temporarily disabled to trace
+    #     the full trajectory): bare pinv gives 28.14 rad/s; damped at 1e-3
+    #     gives 10.33 rad/s -- still correctly above max_joint_velocity_radps
+    #     (a real kinematic hazard at this pose, the guard SHOULD still
+    #     trip) but no longer the physically-implausible >100 rad/s bare
+    #     numbers this session's other documented spikes showed.
+    #     Heavier damping (0.005, matching pinv_damping) bounds it to 2.10
+    #     rad/s -- UNDER the guard, which would silently launder a genuine
+    #     near-singularity crossing into a "pass"; 1e-3 does not do this,
+    #     which is why it was preferred over reusing 0.005.
+    qd_estimate_damping: float = 1.0e-3
     # Safety guard thresholds -- match the sim/hardware defaults used
     # throughout this session's manual sweeps.
     max_joint_velocity_radps: float = 3.0
@@ -280,6 +339,11 @@ class VelocityTransportEnv(gym.Env):
             task_dim_rz=self.cfg.task_dim_rz,
             max_lin_speed_mps=self.cfg.max_lin_speed_mps,
             max_ang_speed_radps=self.cfg.max_ang_speed_radps,
+            orientation_priority=self.cfg.orientation_priority,
+            orientation_priority_weight=self.cfg.orientation_priority_weight,
+            orientation_priority_residual_tol_m=self.cfg.orientation_priority_residual_tol_m,
+            orientation_priority_residual_falloff_m=self.cfg.orientation_priority_residual_falloff_m,
+            orientation_priority_falloff_power=self.cfg.orientation_priority_falloff_power,
         )
         self._controller = CartesianVelocityController(gain_cfg)
         self._controller.reset_from_state(
@@ -347,7 +411,12 @@ class VelocityTransportEnv(gym.Env):
             "fk_jacobian_fn": self._fk_jacobian_fn,
         }
         xd_cmd = self._controller.compute(robot_state)
-        qd = np.linalg.pinv(jac) @ xd_cmd
+        # Damped, not bare, pinv -- see cfg.qd_estimate_damping's docstring
+        # for why: bare np.linalg.pinv on this FULL 6x6 Jacobian blows up at
+        # the wrist_2=0 kinematic singularity (a downstream reconstruction
+        # artifact, confirmed independent of the controller's own internals,
+        # which invert a different, well-conditioned reduced-task matrix).
+        qd = _damped_pinv(jac, self.cfg.qd_estimate_damping) @ xd_cmd
         max_abs_qd = float(np.max(np.abs(qd)))
 
         y_drift = abs(float(p[1] - self._p0[1]))
