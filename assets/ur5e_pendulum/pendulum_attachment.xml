@@ -1,0 +1,129 @@
+<mujoco model="ur5e_pendulum_attachment">
+  <!--
+  Standalone MJCF for the physical "UR5e Pendulum v1" apparatus
+  (cartpole_cad/UR5e Pendulum v1.zip) -- the free-swinging "pole" this
+  workspace's original "real_Cartpole" name refers to, mounted at the
+  UR5e's wrist_3 attachment_site via an OnRobot tool-changer.
+
+  Meant to be composed onto the existing, PROTECTED centerpiece model
+  (assets/ur5e_torque/ur5e_torque.xml, see AGENTS.md sec 2 -- "never
+  delete or silently regenerate it") via mujoco.MjSpec.attach(site=...)
+  at that model's "attachment_site" -- see
+  simulation/ur5e_pendulum_compose.py for the loader. This file is NEVER
+  included via plain <include> into ur5e_torque.xml or its scene.xml;
+  it has no <worldbody> root itself so it cannot be loaded standalone as
+  a top-level model (this is intentional -- it is an attachment
+  fragment, not a scene).
+
+  ============================================================
+  DIMENSION PROVENANCE -- read before trusting any number below
+  ============================================================
+  The CAD (cartpole_cad/UR5e Pendulum v1.zip) is a genuine SolidWorks
+  assembly (UR5e Pendulum v1.SLDASM) with real custom parts (Pendulum
+  Rod, Rod Housing, Shaft Housing, Sensor Housing, Linear Motion Rod,
+  8mm Bore Clamp) plus catalog hardware (McMaster fasteners, an MF128ZZ
+  flanged ball bearing) and a CUI/Same Sky AMT222B-8000-S single-turn
+  absolute magnetic encoder assembly. SolidWorks .SLDPRT/.SLDASM files
+  are a proprietary binary format this environment has no reader for
+  (no SolidWorks, no working translator found -- cadquery/OCP was
+  installed and DOES read the two open-format .STEP files in the
+  archive, but not the native SolidWorks parts).
+
+  What is REAL (extracted or directly inferred from the archive):
+    - OnRobot tool-changer robot-side plate: 71mm x 71mm x 16.1mm
+      (bounding box, read via cadquery from
+      "ST-RB-028-0004 OnRobot Tool Changer (Robot Side).STEP").
+    - Tool-side plate bounding box: 75.51mm x 28.40mm x 71.00mm (same
+      method, "...0023...Tool Side.STEP").
+    - Rod/shaft diameter = 8mm -- not measured, but two independently
+      named parts in the archive reference "8mm" explicitly ("8mm Bore
+      Clamp", "Same_Sky_AMT-Sleeve-REV-D(8 mm)"), a real, non-arbitrary
+      signal for this one dimension.
+    - The encoder is a SINGLE-TURN ABSOLUTE type (CUI/Same Sky AMT22
+      series) -- confirmed by part family, exact bit-resolution not
+      confirmed (the "-8000-S" suffix was not decoded with confidence,
+      not asserted here).
+
+  What is PLACEHOLDER (physically reasonable, NOT measured -- flagged
+  explicitly on every such value below, must be corrected against the
+  real CAD/hardware before this model is used for anything beyond a
+  first smoke test):
+    - Pendulum rod LENGTH (0.30 m assumed -- a common lab-scale choice,
+      no support from the archive's file list or metadata).
+    - Rod/housing MASS and material density (assumed mild steel,
+      7850 kg/m^3, since "Linear Motion Rod" + a ball-bearing pivot
+      reads as a hardened-steel linear/rotary shaft component, but
+      this is an inference, not a measurement).
+    - Pivot joint AXIS ORIENTATION relative to attachment_site -- chosen
+      here so the rod hangs down under gravity from a horizontal start
+      in this file's own smoke test (tools/diagnostics/
+      ur5e_pendulum_smoke_test.py), NOT derived from the CAD assembly's
+      actual mate definitions (which are unreadable). If the real
+      mechanism's swing plane differs, this needs correcting.
+    - No discrete "bob" end-mass is modeled -- the archive's part list
+      has no separate weighted part beyond the rod/housings, so mass is
+      modeled as distributed along a uniform rod plus a small lumped
+      mass for the encoder/housing cluster near the pivot. If the real
+      assembly has a separate end weight, this is wrong and needs a
+      dedicated body added.
+
+  Do not treat any PLACEHOLDER value as ground truth for anything beyond
+  a first-pass kinematic/dynamic sanity check.
+  -->
+
+  <default>
+    <default class="pendulum">
+      <joint damping="0.02" frictionloss="0.01"/>
+      <geom contype="0" conaffinity="0" density="7850"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <body name="pendulum_mount" pos="0 0 0">
+      <!-- OnRobot tool-changer stack: REAL bounding-box dimensions
+           (see provenance note above). Modeled as a simple flanged
+           cylinder pair, not the real tool-changer geometry (STEP
+           files were read for bounding box only, not full mesh
+           extraction -- a real mesh import is a follow-up, not done
+           here). -->
+      <geom name="toolchanger_robot_side" type="cylinder" size="0.0355 0.00805" class="pendulum" rgba="0.35 0.35 0.38 1"/>
+      <geom name="toolchanger_tool_side" type="cylinder" size="0.0355 0.0355" pos="0 0 0.0355" class="pendulum" rgba="0.3 0.3 0.32 1"/>
+
+      <!-- Encoder/sensor housing cluster (Shaft Housing + Sensor Housing
+           + AMT222 assembly), lumped as one small mass near the pivot.
+           PLACEHOLDER mass (0.06 kg) -- order-of-magnitude guess for a
+           small encoder + housing stack, not a measured value. -->
+      <body name="pendulum_hub" pos="0 0 0.071">
+        <geom name="pendulum_hub_geom" type="cylinder" size="0.020 0.015" class="pendulum" rgba="0.15 0.15 0.18 1" mass="0.06"/>
+
+        <!-- The single swing DOF -- represents the AMT222 absolute
+             encoder's measured axis. Axis choice is a PLACEHOLDER (see
+             provenance note); tuned only so the rod hangs under gravity
+             in this file's own smoke test, not derived from the real
+             assembly's mate geometry. -->
+        <joint name="pendulum_hinge" type="hinge" axis="0 1 0" pos="0 0 0" class="pendulum" range="-3.14159 3.14159" limited="false"/>
+        <site name="pendulum_hinge_site" pos="0 0 0" size="0.004" rgba="1 0 0 1"/>
+
+        <!-- Pendulum rod: 8mm diameter is a real, archive-supported
+             value; 0.30m length and steel density are PLACEHOLDERS
+             (see provenance note). Rod extends along local -Z from the
+             pivot; mass computed from density x volume by the compiler
+             (no explicit mass override), consistent with the
+             class="pendulum" default density above. -->
+        <body name="pendulum_rod" pos="0 0 0">
+          <geom name="pendulum_rod_geom" type="cylinder" fromto="0 0 0  0 0 -0.30" size="0.004" class="pendulum" rgba="0.6 0.6 0.65 1"/>
+          <site name="pendulum_tip_site" pos="0 0 -0.30" size="0.006" rgba="0 1 0 1"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <sensor>
+    <!-- Mirrors the real AMT222's role: a single-axis absolute angle
+         reading of pendulum_hinge. jointpos on a hinge joint returns
+         the joint's own signed angle in radians -- this is the
+         simulated equivalent of what the real encoder reports over its
+         digital interface (exact resolution/interface not modeled). -->
+    <jointpos name="pendulum_angle_sensor" joint="pendulum_hinge"/>
+  </sensor>
+</mujoco>
