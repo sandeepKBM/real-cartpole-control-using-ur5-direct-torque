@@ -201,6 +201,19 @@ class VelocityTransportEnvConfig:
     # grid regression this field fixes without losing the mechanism's real
     # win or introducing new regressions).
     singularity_windup_clamp_rad: float | None = None
+    # ik_joint_gain_step_scaling (added 2026-08-07, default OFF = exact
+    # prior behavior, same reasoning as the three fields above): scales the
+    # effective ik_joint_gain down as ||q_target - q_current|| grows,
+    # independent of singularity_velocity_scaling -- see controller_core/
+    # cartesian_velocity_controller/config.py for the mechanism and its
+    # measured evidence (a genuinely distinct failure mode from Jacobian
+    # conditioning, confirmed by directly tracing sigma_min through the
+    # cells it targets).
+    ik_joint_gain_step_scaling: bool = False
+    ik_joint_gain_step_full_below_rad: float = 0.10
+    ik_joint_gain_step_zero_above_rad: float = 0.30
+    ik_joint_gain_step_min_scale: float = 0.15
+    ik_joint_gain_step_falloff_power: float = 2.0
     # Damping for the bare-pinv(jac) @ xd_cmd reconstruction step() uses to
     # ESTIMATE joint velocity for joint_velocity_guard (and to integrate
     # self._q forward -- see step()'s docstring-adjacent comment there).
@@ -368,6 +381,11 @@ class VelocityTransportEnv(gym.Env):
             singularity_sigma_min_full_speed=self.cfg.singularity_sigma_min_full_speed,
             singularity_scale_power=self.cfg.singularity_scale_power,
             singularity_windup_clamp_rad=self.cfg.singularity_windup_clamp_rad,
+            ik_joint_gain_step_scaling=self.cfg.ik_joint_gain_step_scaling,
+            ik_joint_gain_step_full_below_rad=self.cfg.ik_joint_gain_step_full_below_rad,
+            ik_joint_gain_step_zero_above_rad=self.cfg.ik_joint_gain_step_zero_above_rad,
+            ik_joint_gain_step_min_scale=self.cfg.ik_joint_gain_step_min_scale,
+            ik_joint_gain_step_falloff_power=self.cfg.ik_joint_gain_step_falloff_power,
         )
         self._controller = CartesianVelocityController(gain_cfg)
         self._controller.reset_from_state(

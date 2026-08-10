@@ -99,3 +99,45 @@ def singularity_speed_scale(
     and a case at/inside the stop threshold gets EXACTLY zero commanded
     velocity rather than some small residual crawl."""
     return 1.0 - smooth_falloff(sigma_min, sigma_min_stop, sigma_min_full_speed, power)
+
+
+def ik_joint_gain_step_scale(
+    gap_norm: float, full_below: float, zero_above: float, min_scale: float, power: float = 2.0
+) -> float:
+    """Smooth [min_scale, 1] gain-scaling factor from the magnitude of the
+    joint-space step ``compute_ik_seeded`` is about to command
+    (``||q_target - q_current||``): EXACTLY 1.0 (full ``ik_joint_gain``) at
+    or below ``full_below``, EXACTLY ``min_scale`` at or above
+    ``zero_above``, falling off as ``power`` in between. Implemented
+    directly in terms of ``smooth_falloff`` for the same "danger grows as
+    the signal grows" shape ``orientation_priority``'s blend already uses
+    (unlike ``singularity_speed_scale``, which mirrors it because ITS danger
+    signal shrinks, not grows):
+    ``min_scale + (1 - min_scale) * smooth_falloff(gap_norm, full_below, zero_above, power)``.
+
+    Used by ``modes.py``'s ``ik_joint_gain_step_scaling`` (see
+    ``config.py``) to reduce the EFFECTIVE joint-space P-gain as the
+    commanded step grows large -- a large step at a fixed high gain is
+    exactly ``ik_joint_gain * gap``, so bounding the gain in proportion to
+    ``gap`` directly bounds the peak commanded joint velocity, independent
+    of whether the Jacobian is well- or ill-conditioned at that instant
+    (measured directly, see ``config.py``: the 11 cells this mechanism
+    targets keep ``sigma_min(J_full)`` at or above
+    ``singularity_sigma_min_full_speed`` for the entire episode in all but
+    one of them, so ``singularity_velocity_scaling`` never engages there at
+    all -- this is a genuinely different failure mechanism, not a
+    conditioning problem).
+
+    ``min_scale`` (unlike ``smooth_falloff``'s own hard 0.0 floor) keeps a
+    strictly positive floor rather than fully freezing the joint-space
+    P-law at large gaps: a hard zero would leave the arm unable to make ANY
+    further progress toward q_target for as long as the gap stays above
+    ``zero_above``, which is a much stronger intervention than the observed
+    failure needs (the failing cells' guard trips are peak-velocity
+    OVERSHOOTS mid-move, not cases where slow-but-nonzero convergence would
+    itself be unsafe) and would gate X-tracking accuracy far more than
+    necessary at exactly the cells this mechanism must still track well
+    through. See this package's tests for the calibrated default (data-
+    driven, not guessed, the same discipline as every other threshold in
+    this file)."""
+    return float(min_scale) + (1.0 - float(min_scale)) * smooth_falloff(gap_norm, full_below, zero_above, power)

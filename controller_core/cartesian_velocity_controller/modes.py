@@ -188,7 +188,7 @@ import numpy as np
 
 from ..box_qp import build_weighted_least_squares_qp, solve_box_qp
 from ..kinematics_utils import null_space_basis, swing_twist_axis_error
-from .math_utils import _damped_pinv, singularity_speed_scale, smooth_falloff
+from .math_utils import _damped_pinv, ik_joint_gain_step_scale, singularity_speed_scale, smooth_falloff
 
 
 def _ik_newton_solve(
@@ -552,7 +552,34 @@ def compute_ik_seeded(
         clamp = abs(float(cfg.singularity_windup_clamp_rad))
         q_target_error = np.clip(q_target_error, -clamp, clamp)
 
-    qd_joint = cfg.ik_joint_gain * q_target_error
+    # ik_joint_gain_step_scaling (added 2026-08-07, default off -- see
+    # config.py for the full rationale, including the measured evidence
+    # this is a DISTINCT failure mechanism from singularity_velocity_
+    # scaling, not a case that mechanism's own parameters should be
+    # retuned for: at the 11 cells this targets, sigma_min(J_full) stays
+    # at/above singularity_sigma_min_full_speed for essentially the entire
+    # episode, so scale_current above is pinned at 1.0 throughout -- these
+    # are large-step overshoots at a fixed high gain, not near-singularity
+    # events. Reads q_target_error AFTER singularity_windup_clamp_rad's own
+    # clip (if that mechanism is also active), since that is the actual
+    # gap about to be multiplied by ik_joint_gain -- the two compose
+    # cleanly (windup-clamp bounds the throttled-cycle gap's magnitude;
+    # this mechanism additionally scales down the gain in proportion to
+    # whatever gap remains, unconditionally, not gated on singularity_
+    # velocity_scaling at all). With the flag off, step_scale stays exactly
+    # 1.0 and qd_joint is bit-for-bit unchanged.
+    step_scale = 1.0
+    if cfg.ik_joint_gain_step_scaling:
+        gap_norm = float(np.linalg.norm(q_target_error))
+        step_scale = ik_joint_gain_step_scale(
+            gap_norm,
+            cfg.ik_joint_gain_step_full_below_rad,
+            cfg.ik_joint_gain_step_zero_above_rad,
+            cfg.ik_joint_gain_step_min_scale,
+            cfg.ik_joint_gain_step_falloff_power,
+        )
+
+    qd_joint = cfg.ik_joint_gain * step_scale * q_target_error
     if cfg.joint_vel_limit_radps is not None:
         qd_joint = np.clip(qd_joint, -abs(cfg.joint_vel_limit_radps), abs(cfg.joint_vel_limit_radps))
     if cfg.singularity_velocity_scaling:

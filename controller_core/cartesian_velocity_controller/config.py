@@ -332,6 +332,78 @@ class CartesianVelocityConfig:
     # cells, not this separate, already-failing cell's peak magnitude.
     singularity_windup_clamp_rad: float | None = None
 
+    # --- ik_joint_gain_step_scaling (added 2026-08-07, ik_seeded_resolution
+    # only, default OFF -- reproduces the exact prior behavior bit-for-bit)
+    # ---
+    #
+    # Why a THIRD mechanism, distinct from singularity_velocity_scaling:
+    # the full 128-cell grid (orientation_priority + singularity_velocity_
+    # scaling + singularity_windup_clamp_rad, all on) still fails 15/128 --
+    # 4 at hanging_alpha_0_5 (out of scope, see modes.py/ik_max_joint_
+    # deviation_rad's docstring: a genuine row-space coupling and one
+    # kinematically-unreachable target, neither fixable by a redundancy- or
+    # gain-scheduling mechanism) and 11 at neg40_wrist2offset/
+    # neg45_wrist2offset, all at the LARGEST tested +X displacements
+    # (dx=+0.0319 to +0.0580 m). Before assuming this needed a new
+    # mechanism at all, the obvious question was checked directly rather
+    # than assumed: does singularity_velocity_scaling simply need
+    # re-tuning here, i.e. is this actually the SAME wrist_2=0 conditioning
+    # problem it already targets? Measured (see this package's tests):
+    # tracing sigma_min(J_full) through all 11 episodes with
+    # singularity_velocity_scaling ON found scale_current == 1.0000 for
+    # EVERY single cycle of 10 of the 11 cells (sigma_min never drops
+    # below ~0.030, right at or above singularity_sigma_min_full_speed's
+    # default) -- the mechanism never engages at all, so no retuning of it
+    # could possibly help. The 11th cell (neg45_wrist2offset, dx=+0.0580m,
+    # fast move) fails via orthogonal_drift_guard, also with scale_current
+    # pinned at 1.0 throughout. This is a genuinely different failure
+    # mechanism: large commanded steps overshooting the joint-velocity
+    # guard at a FIXED high ik_joint_gain, independent of Jacobian
+    # conditioning.
+    #
+    # Independently, a separate (not-shipped) DE-per-cell gain-scheduling
+    # search found a clean, mechanistic pattern at exactly these cells: the
+    # per-cell-optimal ik_joint_gain drops substantially as displacement
+    # grows past this pose's comfortable range (e.g. neg45_wrist2offset:
+    # 47.9 baseline -> 42.6/20.4/7.2 optimal at dx=0.0319/0.0464/0.0580).
+    # Mechanistic, not coincidental: ik_joint_gain is the exact P-gain
+    # multiplying ||q_target - q_current|| (see modes.py's compute_
+    # ik_seeded, the same gap singularity_windup_clamp_rad's hard clip
+    # already operates on) into the commanded joint velocity, and
+    # joint_velocity_guard is the exact guard these cells trip -- a lower
+    # gain directly reduces peak |qd|, and larger moves produce a larger
+    # gap that needs proportionally more reduction to stay under the same
+    # 3.0 rad/s ceiling. (The schedule also varies kp_rot across these
+    # cells -- a red herring: ik_seeded_resolution never reads kp_rot at
+    # all, confirmed directly in this package's own tests, so that
+    # variation has zero physical effect.)
+    #
+    # What this does: reuses smooth_falloff (already used by orientation_
+    # priority's blend gate, for consistency) on ||q_target - q_current||
+    # itself, the exact quantity ik_joint_gain multiplies -- see math_
+    # utils.py's ik_joint_gain_step_scale for the exact functional form and
+    # why it keeps a strictly positive floor (ik_joint_gain_step_min_scale)
+    # rather than falling all the way to zero the way orientation_
+    # priority's blend does. Applied as
+    # ``qd_joint = ik_joint_gain * step_scale * q_target_error`` -- AFTER
+    # singularity_windup_clamp_rad's own clip (if that mechanism is also
+    # active), so the two compose cleanly: windup-clamp bounds the gap's
+    # MAGNITUDE on throttled cycles specifically, this mechanism scales
+    # whatever gap remains by how large it is, unconditionally (not gated
+    # on singularity_velocity_scaling at all -- this is a genuinely
+    # independent mechanism, usable with or without it).
+    #
+    # Thresholds calibrated from real data (a direct sweep of candidate
+    # (full_below, zero_above, min_scale) triples against the full 128-cell
+    # evaluate_gains grid, matching this file's own established practice for
+    # every other threshold above -- not guessed). See this package's tests
+    # for the calibrated values and the measured full-grid result.
+    ik_joint_gain_step_scaling: bool = False
+    ik_joint_gain_step_full_below_rad: float = 0.10
+    ik_joint_gain_step_zero_above_rad: float = 0.30
+    ik_joint_gain_step_min_scale: float = 0.15
+    ik_joint_gain_step_falloff_power: float = 2.0
+
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianVelocityConfig":
         vc = ctrl.get("velocity_control", {}) or {}
@@ -386,4 +458,9 @@ class CartesianVelocityConfig:
             singularity_windup_clamp_rad=(
                 float(vc["singularity_windup_clamp_rad"]) if "singularity_windup_clamp_rad" in vc else None
             ),
+            ik_joint_gain_step_scaling=bool(vc.get("ik_joint_gain_step_scaling", False)),
+            ik_joint_gain_step_full_below_rad=float(vc.get("ik_joint_gain_step_full_below_rad", 0.10)),
+            ik_joint_gain_step_zero_above_rad=float(vc.get("ik_joint_gain_step_zero_above_rad", 0.30)),
+            ik_joint_gain_step_min_scale=float(vc.get("ik_joint_gain_step_min_scale", 0.15)),
+            ik_joint_gain_step_falloff_power=float(vc.get("ik_joint_gain_step_falloff_power", 2.0)),
         )

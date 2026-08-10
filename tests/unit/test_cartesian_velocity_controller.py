@@ -1384,3 +1384,243 @@ def test_singularity_windup_clamp_rad_yaml_round_trip():
 def test_singularity_windup_clamp_rad_absent_from_yaml_defaults_off():
     cfg = CartesianVelocityConfig.from_controller_yaml_section({"velocity_control": {}})
     assert cfg.singularity_windup_clamp_rad is None
+
+
+# --------------------------------------------------------------------------- #
+# ik_joint_gain_step_scaling (added 2026-08-07) -- reduces the EFFECTIVE
+# ik_joint_gain as ||q_target - q_current|| grows, a genuinely different
+# failure mechanism from singularity_velocity_scaling: measured directly
+# (see config.py and this package's status doc), the 11 real cells this
+# targets (neg40_wrist2offset/neg45_wrist2offset at the largest tested +X
+# displacements) keep sigma_min(J_full) at/above singularity_sigma_min_
+# full_speed for the entire episode in 10/11 of them -- singularity_
+# velocity_scaling never engages there at all, so no amount of retuning it
+# could help; the guard trips are large-step overshoots at a fixed high
+# gain, independent of Jacobian conditioning.
+# --------------------------------------------------------------------------- #
+
+
+def _ik_joint_gain_step_scale():
+    from controller_core.cartesian_velocity_controller.math_utils import ik_joint_gain_step_scale
+
+    return ik_joint_gain_step_scale
+
+
+def test_ik_joint_gain_step_scale_is_one_at_or_below_full_below():
+    f = _ik_joint_gain_step_scale()
+    assert f(0.05, 0.15, 1.0, 0.15) == 1.0
+    assert f(0.15, 0.15, 1.0, 0.15) == 1.0
+    assert f(0.0, 0.15, 1.0, 0.15) == 1.0
+
+
+def test_ik_joint_gain_step_scale_is_exactly_min_scale_at_or_above_zero_above():
+    f = _ik_joint_gain_step_scale()
+    assert f(1.0, 0.15, 1.0, 0.15) == pytest.approx(0.15)
+    assert f(5.0, 0.15, 1.0, 0.15) == pytest.approx(0.15)
+
+
+def test_ik_joint_gain_step_scale_is_monotonically_decreasing_in_between():
+    f = _ik_joint_gain_step_scale()
+    xs = np.linspace(0.15, 1.0, 25)
+    ys = [f(float(x), 0.15, 1.0, 0.15) for x in xs]
+    assert all(a >= b - 1e-12 for a, b in zip(ys, ys[1:]))
+    assert ys[0] == pytest.approx(1.0)
+    assert ys[-1] == pytest.approx(0.15)
+
+
+def test_ik_joint_gain_step_scale_never_drops_below_min_scale():
+    """The property that distinguishes this from smooth_falloff's own hard
+    zero floor: even far past zero_above, or with pathological inputs, the
+    scale must never go below min_scale -- a full freeze of the joint-space
+    P-law is a much stronger intervention than this mechanism is meant to
+    apply (see math_utils.py's docstring)."""
+    f = _ik_joint_gain_step_scale()
+    for gap in (1.0, 10.0, 1000.0, 1.0e6):
+        s = f(gap, 0.15, 1.0, 0.15)
+        assert 0.15 - 1e-12 <= s <= 1.0
+
+
+def test_ik_joint_gain_step_scale_zero_min_scale_matches_smooth_falloff():
+    """min_scale=0.0 collapses to a bare smooth_falloff weight -- confirms
+    the floor term is additive, not a separate code path that could drift
+    out of sync with smooth_falloff's own shape."""
+    from controller_core.cartesian_velocity_controller.math_utils import smooth_falloff
+
+    f = _ik_joint_gain_step_scale()
+    for gap in (0.05, 0.2, 0.5, 0.9, 1.5):
+        assert f(gap, 0.15, 1.0, 0.0) == pytest.approx(smooth_falloff(gap, 0.15, 1.0, 2.0))
+
+
+def test_ik_joint_gain_step_scale_degenerate_band_is_a_step_not_a_division_by_zero():
+    f = _ik_joint_gain_step_scale()
+    assert f(0.05, 1.0, 0.2, 0.15) == 1.0  # below the (degenerate) full_below -> full scale
+    assert f(2.0, 1.0, 0.2, 0.15) == pytest.approx(0.15)  # above it -> floor, no ZeroDivisionError
+
+
+def test_ik_joint_gain_step_scaling_defaults_off():
+    cfg = CartesianVelocityConfig()
+    assert cfg.ik_joint_gain_step_scaling is False
+    assert cfg.ik_joint_gain_step_full_below_rad == pytest.approx(0.10)
+    assert cfg.ik_joint_gain_step_zero_above_rad == pytest.approx(0.30)
+    assert cfg.ik_joint_gain_step_min_scale == pytest.approx(0.15)
+    assert cfg.ik_joint_gain_step_falloff_power == pytest.approx(2.0)
+
+
+def test_ik_joint_gain_step_scaling_off_is_bit_for_bit_prior_behavior():
+    """The exactness bar every mechanism in this file is held to: with the
+    flag off, output must be IDENTICAL to before the mechanism existed --
+    not merely close. Uses a deliberately large q_current offset (a large
+    gap, so the mechanism would visibly do SOMETHING if mistakenly active)
+    to make sure the flag, not merely a lucky gap size, is what gates it
+    off."""
+    q_rest = np.zeros(6)
+    q_current = q_rest + np.array([0.5, -0.3, 0.2, 0.1, -0.2, 0.15])
+    target = _toy_fk(q_rest)[0].copy()
+    target[0] += 0.05
+
+    off = _run_ik_seeded(_op_cfg(), _toy_fk, q_rest, q_current, target)
+    off_explicit = _run_ik_seeded(
+        _op_cfg(
+            ik_joint_gain_step_scaling=False,
+            ik_joint_gain_step_full_below_rad=0.001, ik_joint_gain_step_zero_above_rad=0.002,
+            ik_joint_gain_step_min_scale=0.0,
+        ),
+        _toy_fk, q_rest, q_current, target,
+    )
+    np.testing.assert_array_equal(off, off_explicit)
+
+
+def test_ik_joint_gain_step_scaling_matches_full_gain_for_a_small_step():
+    """A comfortably small gap (below full_below throughout) must reproduce
+    the mechanism-off command exactly -- not merely closely -- since
+    step_scale is EXACTLY 1.0 the whole solve."""
+    q_rest = np.zeros(6)
+    q_current = q_rest + np.array([0.001, -0.0005, 0.0002, 0.0001, -0.0002, 0.00015])
+    target = _toy_fk(q_rest)[0].copy()
+    target[0] += 0.001
+
+    off = _run_ik_seeded(_op_cfg(), _toy_fk, q_rest, q_current, target)
+    on = _run_ik_seeded(
+        _op_cfg(
+            ik_joint_gain_step_scaling=True,
+            ik_joint_gain_step_full_below_rad=1.0, ik_joint_gain_step_zero_above_rad=2.0,
+            ik_joint_gain_step_min_scale=0.15,
+        ),
+        _toy_fk, q_rest, q_current, target,
+    )
+    np.testing.assert_array_equal(off, on)
+
+
+def test_ik_joint_gain_step_scaling_reduces_command_for_a_large_step():
+    """The mechanism's actual purpose: a large gap (deliberately past
+    zero_above) must produce a strictly smaller-magnitude command with the
+    mechanism on than off, at a Jacobian that is NOT near-singular (_toy_fk)
+    -- confirming this triggers on step SIZE alone, not on conditioning."""
+    q_rest = np.zeros(6)
+    q_current = q_rest + np.array([0.6, -0.4, 0.3, 0.2, -0.1, 0.25])
+    target = _toy_fk(q_rest)[0].copy()
+    target[0] += 0.05
+
+    off = _run_ik_seeded(_op_cfg(), _toy_fk, q_rest, q_current, target)
+    on = _run_ik_seeded(
+        _op_cfg(
+            ik_joint_gain_step_scaling=True,
+            ik_joint_gain_step_full_below_rad=0.15, ik_joint_gain_step_zero_above_rad=1.0,
+            ik_joint_gain_step_min_scale=0.15,
+        ),
+        _toy_fk, q_rest, q_current, target,
+    )
+    assert float(np.linalg.norm(on)) < float(np.linalg.norm(off))
+
+
+def test_ik_joint_gain_step_scaling_composes_exactly_with_windup_clamp():
+    """Applied AFTER singularity_windup_clamp_rad's own clip -- verified by
+    reconstructing the expected command by hand from the same two-step
+    pipeline (clamp the gap, then scale it) and comparing exactly, not just
+    checking a direction of change."""
+    q_rest = np.zeros(6)
+    q_current = q_rest + np.array([0.4, 0.0, 0.0, 0.0, 0.0, 0.0])
+    target = _toy_fk_near_singular_const(q_rest)[0].copy()
+    target[0] += 0.05
+
+    kw = dict(
+        singularity_velocity_scaling=True,
+        singularity_sigma_min_stop=0.001, singularity_sigma_min_full_speed=0.5,
+        singularity_windup_clamp_rad=0.03,
+        ik_joint_gain_step_scaling=True,
+        ik_joint_gain_step_full_below_rad=0.01, ik_joint_gain_step_zero_above_rad=0.02,
+        ik_joint_gain_step_min_scale=0.2,
+    )
+    combined = _run_ik_seeded(_op_cfg(**kw), _toy_fk_near_singular_const, q_rest, q_current, target)
+
+    # windup-clamp-only reference, then hand-scale it by the expected
+    # step_scale for a fully-clamped (0.03 rad) gap under this band, i.e.
+    # min_scale exactly (0.03 > zero_above=0.02).
+    clamp_only = _run_ik_seeded(
+        _op_cfg(
+            singularity_velocity_scaling=True,
+            singularity_sigma_min_stop=0.001, singularity_sigma_min_full_speed=0.5,
+            singularity_windup_clamp_rad=0.03,
+        ),
+        _toy_fk_near_singular_const, q_rest, q_current, target,
+    )
+    np.testing.assert_allclose(combined, clamp_only * 0.2, rtol=1e-9, atol=1e-12)
+
+
+def test_ik_joint_gain_step_scaling_inactive_without_ik_seeded_resolution_is_not_applicable():
+    """ik_joint_gain_step_scaling is only read inside compute_ik_seeded --
+    confirms the flag has zero effect on any other mode (reduced_task_dims
+    here), the same isolation every mode-specific mechanism in this file
+    is held to."""
+    cfg_off = CartesianVelocityConfig(
+        reduced_task_dims=True, kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0,
+        max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0, kp_posture=1.0, pinv_damping=0.01,
+    )
+    cfg_on = CartesianVelocityConfig(
+        reduced_task_dims=True, kp_x=2.0, kp_y=2.0, kp_z=2.0, kp_rot=2.0,
+        max_lin_speed_mps=1000.0, max_ang_speed_radps=1000.0, kp_posture=1.0, pinv_damping=0.01,
+        ik_joint_gain_step_scaling=True, ik_joint_gain_step_full_below_rad=0.001,
+        ik_joint_gain_step_zero_above_rad=0.002, ik_joint_gain_step_min_scale=0.0,
+    )
+    q = np.array([0.1, -0.05, 0.02, 0.01, -0.02, 0.015])
+    _, _, jac = _toy_fk(q)
+    p, quat, _ = _toy_fk(q)
+    target = p.copy()
+    target[0] += 0.05
+
+    def _compute(cfg):
+        ctrl = CartesianVelocityController(cfg)
+        ctrl.reset_from_state({"time": 0.0, "q": q, "qd": np.zeros(6), "ee_pos": p, "ee_quat": quat, "target_x": float(p[0])})
+        return ctrl.compute(
+            {
+                "time": 1.0, "q": q, "qd": np.zeros(6), "ee_pos": p, "ee_quat": quat,
+                "target_x": float(target[0]), "target_ee_pos": target, "target_ee_vel": np.zeros(3),
+                "jacobian": jac,
+            }
+        )
+
+    np.testing.assert_array_equal(_compute(cfg_off), _compute(cfg_on))
+
+
+def test_ik_joint_gain_step_scaling_yaml_round_trip():
+    cfg = CartesianVelocityConfig.from_controller_yaml_section(
+        {
+            "velocity_control": {
+                "ik_joint_gain_step_scaling": True,
+                "ik_joint_gain_step_full_below_rad": 0.2,
+                "ik_joint_gain_step_zero_above_rad": 1.5,
+                "ik_joint_gain_step_min_scale": 0.1,
+                "ik_joint_gain_step_falloff_power": 3.0,
+            }
+        }
+    )
+    assert cfg.ik_joint_gain_step_scaling is True
+    assert cfg.ik_joint_gain_step_full_below_rad == pytest.approx(0.2)
+    assert cfg.ik_joint_gain_step_zero_above_rad == pytest.approx(1.5)
+    assert cfg.ik_joint_gain_step_min_scale == pytest.approx(0.1)
+    assert cfg.ik_joint_gain_step_falloff_power == pytest.approx(3.0)
+
+
+def test_ik_joint_gain_step_scaling_absent_from_yaml_defaults_off():
+    cfg = CartesianVelocityConfig.from_controller_yaml_section({"velocity_control": {}})
+    assert cfg.ik_joint_gain_step_scaling is False

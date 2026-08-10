@@ -725,6 +725,29 @@ _NULLSPACE_V2_ACTION = np.array(
      -0.40319481871903273, 0.6634521666673519, -0.29877165734428546]
 )
 
+# The already-committed 3-mechanism config (orientation_priority +
+# singularity_velocity_scaling + singularity_windup_clamp_rad), same gains
+# vector as above: 113/128 on the full 128-cell grid -- the baseline
+# ik_joint_gain_step_scaling's own tests (below) measure their improvement
+# against.
+_THREE_MECHANISM_KW = dict(
+    orientation_priority=True, orientation_priority_weight=1.0,
+    orientation_priority_residual_tol_m=0.0001, orientation_priority_residual_falloff_m=0.0005,
+    orientation_priority_falloff_power=2.0,
+    singularity_velocity_scaling=True, singularity_sigma_min_stop=0.003,
+    singularity_sigma_min_full_speed=0.03, singularity_scale_power=2.0,
+    singularity_windup_clamp_rad=0.03,
+)
+
+# ik_joint_gain_step_scaling's calibrated thresholds -- see controller_core/
+# cartesian_velocity_controller/config.py's docstring for the mechanism and
+# test_ik_joint_gain_step_scaling_full_grid_net_improvement_no_new_
+# regressions below for the full 128-cell calibration result these values
+# were chosen from (a direct sweep of candidate triples, not a guess).
+STEP_SCALING_FULL_BELOW_RAD = 0.10
+STEP_SCALING_ZERO_ABOVE_RAD = 0.30
+STEP_SCALING_MIN_SCALE = 0.15
+
 
 def test_singularity_velocity_scaling_fixes_documented_neg45_wrist2offset_spike():
     """Direct, real (mujoco-backed) reproduction: WITHOUT the mechanism, this
@@ -978,6 +1001,159 @@ def test_run_search_default_eval_dx_fractions_include_both_signs():
     fracs = inspect.signature(run_search).parameters["eval_dx_fractions"].default
     assert any(f > 0 for f in fracs)
     assert any(f < 0 for f in fracs), "eval_dx_fractions default has no negative fraction -- X-direction asymmetry is real (AGENTS.md sec 7)"
+
+
+# ---------------------------------------------------------------------------
+# ik_joint_gain_step_scaling (2026-08-07) -- reduces the effective ik_joint_
+# gain as ||q_target - q_current|| grows, independent of Jacobian
+# conditioning. Targets 11 cells at neg40_wrist2offset/neg45_wrist2offset,
+# all at the largest tested +X displacements, that trip joint_velocity_guard
+# even with orientation_priority + singularity_velocity_scaling +
+# singularity_windup_clamp_rad all on -- confirmed by direct tracing
+# (controller_core/cartesian_velocity_controller/config.py's docstring) that
+# sigma_min(J_full) stays at/above singularity_sigma_min_full_speed
+# throughout these episodes, i.e. singularity_velocity_scaling never engages
+# there at all. See config.py and math_utils.py for the full mechanism.
+# ---------------------------------------------------------------------------
+
+
+def _step_scaling_env_config(**overrides) -> VelocityTransportEnvConfig:
+    kw = dict(
+        ik_joint_gain_step_scaling=True,
+        ik_joint_gain_step_full_below_rad=STEP_SCALING_FULL_BELOW_RAD,
+        ik_joint_gain_step_zero_above_rad=STEP_SCALING_ZERO_ABOVE_RAD,
+        ik_joint_gain_step_min_scale=STEP_SCALING_MIN_SCALE,
+    )
+    kw.update(overrides)
+    return VelocityTransportEnvConfig(**kw)
+
+
+def test_ik_joint_gain_step_scaling_fixes_neg45_wrist2offset_dx0464_slow():
+    """Direct, real (mujoco-backed) reproduction of one of the 11 target
+    cells: neg45_wrist2offset, dx=1.6x its max_dx_hint_m (0.0464m), the
+    default (slow, 1.0s) move duration. WITHOUT the mechanism (but with all
+    three already-committed mechanisms on), this trips joint_velocity_guard.
+    WITH it added (same gains, same everything else), the guard does not
+    trip and achieved tracking is still reasonable."""
+    scenario = scenario_by_name("neg45_wrist2offset")
+    dx = 1.6 * scenario.max_dx_hint_m
+
+    env_off = VelocityTransportEnv(
+        VelocityTransportEnvConfig(**_THREE_MECHANISM_KW), seed=0,
+    )
+    result_off = run_episode(env_off, _NULLSPACE_V2_ACTION, scenario=scenario, target_x_delta_m=dx)
+    assert result_off.guard_reason is not None
+    assert "joint_velocity_guard" in result_off.guard_reason
+
+    env_on = VelocityTransportEnv(
+        _step_scaling_env_config(**_THREE_MECHANISM_KW), seed=0,
+    )
+    result_on = run_episode(env_on, _NULLSPACE_V2_ACTION, scenario=scenario, target_x_delta_m=dx)
+    assert result_on.guard_reason is None
+    assert result_on.max_abs_qd_radps < 3.0
+    assert abs(result_on.achieved_x_delta_m - dx) < 0.5 * abs(dx)  # reasonable tracking, not just "didn't crash"
+
+
+def test_ik_joint_gain_step_scaling_fixes_neg40_wrist2offset_dx0580_slow():
+    """Same reproduction, second target cell: neg40_wrist2offset, dx=2.0x
+    its max_dx_hint_m (0.0580m), the largest tested displacement, default
+    move duration."""
+    scenario = scenario_by_name("neg40_wrist2offset")
+    dx = 2.0 * scenario.max_dx_hint_m
+
+    env_off = VelocityTransportEnv(
+        VelocityTransportEnvConfig(**_THREE_MECHANISM_KW), seed=0,
+    )
+    result_off = run_episode(env_off, _NULLSPACE_V2_ACTION, scenario=scenario, target_x_delta_m=dx)
+    assert result_off.guard_reason is not None
+    assert "joint_velocity_guard" in result_off.guard_reason
+
+    env_on = VelocityTransportEnv(
+        _step_scaling_env_config(**_THREE_MECHANISM_KW), seed=0,
+    )
+    result_on = run_episode(env_on, _NULLSPACE_V2_ACTION, scenario=scenario, target_x_delta_m=dx)
+    assert result_on.guard_reason is None
+    assert result_on.max_abs_qd_radps < 3.0
+    assert abs(result_on.achieved_x_delta_m - dx) < 0.5 * abs(dx)
+
+
+def test_ik_joint_gain_step_scaling_field_defaults_off_in_env_config():
+    cfg = VelocityTransportEnvConfig()
+    assert cfg.ik_joint_gain_step_scaling is False
+    assert cfg.ik_joint_gain_step_full_below_rad == pytest.approx(STEP_SCALING_FULL_BELOW_RAD)
+    assert cfg.ik_joint_gain_step_zero_above_rad == pytest.approx(STEP_SCALING_ZERO_ABOVE_RAD)
+    assert cfg.ik_joint_gain_step_min_scale == pytest.approx(STEP_SCALING_MIN_SCALE)
+
+
+def test_ik_joint_gain_step_scaling_off_is_bit_for_bit_identical_via_env():
+    """Same wiring-parity bar every mechanism's env test in this file is
+    held to: with the field at its (off) default, results must be IDENTICAL
+    to a config that never mentions the field at all."""
+    scenario = scenario_by_name("neg45_wrist2offset")
+    dx = 1.6 * scenario.max_dx_hint_m
+
+    result_default = run_episode(
+        VelocityTransportEnv(VelocityTransportEnvConfig(**_THREE_MECHANISM_KW), seed=0),
+        _NULLSPACE_V2_ACTION, scenario=scenario, target_x_delta_m=dx,
+    )
+    result_explicit_off = run_episode(
+        VelocityTransportEnv(
+            VelocityTransportEnvConfig(**_THREE_MECHANISM_KW, ik_joint_gain_step_scaling=False), seed=0,
+        ),
+        _NULLSPACE_V2_ACTION, scenario=scenario, target_x_delta_m=dx,
+    )
+    assert result_default.max_abs_qd_radps == pytest.approx(result_explicit_off.max_abs_qd_radps, rel=1e-12)
+    assert result_default.achieved_x_delta_m == pytest.approx(result_explicit_off.achieved_x_delta_m, rel=1e-12)
+    assert result_default.guard_reason == result_explicit_off.guard_reason
+
+
+def test_ik_joint_gain_step_scaling_full_grid_net_improvement_no_new_regressions():
+    """The validation bar this mechanism was built to clear, matching
+    singularity_windup_clamp_rad's own full-grid test above: adding
+    ik_joint_gain_step_scaling on top of the already-committed 3-mechanism
+    baseline (orientation_priority + singularity_velocity_scaling +
+    singularity_windup_clamp_rad, 113/128) must be a real net improvement
+    with ZERO new pass->fail regressions anywhere in the 128-cell grid."""
+    eval_dx_fractions = (
+        0.3, 0.6, 0.9, 1.0, 1.1, 1.3, 1.6, 2.0, -0.3, -0.6, -0.9, -1.0, -1.1, -1.3, -1.6, -2.0,
+    )
+
+    def _key(r):
+        return (r.scenario, round(r.target_x_delta_m, 5), round(r.move_duration_s, 4))
+
+    baseline_results = {
+        _key(r): r
+        for r in evaluate_gains(
+            _NULLSPACE_V2_ACTION, dx_fractions=eval_dx_fractions, fast_move_dx_fractions=eval_dx_fractions,
+            env_config=VelocityTransportEnvConfig(**_THREE_MECHANISM_KW), seed=0,
+        )
+    }
+    combined_results = {
+        _key(r): r
+        for r in evaluate_gains(
+            _NULLSPACE_V2_ACTION, dx_fractions=eval_dx_fractions, fast_move_dx_fractions=eval_dx_fractions,
+            env_config=_step_scaling_env_config(**_THREE_MECHANISM_KW), seed=0,
+        )
+    }
+    assert set(baseline_results) == set(combined_results)
+
+    n_pass_baseline = sum(1 for r in baseline_results.values() if r.guard_reason is None)
+    n_pass_combined = sum(1 for r in combined_results.values() if r.guard_reason is None)
+    assert n_pass_baseline == 113, f"3-mechanism baseline drifted from the documented 113/128 ({n_pass_baseline}/128)"
+    assert n_pass_combined > n_pass_baseline, "must be a real net improvement, not a net-neutral trade"
+
+    regressions = [
+        k for k in baseline_results
+        if baseline_results[k].guard_reason is None and combined_results[k].guard_reason is not None
+    ]
+    assert regressions == [], f"ik_joint_gain_step_scaling introduced new pass->fail regressions: {regressions}"
+
+
+def test_ik_joint_gain_step_scaling_yaml_absent_defaults_off():
+    from controller_core.cartesian_velocity_controller import CartesianVelocityConfig
+
+    cfg = CartesianVelocityConfig.from_controller_yaml_section({"velocity_control": {}})
+    assert cfg.ik_joint_gain_step_scaling is False
 
 
 if __name__ == "__main__":
