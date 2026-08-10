@@ -77,7 +77,16 @@ def run_transport_trial(controller_cfg_kwargs: dict, target_x_delta_m: float, mo
                           duration_s: float, schedule=None) -> dict:
     """schedule: optional dict with keys kp_base/kp_err_gain/kp_vel_gain/
     kd_base/kd_err_gain/kd_vel_gain/err_cap/vel_cap. If None, kp_x/kd_x
-    from controller_cfg_kwargs are used FIXED (the baseline)."""
+    from controller_cfg_kwargs are used FIXED (the baseline).
+
+    x_integral_action/ki_x/x_integral_limit_m_s (added for the overnight
+    ki_x search, see module docstring update below) are NOT part of the
+    live per-cycle schedule -- they are FIXED controller config, set once
+    via controller_cfg_kwargs, exactly like kp_x/kd_x are in the
+    no-schedule baseline case. This matches the real mechanism: ki_x is a
+    gain on an internally-accumulated state (x_integral), not something
+    that makes sense to re-derive from instantaneous (x_err, x_vel) the
+    way the live kp_x/kd_x schedule does."""
     cfg = CartesianImpedanceConfig(**controller_cfg_kwargs)
     model, site_id, joint_ids, adapter = make_adapter(cfg)
     data = mujoco.MjData(model)
@@ -127,7 +136,28 @@ def run_transport_trial(controller_cfg_kwargs: dict, target_x_delta_m: float, mo
             "final_axis_error": final_axis_error, "survived": guard_reason is None}
 
 
-TEST_SCENARIOS = [(0.5, 1.0), (0.6, 1.0), (0.7, 1.0), (0.8, 1.0), (0.6, 0.5), (0.7, 0.5)]
+# RESCOPED (2026-08-10, second same-night correction): dx=0.4 and beyond were
+# in the original TEST_SCENARIOS, but direct verification found they fail via
+# ||orientation error|| > 0.35 rad -- the SAME guard, at nearly the SAME dx
+# threshold, as the plain fixed baseline (kp_x=25/kd_x=8, no ki_x at all).
+# This is the plain "impedance" controller_kind's known orientation-holding
+# weakness at this pose (the wrist-singularity/nullspace-posture issue the
+# OSC lane's wrist_orientation_task + jacobian_singular_cond_max fixes
+# address, see AGENTS.md sec 3) -- NOT a friction/stiction problem, and NOT
+# something a kp_x/kd_x/ki_x schedule has any mechanism to fix. Including
+# dx=0.4-0.8 in the objective meant every candidate failed 4 of 6 scored
+# scenarios no matter how well-tuned, which is why the first corrected run
+# (see docs/status/x_transport_ki_search_2026-08-10.md) converged on "fail
+# everywhere, as late as possible" rather than a usable schedule -- DE was
+# solving an unwinnable aggregate penalty instead of the real, achievable
+# problem. Rescoped to dx in [0.1, 0.4], i.e. from the previously-hardest
+# tracked case through the actual guard boundary
+# (0.3 survives at the fixed baseline, 0.4 fails) -- what a kp/kd/ki_x
+# schedule can plausibly influence. Extending the SURVIVABLE range past 0.3
+# would need the OSC-family orientation fixes, a separate, already-solved
+# problem in a different controller_kind, deliberately out of scope here.
+TEST_SCENARIOS = [(0.1, 1.0), (0.15, 1.0), (0.2, 1.0), (0.25, 1.0), (0.3, 1.0), (0.4, 1.0)]
+HOLD_TAIL_S = 6.0
 
 SCHED_PARAM_BOUNDS = [
     ("kp_base", 1.0, 100.0, True),
@@ -138,6 +168,14 @@ SCHED_PARAM_BOUNDS = [
     ("kd_vel_gain", 0.0, 100.0, False),
     ("err_cap", 0.05, 1.0, False),
     ("vel_cap", 0.05, 2.0, False),
+    # NEW: x_integral_action gains, searched jointly with the kp/kd
+    # schedule above (not fixed by hand) -- see module docstring update.
+    # ki_x upper bound (1000) chosen from the same-day finding that
+    # ki_x=150-300 was the useful range at x_integral_limit_m_s=1.0;
+    # giving the search headroom past that rather than clamping to
+    # exactly what worked by hand.
+    ("ki_x", 0.0, 1000.0, False),
+    ("x_integral_limit_m_s", 0.02, 5.0, True),
 ]
 
 
@@ -149,39 +187,67 @@ def decode_schedule(x: np.ndarray) -> dict:
 
 
 def schedule_fitness(x: np.ndarray) -> float:
-    schedule = decode_schedule(x)
+    """FIXED (2026-08-10, same-night correction): the original version scored a
+    "survived" trial by raw abs(final_axis_error) (max ~0.8, bounded by the
+    largest tested dx) versus >=2.0 for any guard trip. Verified directly (single
+    trajectory trace, see docs/status/x_transport_ki_search_2026-08-10.md) that
+    the FIRST overnight run's "winning" schedule collapsed kp_base/kd_base to
+    near their floor (kp_x~1.1-1.4 vs the 25.0 baseline, let alone the tuned
+    OSC's 400) -- low enough to never approach a guard threshold, but so weak
+    against real joint friction that a dx=0.10m target trial was still 90% short
+    of its target after 6s of hold (moved ~0.01m of 0.10m). That is a real
+    stuck-not-moved result, not a working controller -- it "survived" only
+    because the fitness function rewarded avoiding risk over actually
+    transporting. Fixed by normalizing tracking error to a FRACTION of the
+    commanded displacement (frac_err in ~[0,1] regardless of dx) and weighting it
+    3x, putting a fully-stuck trial's cost (~2.7) in the same range as a guard
+    trip (~2.0-3.0) instead of an order of magnitude cheaper."""
+    params = decode_schedule(x)
+    ki_x = params["ki_x"]
+    x_integral_limit_m_s = params["x_integral_limit_m_s"]
+    schedule = {k: v for k, v in params.items() if k not in ("ki_x", "x_integral_limit_m_s")}
+    cfg_kwargs = {"x_integral_action": ki_x > 0.0, "ki_x": ki_x, "x_integral_limit_m_s": x_integral_limit_m_s}
     total = 0.0
     for dx, move_dur in TEST_SCENARIOS:
-        r = run_transport_trial({}, dx, move_dur, move_dur + 1.0, schedule=schedule)
+        duration_s = move_dur + HOLD_TAIL_S
+        r = run_transport_trial(cfg_kwargs, dx, move_dur, duration_s, schedule=schedule)
         if r["survived"]:
-            total += abs(r["final_axis_error"])
+            frac_err = abs(r["final_axis_error"]) / max(abs(dx), 1e-6)
+            total += 3.0 * frac_err
         else:
-            total += 2.0 + max(0.0, (move_dur + 1.0) - r["fell_at_s"]) / (move_dur + 1.0)
+            total += 2.0 + max(0.0, duration_s - r["fell_at_s"]) / duration_s
     return total
 
 
 def run_search():
     from scipy.optimize import differential_evolution
-    print("=== Baseline (fixed kp_x=25, kd_x=8) at search test scenarios ===")
+    print("=== Baseline (fixed kp_x=25, kd_x=8, no integral action) at search test scenarios ===")
     for dx, move_dur in TEST_SCENARIOS:
-        r = run_transport_trial({"kp_x": 25.0, "kd_x": 8.0}, dx, move_dur, move_dur + 1.0)
+        duration_s = move_dur + HOLD_TAIL_S
+        r = run_transport_trial({"kp_x": 25.0, "kd_x": 8.0}, dx, move_dur, duration_s)
         s = f"S(err={r['final_axis_error']:.4f})" if r["survived"] else f"F({r['guard_reason']})@{r['fell_at_s']:.2f}"
         print(f"  dx={dx:.2f} move_dur={move_dur}: {s}")
 
-    print("\n=== Searching gain schedule ===")
+    print("\n=== Searching gain schedule + x_integral_action jointly (overnight budget) ===")
     result = differential_evolution(
         schedule_fitness, bounds=[(0.0, 1.0)] * len(SCHED_PARAM_BOUNDS),
-        maxiter=30, popsize=16, tol=1e-4, seed=0, workers=12, polish=False, disp=True,
+        maxiter=80, popsize=24, tol=1e-5, seed=0, workers=16, polish=False, disp=True,
     )
     best = decode_schedule(result.x)
-    print(f"\nBest schedule: {best}")
+    print(f"\nBest params: {best}")
     print(f"Best fitness: {result.fun}")
 
-    print(f"\n{'dx':>6} {'move_dur':>10} {'SCHEDULED':>20} {'FIXED-BASELINE':>20}")
-    for dx in [0.2, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
+    ki_x = best["ki_x"]
+    x_integral_limit_m_s = best["x_integral_limit_m_s"]
+    schedule = {k: v for k, v in best.items() if k not in ("ki_x", "x_integral_limit_m_s")}
+    cfg_kwargs = {"x_integral_action": ki_x > 0.0, "ki_x": ki_x, "x_integral_limit_m_s": x_integral_limit_m_s}
+
+    print(f"\n{'dx':>6} {'move_dur':>10} {'SCHEDULED+ki_x':>20} {'FIXED-BASELINE':>20}")
+    for dx in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
         move_dur = 1.0
-        r_s = run_transport_trial({}, dx, move_dur, move_dur + 1.0, schedule=best)
-        r_b = run_transport_trial({"kp_x": 25.0, "kd_x": 8.0}, dx, move_dur, move_dur + 1.0)
+        duration_s = move_dur + HOLD_TAIL_S
+        r_s = run_transport_trial(cfg_kwargs, dx, move_dur, duration_s, schedule=schedule)
+        r_b = run_transport_trial({"kp_x": 25.0, "kd_x": 8.0}, dx, move_dur, duration_s)
         s = f"S(err={r_s['final_axis_error']:.4f})" if r_s["survived"] else f"F@{r_s['fell_at_s']:.2f}"
         b = f"S(err={r_b['final_axis_error']:.4f})" if r_b["survived"] else f"F@{r_b['fell_at_s']:.2f}"
         print(f"{dx:6.2f} {move_dur:10.2f} {s:>20} {b:>20}")
