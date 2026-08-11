@@ -1,0 +1,128 @@
+# Config for hardware/poses.py::MEGA_SEARCH_WINNER_Q -- see that constant's own header
+# for the full pose-search provenance. Base config is
+# config/ur5e_mujoco_torque_osc_hanging_pose_friction_ff.yaml (same controller family,
+# same friction_feedforward block, same safety limits) with ONE change: home_qpos set to
+# MEGA_SEARCH_WINNER_Q instead of the old hanging-family midpoint. kp_x/kd_x are the
+# ORIGINAL, thoroughly-validated defaults (400.0/40.0) -- NOT the "single smoothed gain"
+# (kp_x=110.2050, kd_x=33.6673) tools/diagnostics/x_transport_gain_scheduling_newpose.py's
+# search found, deliberately.
+#
+# Correction, found while building this file (2026-08-11): that single-gain result was
+# validated this session using ONLY a safety-guard-trip check ("survived"), NOT this
+# repo's actual accuracy tolerance (transport_metrics.py: max(5mm, 25% of target)). Cross-
+# checked directly against the real tolerance for the first time here: at dx=+-0.20m, +X
+# passes barely (4.4cm error, just under the 5cm bound) but -X FAILS (6.0cm error, over
+# it) -- the single gain is genuinely more marginal than earlier reported, not a validated
+# real-hardware-ready choice yet. Reverted to the default 400.0/40.0 gains for this file,
+# which WERE validated with the real tolerance (93-95% achieved at dx=0.20m both
+# directions, see this session's move_hold_transport.py sweeps). The single-gain/schedule
+# result is still real (it does extend safe-guard-trip range at 0.20-0.30m where the
+# default gains fail outright) but needs proper re-validation against the accuracy
+# tolerance -- not real-hardware-ready as-is.
+#
+# Validated (sim only, bare arm, no pendulum, kp_x=400/kd_x=40): X-range clean -0.25m to
+# +0.25m at ~93-95% tracking accuracy, speed ceiling 0.78 m/s (-X) / 1.10 m/s (+X).
+#
+# NOT YET REAL-HARDWARE VALIDATED. Before using --i-understand-this-moves-the-robot with
+# this config: (1) do a dedicated visual clearance check at MEGA_SEARCH_WINNER_Q -- this is
+# a genuinely different arm shape from every previously-cleared pose in this lab
+# (elbow bent ~120deg, wrist_2 near +90deg); (2) this pose has shoulder_pan=0 (no base
+# rotation) -- the old pose family needed -45deg for real wall/base clearance in this lab,
+# whether this pose needs the same is UNCHECKED; (3) start with small, slow moves --
+# genuine stick-slip breakaway is a documented, unresolved gap in this repo's friction
+# model (see AGENTS.md sec 3, LuGre plan) that simulation cannot validate either way.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  # hardware/poses.py::MEGA_SEARCH_WINNER_Q
+  home_qpos: [0.0, -1.091985784398452, 2.0935362786892546, -2.7685637962327356, 1.5620693866337145, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  friction_feedforward: true
+  friction_ff_qd_deadband: 0.05
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 5.0
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

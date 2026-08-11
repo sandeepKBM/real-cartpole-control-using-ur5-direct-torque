@@ -160,3 +160,57 @@ def q_for_hanging_height_alpha(alpha: float) -> np.ndarray:
     if not 0.0 <= alpha <= 1.0:
         raise ValueError(f"hanging_height_alpha must be in [0, 1]; got {alpha}")
     return ((1.0 - alpha) * HANGING_ORIGIN_Q + alpha * HANGING_LOWER_Q).astype(np.float64)
+
+
+# --- Mega-pose-search winner (added 2026-08-11) ------------------------------------
+#
+# Found by tools/diagnostics/pose_oscillation_stability_search.py: a broad kinematic
+# pre-filter (~200k random (shoulder_lift, elbow, wrist_1, wrist_2) samples, cond(J) < 30,
+# site height in [0.3, 1.2]m) narrowed to 71 diverse representatives, then scored by a real
+# dynamic test (6 forced alternating raised-cosine kicks on the bare arm, torque-lane
+# impedance controller) -- this pose survived all 6 cleanly, cond(J)=6.93, best in the
+# batch. Meaningfully better than the earlier hand-picked hanging-pose candidate on every
+# axis independently validated the same session (tools/ur5e_move_hold_transport.py real
+# sweeps, config/ur5e_mujoco_torque_osc_hanging_pose_friction_ff.yaml):
+#   X-range:  clean -0.25m to +0.25m   (old candidate: roughly +-0.10-0.15m)
+#   speed:    0.78 m/s (-X) / 1.10 m/s (+X)  (old candidate: 0.31-0.82 m/s)
+# Also the pose the pendulum swing-up investigation used (tools/diagnostics/
+# pendulum_swingup_*.py) -- best achieved there was ~40deg of real swing from hanging
+# (not a full flip), see that work's own docs for the honest ceiling.
+#
+# Gains: for real hardware, use config/ur5e_mujoco_torque_osc_mega_search_winner.yaml,
+# which keeps the ORIGINAL, thoroughly-validated kp_x=400/kd_x=40 (93-95% tracking
+# accuracy at dx=+-0.20m, both directions, under this repo's real tolerance --
+# transport_metrics.py: max(5mm, 25% of target)).
+#
+# A differential_evolution search (tools/diagnostics/x_transport_gain_scheduling_newpose.py)
+# also found an 8-parameter live gain schedule AND a single FIXED (kp_x=110.2050,
+# kd_x=33.6673) pair that both extend safety-guard survival out to 0.20-0.30m aggressive
+# moves where the default gains fail outright. CORRECTED 2026-08-11 (previously overstated
+# here): that result was validated using ONLY a safety-guard-trip check, NOT this repo's
+# real accuracy tolerance -- cross-checked directly for the first time while building the
+# hardware config above, and the single gain is genuinely marginal against it (dx=+0.20m
+# passes barely at 4.4cm error vs. the 5cm bound; dx=-0.20m FAILS at 6.0cm error). Treat
+# the schedule/single-gain result as a real but not-yet-properly-validated finding, not a
+# real-hardware-ready alternative to the default gains.
+#
+# NOT YET REAL-HARDWARE VALIDATED -- sim-only, same as every other pose in this file before
+# its own first real-lab session. In particular:
+#   - No physical/visual clearance check has been done at this pose. It is a genuinely
+#     different arm shape (elbow bent ~120deg, wrist_2 near +90deg) from every previously
+#     real-hardware-cleared pose in this file -- do not assume the lab's existing table/
+#     mount/cable clearance still holds. Do this FIRST, before any --i-understand-this-
+#     moves-the-robot run, exactly like every other pose here required.
+#   - shoulder_pan is 0 here (no base rotation). The old pose family needed a -45deg
+#     rotation for real wall/base clearance in this specific lab
+#     (HEIGHT_ALPHA_0_5_CLEARANCE_Q) -- whether this pose needs an analogous rotation for
+#     the same physical reason is UNCHECKED. If the lab layout is unchanged, check this
+#     pose's own swept volume near the base visually before trusting shoulder_pan=0.
+#   - The single-gain/schedule search validated the BARE arm only, matching this session's
+#     other X-transport work -- not with the pendulum attachment. If testing with the
+#     pendulum mounted, re-validate (mass/inertia at the end effector changes the dynamics).
+MEGA_SEARCH_WINNER_Q = np.array(
+    [0.0, -1.091985784398452, 2.0935362786892546, -2.7685637962327356,
+     1.5620693866337145, 0.0],
+    dtype=np.float64,
+)
