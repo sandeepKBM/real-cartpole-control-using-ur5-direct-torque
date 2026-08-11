@@ -187,21 +187,30 @@ def decode_schedule(x: np.ndarray) -> dict:
 
 
 def schedule_fitness(x: np.ndarray) -> float:
-    """FIXED (2026-08-10, same-night correction): the original version scored a
+    """FIXED TWICE (2026-08-10). First fix: the original version scored a
     "survived" trial by raw abs(final_axis_error) (max ~0.8, bounded by the
-    largest tested dx) versus >=2.0 for any guard trip. Verified directly (single
-    trajectory trace, see docs/status/x_transport_ki_search_2026-08-10.md) that
-    the FIRST overnight run's "winning" schedule collapsed kp_base/kd_base to
-    near their floor (kp_x~1.1-1.4 vs the 25.0 baseline, let alone the tuned
-    OSC's 400) -- low enough to never approach a guard threshold, but so weak
-    against real joint friction that a dx=0.10m target trial was still 90% short
-    of its target after 6s of hold (moved ~0.01m of 0.10m). That is a real
-    stuck-not-moved result, not a working controller -- it "survived" only
-    because the fitness function rewarded avoiding risk over actually
-    transporting. Fixed by normalizing tracking error to a FRACTION of the
-    commanded displacement (frac_err in ~[0,1] regardless of dx) and weighting it
-    3x, putting a fully-stuck trial's cost (~2.7) in the same range as a guard
-    trip (~2.0-3.0) instead of an order of magnitude cheaper."""
+    largest tested dx) versus >=2.0 for any guard trip -- DE exploited that by
+    collapsing kp_base/kd_base near their floor (a real stuck-not-moved result,
+    see docs/status/x_transport_ki_search_2026-08-10.md), so tracking error was
+    normalized to frac_err in [0,1] (fraction of commanded displacement missed)
+    and weighted 3x.
+
+    SECOND FIX (found the same night, a real bug IN that first fix): the
+    weighted survival cost (3.0*frac_err) can reach 3.0 at worst, but the
+    failure-cost floor was only 2.0 -- so for any scenario where the achievable
+    frac_err exceeds 2.0/3.0=0.667 (which turned out to be EVERY scenario at
+    dx>=0.2m: even the fixed-gain baseline itself sits at ~96% frac_err there,
+    a property of real joint friction against a weak default kp_x=25, not
+    anything this search introduced), letting the trial fail outright (~2.0-3.0)
+    was literally cheaper than surviving with bad-but-real tracking (~2.9+).
+    Confirmed directly: a full overnight run converged on kp_base~1.02 again,
+    this time explicitly choosing to fail dx=0.2-0.4m rather than survive them
+    badly, while only "fixing" dx=0.1m. The core invariant this objective must
+    satisfy -- ANY survival, however bad, costs less than ANY failure -- was
+    never actually enforced. Fixed by raising the failure floor (4.0) strictly
+    above the maximum possible survival cost (3.0), not by retuning the
+    weight, since only a strict floor>ceiling relationship holds for every
+    frac_err in [0,1], not just the values this run happened to hit."""
     params = decode_schedule(x)
     ki_x = params["ki_x"]
     x_integral_limit_m_s = params["x_integral_limit_m_s"]
@@ -213,9 +222,9 @@ def schedule_fitness(x: np.ndarray) -> float:
         r = run_transport_trial(cfg_kwargs, dx, move_dur, duration_s, schedule=schedule)
         if r["survived"]:
             frac_err = abs(r["final_axis_error"]) / max(abs(dx), 1e-6)
-            total += 3.0 * frac_err
+            total += 3.0 * frac_err  # max 3.0 -- strictly below the failure floor below
         else:
-            total += 2.0 + max(0.0, duration_s - r["fell_at_s"]) / duration_s
+            total += 4.0 + max(0.0, duration_s - r["fell_at_s"]) / duration_s  # min 4.0 > 3.0
     return total
 
 

@@ -20,6 +20,19 @@ Objective is evaluated ONLY at perturbations independently confirmed
 This is deliberate: it structurally cannot reward a "no better than
 passive" candidate, since passive itself scores near the floor on every
 term in this objective.
+
+REVISED 2026-08-10 for a new pendulum mount geometry (assets/ur5e_pendulum/
+pendulum_attachment.xml pos="0 -0.11 0.08", a lateral offset added to clear
+a real wrist collision -- see that file's own inline history). The PREVIOUS
+best gains (seeded below) still pass every pass/fail check at the new
+geometry, but were found (checking the RAW pre-clip commanded torque, not
+just clipped tau) to saturate shoulder_pan 67.6% of cycles (peak 351 Nm vs
+a 150 Nm limit) and spike wrist_2 to 732 Nm against a 28 Nm limit -- a real
+control-authority problem invisible to survived/fell alone. run_torque_
+balance_trial now returns mean_overshoot_ratio/peak_overshoot_ratio/
+mean_saturated_joint_frac (added the same day) precisely so this objective
+can see and penalize it, instead of rewarding a candidate that only
+"survives" by riding its actuators' hard limits.
 """
 
 from __future__ import annotations
@@ -67,11 +80,18 @@ def fitness(x: np.ndarray, model, inverted_angle) -> float:
     if np.any(np.abs(diag["eigvals_discrete"]) >= 1.0):
         return 1000.0  # linear design itself unstable -- hard reject
 
+    SAT_WEIGHT = 3.0  # see module docstring: chosen so heavy saturation
+    # (mean_overshoot_ratio ~0.65, the measured value for the previous
+    # "best" gains at the new geometry) costs ~2.0 per perturbation --
+    # clearly dominant over a clean tracking error (~0.0-0.05) so DE
+    # strongly prefers low-saturation survivors, but still well under the
+    # 5.0 failure floor so survival-with-some-saturation still beats falling.
     total_cost = 0.0
     for pert in TEST_PERTURBATIONS:
         r = base.run_torque_balance_trial(model, K, q_eq, pert, duration_s=DURATION_S)
         if r["survived_full_duration"]:
             total_cost += abs(r["final_theta_err"])  # reward tight convergence
+            total_cost += SAT_WEIGHT * r["mean_overshoot_ratio"]  # penalize riding the torque limits
         else:
             # Penalize failure, scaled by how EARLY it failed (falling
             # immediately is worse than falling near the end) plus a flat
@@ -89,13 +109,15 @@ def main() -> int:
     inverted_angle = base.find_inverted_angle(model, data0, pend_qpos_adr)
     print(f"inverted_angle = {inverted_angle:.6f}")
 
-    # Seed the search with the PREVIOUS search's own best result (found
-    # over TEST_PERTURBATIONS up to 0.5 rad only -- survived cleanly
-    # 0.05-0.4 rad, failed at 0.5+; this run widens TEST_PERTURBATIONS to
-    # explicitly include 0.5-0.8 rad, targeting exactly that known gap).
-    seed_raw = {"q_arm_pos": 1008.735572590068, "q_arm_vel": 32.27913994759627,
-                "q_pend_angle": 35.85445272321039, "q_pend_vel": 310.35751752823853,
-                "r_weight": 4.301938997677817}
+    # Seed the search with the CURRENT best-known gains (docs/status/
+    # pendulum_balance_gain_search_2026-08-09.md) -- these are the ones
+    # confirmed this session (2026-08-10) to saturate badly at the new mount
+    # geometry (mean_overshoot_ratio ~0.65 at pert=0.15), so the search
+    # starts from a real, characterized failure mode rather than a stale
+    # earlier-stage candidate.
+    seed_raw = {"q_arm_pos": 2655.206336272164, "q_arm_vel": 1.588066109094743,
+                "q_pend_angle": 20.947598183637, "q_pend_vel": 655.1987898599957,
+                "r_weight": 0.34681947401205965}
     seed_x = []
     for name, lo, hi, log in PARAM_BOUNDS:
         v = seed_raw[name]
@@ -106,9 +128,11 @@ def main() -> int:
     )
     init_pop[0] = seed_x  # exact seed included
 
+    # Overnight/background-scale budget (this runs on a remote host, not
+    # interactively) -- wider than the original interactive search.
     result = differential_evolution(
         fitness, bounds=[(0.0, 1.0)] * len(PARAM_BOUNDS), args=(model, inverted_angle),
-        init=init_pop, maxiter=25, popsize=12, tol=1e-4, seed=1, workers=4, polish=False,
+        init=init_pop, maxiter=60, popsize=24, tol=1e-5, seed=1, workers=16, polish=False,
         disp=True,
     )
     best_params = decode(result.x)
@@ -117,13 +141,15 @@ def main() -> int:
 
     K, q_eq, diag = base.linearize_and_design_lqr(model, inverted_angle, **best_params)
     K_zero = np.zeros_like(K)
-    print(f"\n{'pert':>6} {'ACTIVE (found)':>20} {'PASSIVE':>18}")
+    print(f"\n{'pert':>6} {'ACTIVE (found)':>20} {'sat%':>6} {'peak_ovr':>9} {'PASSIVE':>18}")
     for pert in [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 1.0]:
         r_a = base.run_torque_balance_trial(model, K, q_eq, pert, duration_s=8.0)
         r_p = base.run_torque_balance_trial(model, K_zero, q_eq, pert, duration_s=8.0)
         a = f"S({r_a['final_theta_err']:.3f})" if r_a["survived_full_duration"] else f"F@{r_a['fell_at_s']:.2f}"
+        sat = f"{r_a['mean_saturated_joint_frac']*100:5.1f}"
+        ovr = f"{r_a['peak_overshoot_ratio']:8.2f}"
         p = f"S({r_p['final_theta_err']:.3f})" if r_p["survived_full_duration"] else f"F@{r_p['fell_at_s']:.2f}"
-        print(f"{pert:6.2f} {a:>20} {p:>18}")
+        print(f"{pert:6.2f} {a:>20} {sat:>6} {ovr:>9} {p:>18}")
     return 0
 
 

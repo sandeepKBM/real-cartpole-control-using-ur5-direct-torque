@@ -259,6 +259,19 @@ def run_torque_balance_trial(
     fell_at = None
     peak_theta_err = 0.0
     theta_err_hist = []
+    # Torque-saturation tracking (added 2026-08-10): the pre-clip ("raw")
+    # commanded torque is what the LQR law actually WANTS, vs tau (post-clip)
+    # which is what the actuator can deliver -- a controller can "survive" a
+    # trial (final_theta_err small, never falls) while spending most of the
+    # trial with one or more joints clipped hard against their limit, which
+    # is a real, load-bearing distinction the old return dict couldn't see at
+    # all (tau_extra/tau/etc were local variables, never surfaced). Found the
+    # hard way: a new pendulum mount geometry passed every existing pass/fail
+    # check yet turned out to saturate shoulder_pan 67.6% of cycles (peak
+    # commanded torque 351 Nm against a 150 Nm limit) and wrist_2 to 732 Nm
+    # against a 28 Nm limit on brief spikes -- invisible without this.
+    overshoot_ratio_hist = []  # per-step: max over joints of max(0, |tau_raw|-limit)/limit
+    saturated_joint_frac_hist = []  # per-step: fraction of 6 joints with |tau_raw| > limit
 
     for step in range(n_steps):
         theta = float(data.qpos[pend_qpos_adr])
@@ -276,9 +289,13 @@ def run_torque_balance_trial(
 
         tau_extra = -K @ state
         tau_gravity = static_gravity_torque(model, data.qpos)[:6]
-        tau = tau_extra + tau_gravity
-        tau = np.clip(tau, -TORQUE_LIMIT_NM, TORQUE_LIMIT_NM)
+        tau_raw = tau_extra + tau_gravity
+        tau = np.clip(tau_raw, -TORQUE_LIMIT_NM, TORQUE_LIMIT_NM)
         data.ctrl[:6] = tau
+
+        over = np.maximum(0.0, np.abs(tau_raw) - TORQUE_LIMIT_NM) / TORQUE_LIMIT_NM
+        overshoot_ratio_hist.append(float(np.max(over)))
+        saturated_joint_frac_hist.append(float(np.mean(np.abs(tau_raw) > TORQUE_LIMIT_NM)))
 
         mujoco.mj_step(model, data)
 
@@ -293,6 +310,9 @@ def run_torque_balance_trial(
         "peak_theta_err": peak_theta_err,
         "final_theta_err": float(theta_err_arr[-1]) if len(theta_err_arr) else None,
         "survived_full_duration": fell_at is None,
+        "mean_overshoot_ratio": float(np.mean(overshoot_ratio_hist)) if overshoot_ratio_hist else 0.0,
+        "peak_overshoot_ratio": float(np.max(overshoot_ratio_hist)) if overshoot_ratio_hist else 0.0,
+        "mean_saturated_joint_frac": float(np.mean(saturated_joint_frac_hist)) if saturated_joint_frac_hist else 0.0,
     }
 
 
