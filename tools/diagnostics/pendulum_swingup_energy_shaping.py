@@ -29,10 +29,16 @@ sinusoid version.
 3-parameter search (k_e, a_max, k_pos) via scipy.optimize.differential_
 evolution, NOT RL, per this repo's own documented history of RL
 gain-scheduling failures (AGENTS.md).
+
+CLI-configurable (--config/--friction-model/--start-q-rad/--output-json)
+since 2026-08-11 -- previously required editing this file's module-level
+CONFIG_PATH/ARM_Q0 constants for every new pose/friction-model experiment.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -51,14 +57,16 @@ from simulation.ur5e_mujoco_torque import (  # noqa: E402
 )
 
 CONFIG_PATH = REPO_ROOT / "config" / "ur5e_mujoco_torque_osc_hanging_pose_friction_ff.yaml"
-# Updated 2026-08-11 to the mega pose-oscillation-stability search's winner
+# Default pose: the mega pose-oscillation-stability search's winner
 # (tools/diagnostics/pose_oscillation_stability_search.py): 6/6 alternating
 # kicks survived cleanly at 0.777 m/s peak, cond(J)=6.93 -- meaningfully
 # more stable under repeated direction reversals than the previous
 # hand-picked pose, which is exactly the property swing-up needs. Hinge
 # axis re-verified horizontal here too (attachment_site local X, |z|=0.009).
-ARM_Q0 = np.array([0.0, -1.091985784398452, 2.0935362786892546,
-                    -2.7685637962327356, 1.5620693866337145, 0.0])
+# Override with --start-q-rad for a different pose.
+DEFAULT_ARM_Q0 = np.array([0.0, -1.091985784398452, 2.0935362786892546,
+                            -2.7685637962327356, 1.5620693866337145, 0.0])
+ARM_Q0 = DEFAULT_ARM_Q0  # back-compat module-level alias; prefer passing arm_q explicitly
 RATE_HZ = 500.0
 CONTROL_DT = 1.0 / RATE_HZ
 
@@ -74,13 +82,21 @@ G = 9.81
 E_TOP = 2.0 * M_TOTAL_KG * G * R_COM_M  # energy at fully inverted, ref=hanging
 
 
-def load_config() -> dict:
-    with CONFIG_PATH.open() as fp:
-        return yaml.safe_load(fp)
+def load_config(config_path: Path = CONFIG_PATH, friction_model: str | None = None) -> dict:
+    """friction_model: if given, overrides controller.friction_feedforward=True
+    and controller.friction_model in the returned dict (does not touch the
+    YAML file on disk)."""
+    with Path(config_path).open() as fp:
+        config = yaml.safe_load(fp)
+    if friction_model is not None:
+        config["controller"]["friction_feedforward"] = True
+        config["controller"]["friction_model"] = friction_model
+    return config
 
 
-def find_hanging_and_inverted_angle(model, data, pend_qpos_adr: int) -> tuple[float, float]:
-    data.qpos[:6] = ARM_Q0
+def find_hanging_and_inverted_angle(model, data, pend_qpos_adr: int,
+                                     arm_q: np.ndarray = DEFAULT_ARM_Q0) -> tuple[float, float]:
+    data.qpos[:6] = arm_q
     data.qpos[pend_qpos_adr] = 0.0
     data.qvel[:] = 0.0
     mujoco.mj_forward(model, data)
@@ -100,6 +116,8 @@ def run_energy_swingup_trial(
     duration_s: float,
     hanging_angle: float,
     inverted_angle: float,
+    config: dict,
+    arm_q: np.ndarray = DEFAULT_ARM_Q0,
     kick_amplitude_m: float = 0.0,
     kick_duration_s: float = 0.0,
 ) -> dict:
@@ -112,8 +130,13 @@ def run_energy_swingup_trial(
     thetadot on its own. A brief open-loop half-sine "seed kick" for
     t < kick_duration_s gets thetadot away from zero before the energy law
     takes over -- the standard practical fix for this exact bootstrap
-    problem in energy-shaping swing-up."""
-    config = load_config()
+    problem in energy-shaping swing-up.
+
+    config: an already-loaded (and, if desired, already friction-model-
+    overridden) controller config dict -- callers own loading it (via
+    load_config()) rather than this function reloading from disk every
+    call, so a CLI-selected friction_model/config_path actually takes
+    effect instead of silently reading the hardcoded default."""
     data = mujoco.MjData(model)
     site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
     joint_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n) for n in [
@@ -124,7 +147,7 @@ def run_energy_swingup_trial(
     pend_qpos_adr = model.jnt_qposadr[pend_jid]
     pend_dof_adr = model.jnt_dofadr[pend_jid]
 
-    data.qpos[:6] = ARM_Q0
+    data.qpos[:6] = arm_q
     data.qpos[pend_qpos_adr] = hanging_angle
     data.qvel[:] = 0.0
     mujoco.mj_forward(model, data)
@@ -211,15 +234,16 @@ def run_energy_swingup_trial(
     }
 
 
-def objective(x):
+def objective(x, config: dict, arm_q: np.ndarray):
     k_e, a_max, k_pos, k_vel, kick_amplitude_m, kick_duration_s = x
     model = compose_ur5e_pendulum_model()
     data = mujoco.MjData(model)
     pend_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "/pendulum_hinge")
     pend_qpos_adr = model.jnt_qposadr[pend_jid]
-    hanging_angle, inverted_angle = find_hanging_and_inverted_angle(model, data, pend_qpos_adr)
+    hanging_angle, inverted_angle = find_hanging_and_inverted_angle(model, data, pend_qpos_adr, arm_q=arm_q)
     result = run_energy_swingup_trial(model, k_e, a_max, k_pos, k_vel, duration_s=6.0,
                                        hanging_angle=hanging_angle, inverted_angle=inverted_angle,
+                                       config=config, arm_q=arm_q,
                                        kick_amplitude_m=kick_amplitude_m, kick_duration_s=kick_duration_s)
     cost = result["min_theta_dist_from_inverted_rad"]
     if result["guard_fired"]:
@@ -227,13 +251,36 @@ def objective(x):
     return cost
 
 
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--config", type=Path, default=CONFIG_PATH, help="Controller YAML config path.")
+    p.add_argument("--friction-model", choices=["static", "lugre", "karnopp"], default=None,
+                   help="Override controller.friction_model (and force friction_feedforward=true). "
+                        "Default: use whatever the config file says.")
+    p.add_argument("--start-q-rad", type=float, nargs=6, default=None,
+                   metavar=("Q1", "Q2", "Q3", "Q4", "Q5", "Q6"),
+                   help="6-joint start pose in radians. Default: this session's mega-pose-search winner.")
+    p.add_argument("--maxiter", type=int, default=30)
+    p.add_argument("--popsize", type=int, default=14)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--duration-s", type=float, default=10.0, help="Final validation trial duration.")
+    p.add_argument("--output-json", type=Path, default=None)
+    return p.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
+    config = load_config(args.config, friction_model=args.friction_model)
+    arm_q = np.array(args.start_q_rad) if args.start_q_rad is not None else DEFAULT_ARM_Q0
+
     model = compose_ur5e_pendulum_model()
     data = mujoco.MjData(model)
     pend_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "/pendulum_hinge")
     pend_qpos_adr = model.jnt_qposadr[pend_jid]
-    hanging_angle, inverted_angle = find_hanging_and_inverted_angle(model, data, pend_qpos_adr)
+    hanging_angle, inverted_angle = find_hanging_and_inverted_angle(model, data, pend_qpos_adr, arm_q=arm_q)
     print(f"hanging_angle={hanging_angle:.4f} rad  inverted_angle={inverted_angle:.4f} rad  E_top={E_TOP:.4f} J")
+    print(f"friction_model={config['controller'].get('friction_model', 'static')} "
+          f"friction_feedforward={config['controller'].get('friction_feedforward', False)}")
 
     bounds = [
         (1.0, 400.0),   # k_e
@@ -244,16 +291,28 @@ def main() -> int:
         (0.1, 0.6),     # kick_duration_s
     ]
     print("=== searching (k_e, a_max, k_pos, k_vel, kick_amplitude_m, kick_duration_s) via differential_evolution ===")
-    res = differential_evolution(objective, bounds, maxiter=30, popsize=14, tol=1e-4,
-                                  seed=0, workers=-1, polish=False)
+    res = differential_evolution(objective, bounds, args=(config, arm_q), maxiter=args.maxiter,
+                                  popsize=args.popsize, tol=1e-4, seed=args.seed, workers=-1, polish=False)
     print(f"Best params: k_e={res.x[0]:.4f}, a_max={res.x[1]:.4f}, k_pos={res.x[2]:.4f}, "
           f"k_vel={res.x[3]:.4f}, kick_amplitude_m={res.x[4]:.4f}, kick_duration_s={res.x[5]:.4f}")
     print(f"Best cost: {res.fun:.4f}")
 
-    best = run_energy_swingup_trial(model, res.x[0], res.x[1], res.x[2], res.x[3], duration_s=10.0,
+    best = run_energy_swingup_trial(model, res.x[0], res.x[1], res.x[2], res.x[3], duration_s=args.duration_s,
                                      hanging_angle=hanging_angle, inverted_angle=inverted_angle,
+                                     config=config, arm_q=arm_q,
                                      kick_amplitude_m=res.x[4], kick_duration_s=res.x[5])
-    print("Best candidate, re-validated at 10s:", best)
+    print("Best candidate, re-validated:", best)
+
+    if args.output_json:
+        args.output_json.parent.mkdir(parents=True, exist_ok=True)
+        with args.output_json.open("w") as fp:
+            json.dump({
+                "friction_model": config["controller"].get("friction_model", "static"),
+                "best_params": {"k_e": res.x[0], "a_max": res.x[1], "k_pos": res.x[2], "k_vel": res.x[3],
+                                 "kick_amplitude_m": res.x[4], "kick_duration_s": res.x[5]},
+                "best_cost": float(res.fun), "validation": best,
+            }, fp, indent=2, default=str)
+        print(f"Wrote result to {args.output_json}")
     return 0
 
 

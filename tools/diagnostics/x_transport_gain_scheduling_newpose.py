@@ -63,6 +63,14 @@ from simulation.ur5e_mujoco_torque import (  # noqa: E402
 from tools.diagnostics.pendulum_swingup_energy_shaping import (  # noqa: E402
     ARM_Q0 as DEFAULT_ARM_Q0, CONTROL_DT, RATE_HZ,
 )
+# Real accuracy tolerance this repo actually validates transport against
+# (transport_metrics.py: max(5mm, 25% of target)) -- reused here, not
+# reimplemented, per this session's own earlier correction: an X-transport
+# gain-search result was originally reported as "validated" using only a
+# guard-survival check, which is WEAKER than this and produced a real
+# overclaim (a marginal single-gain result later found to fail this exact
+# tolerance at dx=-0.20m even though it never tripped a safety guard).
+from transport_metrics import _NORMAL_X_TOL_ABS, _NORMAL_X_TOL_REL  # noqa: E402
 
 SCENE_XML = REPO_ROOT / "assets" / "ur5e_torque" / "scene.xml"
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "ur5e_mujoco_torque_osc_hanging_pose_friction_ff.yaml"
@@ -108,9 +116,17 @@ def decode_schedule(x: np.ndarray) -> dict:
     return dict(zip(SCHEDULE_KEYS, x))
 
 
-def load_controller_config(config_path: Path) -> dict:
+def load_controller_config(config_path: Path, friction_model: str | None = None) -> dict:
+    """friction_model: if given, overrides controller.friction_feedforward=True
+    and controller.friction_model in the returned dict (does not touch the
+    YAML file on disk) -- same override-a-loaded-dict pattern as
+    pendulum_swingup_energy_shaping.py's load_config()."""
     with Path(config_path).open() as fp:
-        return yaml.safe_load(fp)
+        config = yaml.safe_load(fp)
+    if friction_model is not None:
+        config["controller"]["friction_feedforward"] = True
+        config["controller"]["friction_model"] = friction_model
+    return config
 
 
 def run_transport_trial(target_x_delta_m: float, move_duration_s: float, duration_s: float,
@@ -199,11 +215,19 @@ def run_transport_trial(target_x_delta_m: float, move_duration_s: float, duratio
 
     final_x_error = x_err_final if x_err_final is not None else target_x_delta_m
     achieved_x_delta_m = target_x_delta_m - final_x_error
+    # The REAL tolerance this repo validates transport accuracy against
+    # (transport_metrics.py) -- distinct from, and stricter than, plain
+    # guard survival. "survived" alone was shown this session to overclaim
+    # (a config can survive every safety guard while still missing this
+    # tolerance by a wide margin).
+    x_tol_m = max(_NORMAL_X_TOL_ABS, _NORMAL_X_TOL_REL * abs(target_x_delta_m))
+    valid_real_tolerance = (not guard_fired) and (abs(final_x_error) <= x_tol_m)
     return {
         "target_x_delta_m": target_x_delta_m, "move_duration_s": move_duration_s,
         "achieved_x_delta_m": achieved_x_delta_m, "final_x_error_m": final_x_error,
-        "max_abs_x_error_m": max_abs_x_err,
+        "max_abs_x_error_m": max_abs_x_err, "x_tol_m": x_tol_m,
         "survived": not guard_fired, "fell_at_s": fell_at, "guard_reason": guard_reason,
+        "valid_real_tolerance": valid_real_tolerance,
     }
 
 
@@ -308,16 +332,27 @@ def run_rigor_sweep(arm_q, config, schedule: dict | None = None,
                                 schedule=schedule, fixed_gains=fixed_gains, torque_limit_scale=tscale,
                             )
                             rows.append((signed_dx, move_dur, hold_dur, tscale, r))
-        n_valid = sum(1 for *_, r in rows if r["survived"])
-        results_by_category[category] = {"n_valid": n_valid, "n_total": len(rows), "rows": rows}
-        print(f"[{label}] {category}: {n_valid}/{len(rows)}")
+        n_valid = sum(1 for *_, r in rows if r["valid_real_tolerance"])
+        n_survived = sum(1 for *_, r in rows if r["survived"])
+        results_by_category[category] = {
+            "n_valid": n_valid, "n_survived": n_survived, "n_total": len(rows), "rows": rows,
+        }
+        print(f"[{label}] {category}: {n_valid}/{len(rows)} (real tolerance) "
+              f"[{n_survived}/{len(rows)} guard-survival only]")
         for signed_dx, move_dur, hold_dur, tscale, r in rows:
-            if not r["survived"]:
-                print(f"    FAIL dx={signed_dx:+.3f} move_dur={move_dur:.2f} hold={hold_dur:.1f} "
-                      f"tscale={tscale:.2f} fell_at={r['fell_at_s']:.2f} reason={r['guard_reason']}")
+            if not r["valid_real_tolerance"]:
+                if not r["survived"]:
+                    print(f"    FAIL dx={signed_dx:+.3f} move_dur={move_dur:.2f} hold={hold_dur:.1f} "
+                          f"tscale={tscale:.2f} fell_at={r['fell_at_s']:.2f} reason={r['guard_reason']}")
+                else:
+                    print(f"    FAIL(tolerance-only, guard did NOT trip) dx={signed_dx:+.3f} "
+                          f"move_dur={move_dur:.2f} hold={hold_dur:.1f} tscale={tscale:.2f} "
+                          f"final_err={r['final_x_error_m']:.4f} tol={r['x_tol_m']:.4f}")
     total_valid = sum(v["n_valid"] for v in results_by_category.values())
+    total_survived = sum(v["n_survived"] for v in results_by_category.values())
     total_all = sum(v["n_total"] for v in results_by_category.values())
-    print(f"[{label}] TOTAL: {total_valid}/{total_all}")
+    print(f"[{label}] TOTAL: {total_valid}/{total_all} (real tolerance) "
+          f"[{total_survived}/{total_all} guard-survival only]")
     return results_by_category
 
 
@@ -327,6 +362,9 @@ def parse_args() -> argparse.Namespace:
                    default="all")
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH,
                    help="Controller YAML config path.")
+    p.add_argument("--friction-model", choices=["static", "lugre", "karnopp"], default=None,
+                   help="Override controller.friction_model (and force friction_feedforward=true). "
+                        "Default: use whatever the config file says.")
     p.add_argument("--start-q-rad", type=float, nargs=6, default=None, metavar=("Q1", "Q2", "Q3", "Q4", "Q5", "Q6"),
                    help="6-joint start pose in radians. Default: this session's mega-pose-search winner.")
     p.add_argument("--scenarios-json", type=str, default=None,
@@ -349,7 +387,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     arm_q = np.array(args.start_q_rad) if args.start_q_rad is not None else DEFAULT_ARM_Q0
-    config = load_controller_config(args.config)
+    config = load_controller_config(args.config, friction_model=args.friction_model)
+    print(f"friction_model={config['controller'].get('friction_model', 'static')} "
+          f"friction_feedforward={config['controller'].get('friction_feedforward', False)}")
     scenarios = json.loads(args.scenarios_json) if args.scenarios_json else DEFAULT_TEST_SCENARIOS
     scenarios = [tuple(s) for s in scenarios]
 
