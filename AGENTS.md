@@ -1060,6 +1060,24 @@ Do-not-recreate (gravity/dynamics bugs, still relevant):
 - Never silently change units, control rate, action scaling, torque limits, or checkpoint
   selection; state control-rate and scaling assumptions when touching controllers.
 - Preserve old configs — add new named configs instead of mutating shared ones.
+- **LOOK AT THE POSE BEFORE YOU RUN IT (2026-08-16). Mandatory, and it needs a HUMAN.**
+  Before dispatching any swing-up or balance run, render the pose with
+  `tools/diagnostics/render_pose_task_axes.py`, SHOW IT TO THE USER, and ask which axis of
+  motion they want. The drive is ONE scalar axis and the entire run is worthless if it points
+  somewhere the pendulum cannot feel -- a failure invisible in the config, the gains and the
+  logs, and obvious in one picture. It has happened twice:
+  * A tool-frame run put the drive on row 0 = tool X, which at `ARM_Q0` is 7.3 deg from
+    VERTICAL. Vertical pivot acceleration exerts ZERO hinge torque at the hanging
+    equilibrium, so the law drove an axis with no authority over the pole, dumped it into Z,
+    and tripped the corridor in 0.134 s with the rod tip 4 mm off the floor.
+  * Every world-X run at `ARM_Q0` spends ~70% of its motion ALONG the hinge.
+  **TWO numbers, and the second is the one that bites.** `kappa` = fraction not wasted along
+  the hinge. `kappa_hang` = authority at the HANGING start, where a swing-up must bootstrap.
+  With a horizontal hinge the entire perpendicular vertical plane scores `kappa = 1.0`, so
+  kappa CANNOT distinguish the vertical direction from the horizontal one -- measured at
+  `ARM_Q0`, tool X and tool Y both score `kappa = 1.0000` while `kappa_hang` is 0.127 vs
+  0.9919. Requiring only `kappa` is exactly the mistake that broke the run above. Both must
+  be ~1.
 - **A gain belongs to the case it was derived for. Never carry one across (2026-08-16).**
   A gain value is only valid for the exact `(controller, task frame, pose, row set, role)`
   it was fitted at. Changing ANY of those invalidates it, and inheriting it anyway is silent:
