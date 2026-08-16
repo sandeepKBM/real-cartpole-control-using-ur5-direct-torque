@@ -1060,6 +1060,36 @@ Do-not-recreate (gravity/dynamics bugs, still relevant):
 - Never silently change units, control rate, action scaling, torque limits, or checkpoint
   selection; state control-rate and scaling assumptions when touching controllers.
 - Preserve old configs — add new named configs instead of mutating shared ones.
+- **A gain belongs to the case it was derived for. Never carry one across (2026-08-16).**
+  A gain value is only valid for the exact `(controller, task frame, pose, row set, role)`
+  it was fitted at. Changing ANY of those invalidates it, and inheriting it anyway is silent:
+  the config still parses, the run still completes, and the number is simply wrong.
+  When you derive a new config from an existing one, every gain you did not re-derive is a
+  bug until proven otherwise — state in the config where each one came from and why it still
+  applies, or re-derive it.
+  Two real instances, both found the same day in one file:
+  * **Wrong frame.** `kp_x = 1532.672` was fitted from `Lambda_xx = 3.8317` in the WORLD
+    frame. Under `task_frame: tool` row 0 is tool X, whose `Lambda` is 3.2386 — a different
+    physical axis with a different inertia, so the inherited number describes something else.
+  * **Wrong ROLE, which is the nastier one.** `kp_y = 5.0` was a *corridor centering bias*.
+    Moving Y into `task_axis_rows` makes it a *tracking* gain, and
+    `kp_axis = (kp_x, kp_y, kp_z)` is indexed by row
+    (`controller_core/x_task_yz_corridor_qp/controller.py`), so that 5.0 silently became the
+    tool-Y tracking gain — **333x too small**. Nothing errors; the axis just barely tracks.
+    Corollary: do not apply a tracked-axis conversion rule to a barrier/centering axis
+    either. That is the same mistake pointed the other way.
+  Practical rule for this controller family: `kp_QP = kp_OSC * Lambda_axis` with
+  `kp_OSC/kd_OSC = 400/40`, `Lambda` measured **in the frame the row actually lives in**, at
+  the pose being run, with the config's own `lambda_regularization`, and from the
+  UN-excluded Jacobian (`Lambda` is a property of the mechanism, not of which joints are
+  allowed to act). Verify by re-parsing the YAML and asserting each field, never by reading
+  the file — see the next rule.
+- **Verify a config edit by re-parsing it, not by looking at it (2026-08-16).** Twice in one
+  session a config edit silently did nothing — once an indentation mismatch meant only a
+  header comment landed, once the parser did not read the keys at all
+  (`task_space_inertia_shaping` / `lambda_*` were dropped before the fix). Both parsed
+  cleanly and reported defaults. After any config change, load it through its own
+  `from_controller_yaml_section` and assert the fields you intended to set.
 - Never edit without explicit request: checkpoints, datasets, logs, `.git`, generated
   experiment artifacts under `outputs/`, large binaries.
 - For every final response: list files changed, tests run, tests not run, and a rollback

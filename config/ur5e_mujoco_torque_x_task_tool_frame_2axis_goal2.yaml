@@ -1,0 +1,297 @@
+# GOAL 2 config, DERIVED 2026-08-16 from ..._orientation_cbf_balance.yaml.
+#
+# MEASURED BASIS (ARM_Q0, pan frozen; J M^-1 row geometry + torque-box LP):
+#
+#   The tool frame IS the natural frame for this problem, and world X is not:
+#     tool X = [-0.094 -0.085 +0.992]   nearly VERTICAL
+#     tool Y = [+0.710 +0.692 +0.127]   the horizontal in-plane direction
+#     tool Z = [-0.698 +0.716 -0.005]   THE PENDULUM HINGE AXIS
+#
+#   With shoulder_pan frozen, {lift, elbow, wrist_1} translation columns have
+#   RANK 2 -- they span one vertical plane. Its normal is [-0.698 +0.716 0],
+#   which sits 0.27 deg from tool Z. So the hinge axis and the unactuatable
+#   direction COINCIDE: a corridor on tool Z costs nothing, because the arm
+#   cannot move that way regardless.
+#
+#   Both remaining tool axes are perpendicular to the hinge, so BOTH pump the
+#   pendulum -- this is the 2-axis curved drive AGENTS.md derived from measured
+#   authority (a_par vs a_z equal within 0.7%, complementary: vertical drive is
+#   maximal exactly where horizontal has none).
+#
+#   Max drive-axis acceleration, pan frozen [m/s^2] (swing-up needed 7.14):
+#     frame     off-axis+vert bounded @0.1    + all 3 rotations bounded @0.1
+#     world             12.62                          0.21
+#     tool              49.85                          6.55     <-- 31x
+#
+#   world X is 44.28 deg off the only horizontal direction this arm can produce
+#   with pan frozen, and demanding X-motion-with-zero-Y is not merely hard, it
+#   is kinematically impossible: in-plane motion gives dy/dx = 0.9751 by
+#   geometry (pan = -135.72 deg). That is the same 0.975 config.py's
+#   task_axis_rows docstring records -- it is the arm's plane angle, NOT a
+#   wrist-singularity effect.
+#
+# CHANGES vs the parent file (all four are the same finding):
+#   task_frame        world -> tool      put the task in the hinge's frame
+#   task_axis_rows    [0]   -> [0,1]     track BOTH hinge-perpendicular axes
+#   corridor_axis_rows[1,2] -> [2]       bound the hinge axis (free anyway)
+#   task_frame_update frozen-> hybrid    live for tracked rows, frozen barrier
+#
+# Orientation stays SET-BASED (orientation_cbf, kp_rot=0) rather than tracked.
+# Measured 2026-08-16 at ARM_Q0: rigid tracking (kp_rot=35) captured 4/117.
+#
+# UNVERIFIED: kp_x/kd_x are inherited from a transport-pose derivation where
+# row 0 meant world X. Under task_frame: tool, row 0 is tool X (near-vertical),
+# so these gains describe a different physical axis than they were fitted for.
+# Not re-derived here -- flagged, not silently trusted.
+# Reduced-task (X + orientation) torque QP for the Goal-1 BALANCE pose
+# (ARM_Q0 with wrist_2=-90deg, pendulum_attachment_realrod.xml), with a NEW
+# orientation high-order CBF row (2026-08-15).
+#
+# Derived from config/ur5e_mujoco_torque_x_task_yz_corridor_qp_enabled.yaml
+# (the config the 4/117 reduced-task capture-envelope baseline below was
+# measured with) by CHANGING FOUR THINGS ONLY: kp_x/kd_x (re-derived from a
+# freshly measured task-space inertia AT THIS POSE, not copied from the
+# transport pose's measurement), kp_rot/kd_rot (re-derived, see below), and
+# turning on the new `orientation_cbf` block. yz_corridor_enabled/
+# manipulability_cbf and every other field are UNCHANGED from that file, so a
+# comparison against it isolates exactly these four fields plus the new row.
+#
+# ============================= WHY THIS EXISTS ==============================
+# Cascade-LQR capture-envelope grid at ARM_Q0/wrist_2=-90/pendulum_attachment_
+# realrod.xml (13 phi values x 9 thetadot values = 117 cells):
+#   plain OSC (kp_rot=0):                    32/117 captured; 54 |Y-Y0| drift
+#                                             failures, 31 orientation failures
+#   reduced-task QP (kp_rot=35.12, this
+#   config's un-derived parent, no orientation_cbf):
+#                                              4/117 captured; 0 drift failures,
+#                                             113 orientation failures
+# The Y/Z corridor HOCBF did its job (drift failures 54 -> 0), but rigidly
+# TRACKING orientation via kp_rot/kd_rot (gains searched for TRANSPORT at a
+# DIFFERENT pose, unit-converted from OSC and never re-derived for balance)
+# became the sole limiter. This file applies the same corridor philosophy —
+# BOUND, don't rigidly track — to orientation, and re-derives kp_x/kd_x/kd_rot
+# for the pose actually in use instead of carrying over transport-pose values.
+#
+# ============================ Lambda AT THIS POSE ============================
+# Measured (tools/diagnostics/x_task_orientation_cbf_balance_gain_search.py::
+# measure_lambda), full 6x6 Lambda = inv(J M^-1 J^T + eps I), eps =
+# lambda_regularization = 0.1 (the EXACT formula
+# x_axis_cartesian_impedance/controller.py's task_space_inertia_shaping uses;
+# this script's own --verify-formula flag reproduces the existing
+# Lambda_xx=5.9298 reference number at the OLD singular ARM_Q0 to 6 significant
+# figures before trusting the formula on a new pose), M = the RAW arm-only
+# mass-matrix slice (state["mass_matrix"], i.e. mass_full[:6,:6] of the
+# arm+pendulum system -- the same quantity every controller in this repo
+# actually receives; the Schur-complement/"true reflected inertia" variant was
+# also measured and differs by only ~1.1-1.5%, well inside the precision this
+# gain conversion needs):
+#
+#     pendulum at the INVERTED equilibrium: cond(J) = 7.2032
+#     Lambda_xx          = 3.831680
+#     Lambda_rot_diag    = [0.17280, 0.17019, 0.10238]
+#     Lambda_rot_factor  = mean(Lambda_rot_diag) = 0.148457
+#
+# (Lambda_xx = 3.83 here vs 5.93 at the OLD near-singular pose is directionally
+# exactly what task-space inertia should do: it grows near a singularity and
+# shrinks at a well-conditioned pose, cond(J)=7.2 vs cond(J)=1396 -- this is a
+# sanity check the measurement passes, not just a number.)
+#
+# kp_x/kd_x: SAME conversion rule as the parent file (kp_x_QP = kp_x_OSC *
+# Lambda_xx, matching what OSC's own task_space_inertia_shaping would apply
+# for the same error, at THIS pose): 400 * 3.831680 = 1532.672,
+# 40 * 3.831680 = 153.267.
+#
+# kd_rot: OSC's own damping-only value (kd_rot=10, kp_rot=0 -- the config/
+# ur5e_mujoco_torque_osc_tuned*.yaml family's standing choice) unit-converted
+# by Lambda_rot_factor: 10 * 0.148457 = 1.485. kp_rot=0 (NOT unit-converted
+# from anything, since OSC's own kp_rot is 0 -- there is no P-gain to convert).
+#
+# ============ kp_rot/kd_rot/alpha1/alpha2: NOT FULL-DE-SEARCHED, AND WHY =====
+# tools/diagnostics/x_task_orientation_cbf_balance_gain_search.py implements
+# the intended two-stage differential_evolution search (Stage A: one LQR(Q,R)
+# search against a Lambda-derived seed config; Stage B: DE over
+# kp_x/kd_x/kp_rot/kd_rot/orientation_cbf_alpha1/alpha2 scored on a coarse
+# capture-envelope proxy grid). It was smoke-tested and works, but a real
+# per-control-step timing probe run the same session
+# (run_lqr_trial with this exact pose/config) measured ~74 ms/step under this
+# machine's ACTUAL load that session (`uptime` load average 51-62 on 72 cores,
+# ~20-35x the ~2-4 ms/step this same code measures when the machine is not
+# this loaded) -- other users' jobs, not this search, confirmed via `ps aux`.
+# At that per-step cost the full nested search (let alone the mandated final
+# 117-cell validation at duration_s=6.0/maxiter=40/popsize=20) would run
+# 10-25+ hours. Rather than either fabricate a search result or let a
+# multi-hour job run unmonitored, kp_rot=0/alpha1=alpha2=10.0 were chosen as
+# PRINCIPLED, evidence-based defaults with zero extra search cost: kp_rot=0
+# mirrors OSC's own already-load-bearing damping-only choice (this file's
+# kd_rot is that same choice, just unit-converted to THIS controller/pose, not
+# a new decision), and alpha1=alpha2=10.0 matches every other HOCBF row's
+# default in this repo (yz_corridor_alpha1/2, manipulability_cbf_alpha1/2) --
+# not tuned, but not arbitrary either. A real DE search over this 6-D space,
+# using the tool above, is the natural follow-up once the machine is not this
+# contended; it was not skipped by choice.
+#
+# orientation_cbf_max_error_rad: 0.20, strictly inside the 0.25 rad
+# max_orientation_error_rad guard below (same "barrier acts before the guard"
+# design as the Y/Z corridor's half-width vs. drift-guard relationship).
+#
+# Fields inherited but NOT wired into this controller (see the parent file
+# and controller_core/x_task_yz_corridor_qp/config.py for the full list):
+# task_space_inertia_shaping, nullspace_posture, lambda_*_regularization,
+# svd_singularity_filtering, wrist_orientation_task, friction_feedforward,
+# reduced_task_dims, split_base_wrist_task, y_control_mode, ki_x/ki_y,
+# acceleration_feedforward, posture_reanchor_on_settle.
+
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "x_task_yz_corridor_qp"
+  output_dir: "outputs/ur5e_mujoco_torque_x_task_yz_corridor_qp_orientation_cbf_balance"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    # RE-DERIVED 2026-08-16 FOR THIS CONFIG. The inherited values were fitted
+    # for a DIFFERENT frame, pose and row-set and are not transferable:
+    #
+    #   kp_x 1532.672 came from Lambda_xx = 3.8317 measured in the WORLD frame.
+    #   Under task_frame: tool, row 0 is tool X, whose Lambda is 3.2386 -- a
+    #   different physical axis with a different inertia.
+    #
+    #   kp_y 5.0 was a CORRIDOR CENTERING bias. Row 1 is now a TRACKED axis, and
+    #   kp_axis = (kp_x, kp_y, kp_z) is indexed by row (controller.py:514), so
+    #   that 5.0 would have been the tool-Y tracking gain -- 333x too small.
+    #
+    # Conversion rule is this config family's own: kp_QP = kp_OSC * Lambda_axis,
+    # kd_QP = kd_OSC * Lambda_axis, with kp_OSC/kd_OSC = 400/40. Lambda measured
+    # at ARM_Q0 in the TOOL frame with eps = lambda_regularization = 0.1, from
+    # the UN-excluded Jacobian (Lambda is a property of the mechanism, not of
+    # which joints are allowed to act):
+    #
+    #   tool X (row 0, near-vertical)   Lambda = 3.2386
+    #   tool Y (row 1, in-plane horiz)  Lambda = 4.1622
+    #   rotation block (mean diag)      Lambda = 1.1955
+    #
+    kp_x: 1295.424      # 400 * 3.2386   tool X, TRACKED
+    kd_x: 129.542       #  40 * 3.2386
+    kp_y: 1664.880      # 400 * 4.1622   tool Y, TRACKED (was 5.0 -- a corridor value)
+    kd_y: 166.488       #  40 * 4.1622
+    # kp_z/kd_z stay at their CORRIDOR CENTERING values. Row 2 (tool Z) is a
+    # barrier axis, not a tracked one, so the tracked-axis conversion above does
+    # NOT apply to it -- using a gain outside the role it was derived for is the
+    # exact mistake this block exists to correct. Tool Z is also the hinge axis
+    # and (pan frozen) unactuatable, so a large centering demand there would only
+    # inject wrench the QP has to project back out.
+    kp_z: 5.0
+    kd_z: 2.0
+    # kp_rot = 0 keeps orientation SET-BASED (bounded by orientation_cbf, not
+    # tracked). kd_rot re-derived in the tool frame: 10 * 1.1955.
+    kp_rot: 0.0
+    kd_rot: 11.955
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  # Unchanged from the parent file -- disables the global cond(J) wrench
+  # back-off for any physically realizable Jacobian (redundant with this
+  # controller's own manipulability CBF as the singularity-avoidance
+  # mechanism; see docs/status/disable_global_singular_scale_validation_
+  # 2026-07-30.md).
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+
+  # Unchanged from the parent file: shoulder_pan held out of the task (both a
+  # zeroed Jacobian column and a shut torque box -- see
+  # controller_core/x_task_yz_corridor_qp/config.py's task_excluded_joints
+  # docstring). Not re-screened against THIS pose in this pass -- inherited
+  # from the parent's own screening at the same ARM_Q0/wrist_2=-90 pose, so it
+  # still applies verbatim.
+  task_excluded_joints: [0]
+  # --- TASK FRAME: see this file's header for the measured basis ---
+  # tool Z IS the pendulum hinge axis AND (pan frozen) the unactuatable
+  # direction -- 0.27 deg apart -- so the corridor row costs nothing.
+  # tool X and tool Y are both perpendicular to the hinge, so BOTH pump.
+  task_frame: "tool"
+  task_frame_update: "hybrid"
+  task_axis_rows: [0, 1]
+  corridor_axis_rows: [2]
+
+  # --- Y/Z corridor + manipulability CBF: UNCHANGED from the parent file ---
+  yz_corridor_enabled: true
+  y_corridor_half_width_m: 0.05
+  z_corridor_half_width_m: 0.05
+  yz_corridor_alpha1: 10.0
+  yz_corridor_alpha2: 10.0
+  manipulability_cbf: true
+  # NOTE: 3.0e-4 was calibrated against mu(ARM_Q0) at the OLD, near-singular
+  # transport pose (mu=4.326e-4 there). At THIS pose cond(J)=7.20 is
+  # well-conditioned, so mu is far larger and this row is expected to be
+  # inactive throughout -- inherited unchanged rather than recalibrated,
+  # since making it active here was never the goal (that is the transport
+  # pose's job, not this one's).
+  manipulability_cbf_epsilon: 3.0e-4
+  manipulability_cbf_alpha1: 10.0
+  manipulability_cbf_alpha2: 10.0
+
+  # --- NEW: orientation high-order CBF (2026-08-15) -------------------------
+  # See controller_core/x_task_yz_corridor_qp/config.py's `orientation_cbf`
+  # docstring for the full derivation (including the R_ref^T rotation
+  # correction, verified by finite difference -- NOT a bare +/-J_r qd).
+  orientation_cbf: true
+  orientation_cbf_max_error_rad: 0.20
+  orientation_cbf_alpha1: 10.0
+  orientation_cbf_alpha2: 10.0
+
+  dual_sweeps: 4
+  dual_root_iters: 10
+
+  safety:
+    max_joint_velocity_radps: 3.0
+    # Unchanged from the parent file -- see that file's header for the full
+    # justification (0.05 m corridor half-width vs 0.03 m class default,
+    # widened here to 0.06 m so the guard sits outside the corridor).
+    max_abs_y_drift_m: 0.06
+    max_abs_z_drift_m: 0.06
+    max_abs_orthogonal_drift_m: 0.06
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
