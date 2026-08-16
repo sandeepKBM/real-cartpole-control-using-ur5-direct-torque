@@ -5,6 +5,427 @@ Update rule: edit in place, keep these sections, date-stamp material changes. Do
 chronological logs here — that pattern was retired 2026-07-03; the old log is preserved at
 `docs/archive/AGENTS_HISTORY.md`. Material hardware refresh: 2026-07-14.
 
+## 0. Current objectives — cartpole flip + hold (set 2026-08-14)
+
+Two goals, pursued in parallel. **Both are SIM-ONLY and wall-clock cost is explicitly NOT a
+constraint** (user directive) — do not trade correctness, guards, or rigor for speed here, and
+do not report a per-cycle compute budget as a blocker for either goal.
+
+**Both goals share the same architecture** — a cascade, not a monolith:
+
+```
+  swing-up law (energy shaping)  ─┐
+                                  ├─► desired CART ACCELERATION ─► low-level controller ─► joint torques
+  LQR (catch + hold, inverted)   ─┘
+      switch when |theta - theta_inv| AND |thetadot| are inside the LQR's measured envelope
+```
+
+The high-level law never sees joints; the low-level controller never sees the pendulum. The
+handoff is a source switch, not a controller swap.
+
+### Goal 1 — flip AND hold, at a NON-singular wrist_2
+
+- **Pose**: `ARM_Q0` with `wrist_2` moved OFF the wrist singularity. `ARM_Q0` as committed is
+  `[-2.3688, -2.1801, -1.8838, -0.7962, 0.004714693, 0.0206]`, whose `wrist_2 = 0.270 deg`,
+  `cond(J) = 1395.76`, `sigma_min = 1.485e-3` (measured 2026-08-14) — that IS the singularity.
+
+  **ANSWER: `wrist_2 = -90 deg` (-1.5707963 rad), with the LOCAL-X-HINGE pendulum.**
+  Measured 2026-08-14. All three constraints hold simultaneously, and this is the only region
+  where they do:
+
+  | quantity | value at `wrist_2 = -90 deg` | vs `ARM_Q0` |
+  |---|---|---|
+  | `cond(J)` | **7.20** | 1395.76 -> **194x better** |
+  | tool Z elevation (the FACE, -> sky) | **+81.5 deg** | face points up |
+  | hinge tilt off horizontal | **0.2 deg** | perfectly horizontal |
+  | gravity torque retained | **100.0%** | fully live pendulum |
+
+  It is a BROAD optimum, not a knife-edge: `wrist_2` in `[-80, -100] deg` all give `cond(J) ~7.2`,
+  face elevation `>= +76.9 deg`, and `>= 98.5%` gravity torque. For reference `cond(J) = 7.20`
+  is essentially the old well-conditioned pose's `6.93` — i.e. this is as well-conditioned as the
+  pose that produced the only flip this repo ever achieved, but at `ARM_Q0`'s base configuration.
+
+  **WHICH AXIS IS THE HINGE DEPENDS ON THE ASSET — this is the trap.** For
+  `pendulum_attachment.xml` (and `_realfriction.xml`) the hinge is **local Z = tool Z**; for
+  `pendulum_attachment_realrod.xml` (and `_longrod.xml`) it is **local X = tool X**. A hinge
+  pointing skyward is a **DEAD pendulum** (rod swings in a horizontal plane, where gravity exerts
+  no torque about it), so "face at the sky" and "live pendulum" can only BOTH hold when the face
+  normal and the hinge are different axes — which is exactly why Goal 1 needs the local-X-hinge
+  asset. Measured, both poses:
+
+  | asset | hinge axis | `w2=0.27 deg` | `w2=-90 deg` |
+  |---|---|---|---|
+  | `pendulum_attachment.xml` / `_realfriction.xml` | local Z | live, 100% | **DEAD, 14.8%** |
+  | `pendulum_attachment_realrod.xml` | local X | **DEAD, 12.7%** | **live, 100.0%** |
+
+  An earlier recommendation of `wrist_2 = +18 deg` in this file was **WRONG** and has been
+  removed: it assumed the hinge is tool Z, which is true only for the default asset. With the
+  local-X-hinge asset the entire trade-off inverts. Always confirm which axis the chosen asset
+  hinges about before reasoning about pose.
+
+  **VALIDATED IN CLOSED LOOP 2026-08-14 — THIS CONFIGURATION FLIPS.** See the result block below.
+
+### GOAL 1 SWING-UP: FLIP ACHIEVED 2026-08-14 (guards ON, independently reproduced)
+
+First guard-clean flip of the 0.12 m rod in this repo. Single-axis energy shaping (NOT curved),
+`controller_kind: impedance` (plain OSC — `cond(J)=7.2` here, so OSC is the correct pairing),
+`config/ur5e_mujoco_torque_osc_tuned_friction_ff.yaml`,
+`assets/ur5e_pendulum/pendulum_attachment_realrod.xml`, pose `ARM_Q0` with `wrist_2 = -90 deg`.
+
+```
+flipped                       = True
+min_theta_dist_from_inverted  = 0.1875 rad   (10.7 deg from vertical)
+guard_fired                   = False        <-- NOT a guards-off result
+a_max                         = 7.1437 m/s^2 (INTERIOR to its bound, not pinned)
+k_e = 277.748   k_pos = 15.797   k_vel = 8.180
+kick_amplitude_m = 0.1457   kick_duration_s = 0.5952
+cond(J): start 7.203 -> max 8.170  (growth 1.13x, no singularity chasing)
+max_abs_x_dev_m = 0.1871
+pendulum tip world z: min +0.1950 m  -> CLEARS THE FLOOR by 19.5 cm
+```
+
+Reproduced independently from the saved parameters (identical `min_theta_dist` to 4 decimals),
+and tip world-z was tracked explicitly because floor penetration is SILENT here.
+
+**Root cause of every prior null: the `a_max` SEARCH BOUND, not physics.** The bound was
+`(0.3, 3.0)` m/s^2 and searches pinned at 2.990 while firing NO guard. Measured ceilings at this
+pose show how wrong that bound was:
+
+| quantity | value | limited by |
+|---|---|---|
+| max cart acceleration | **52.1 m/s^2** | `wrist_1` torque (280.1 N along the pump axis) |
+| max pump speed | **1.023 m/s** | the `\|qd\| > 3.0 rad/s` guard |
+| task inertia along pump axis | 5.376 kg | — |
+
+Acceleration does not set energy directly (speed does, and `E ~ v^2`) — it sets **how much
+displacement is burned reaching that speed**: at `a_max=3.0` the arm needs **0.174 m** to reach
+1.023 m/s, which exceeds the drift budget, so it could never reach its own speed limit; at
+`a_max=7.14` it needs ~0.073 m. That is the whole story. At 1.023 m/s the available kick energy
+is ~1.5x `E_top`, so energy was never the shortage — phasing and displacement were.
+
+Progression, same pose/asset, everything else equal:
+
+| run | `a_max` bound | min dist from inverted | flipped |
+|---|---|---|---|
+| stock `ARM_Q0` (prior documented ceiling) | 3.0 | 2.24 rad | no |
+| `wrist_2=-90`, `osc_tuned` | 3.0 | 2.187 rad | no |
+| `wrist_2=-90`, friction_ff | 3.0 | 1.365 rad | no |
+| **`wrist_2=-90`, friction_ff** | **12.0** | **0.1875 rad** | **YES** |
+
+`--a-max-upper` is now a CLI flag on `pendulum_swingup_energy_shaping.py` (default 3.0 preserves
+historical behavior). **If a search reports best `a_max` within ~1% of its ceiling while firing no
+guard, the BOUND is the constraint — re-run wider before concluding anything about feasibility.**
+
+Open on this result: `kick_amplitude_m = 0.1457` sits near its own `0.15` bound and may itself be
+pinning, so there may be more margin available. The LQR catch/hold half is still NOT done —
+"flip" is not "flip AND hold", and the 2-D (`theta`, `thetadot`) capture envelope remains
+unmeasured, which is still the likeliest silent failure of the handoff.
+- **Tool**: `assets/ur5e_pendulum/pendulum_attachment_realrod.xml` — 0.12 m rod, **local-X
+  hinge**. Selected by physics, not by name: at `wrist_2 = -90 deg` its hinge is horizontal
+  (100% gravity torque) while the tool face points skyward, which the local-Z-hinge assets
+  cannot do simultaneously. This is the asset built by task #137 ("0.12 m rod + local-X hinge,
+  the actually-working config").
+- **High level**: LQR, emitting desired cart acceleration.
+- **Low level**: OSC, **or** the reduced-task single-axis (tool-Y) controller with the CBF.
+  Either is acceptable; pick on measured evidence, not preference.
+- **Motion**: single axis, in that same frame, **guards UP**.
+- **Done means**: the pole flips up AND is held inverted. Not one or the other.
+- **Reference**: `outputs/pendulum_renders/phase_locked_diagnostic.mp4` — treat as a **method /
+  motion** reference (phase-locked, adaptive-resonance single-axis pumping), **not** a pose or a
+  result reference. Traced 2026-08-14 to
+  `tools/diagnostics/render_phase_locked_diagnostic.py`, which runs at `ARM_Q0` as-is
+  (`wrist_2 = 0.270 deg`, `cond(J) = 1395.76` — i.e. the SINGULAR pose this goal moves away
+  from), with `controller_kind="impedance"` (plain OSC), the default 0.12 m
+  `pendulum_attachment.xml`, and `config/ur5e_mujoco_torque_osc_hanging_pose_friction_ff_wrist_orient.yaml`.
+  Frames at t~0.2 s and t~12 s of its 14 s are visually near-identical (arm barely moves, no
+  visible swing) and it carries no HUD — so do **not** cite it as a flip or as a passing result
+  without re-running it and reading real numbers.
+
+### Goal 2 — 2-axis swing-up, at the SINGULAR wrist_2
+
+- **Pose**: `ARM_Q0` as-is, wrist_2 at the singularity (`cond(J) = 1395.76`).
+- **Controller**: the 2-axis controller (`controller_core/x_task_yz_corridor_qp/`), which exists
+  precisely to survive this pose. **Gated on the CRITIC pass** — §5's no-exceptions rule
+  applies; nothing about that controller is currently independently verified.
+- **Reference behavior**: `outputs/pendulum_renders/swingup_flip_pan_lift_elbow_noguard.mp4`.
+- **Pendulum**: `assets/ur5e_pendulum/pendulum_attachment.xml` (the default 0.12 m, **local-Z
+  hinge**). Determined by the same physics as Goal 1's, in the opposite direction: at `ARM_Q0`'s
+  singular `wrist_2 = 0.270 deg`, tool Z is horizontal, so the local-Z hinge is horizontal and
+  the pendulum is fully live (**100.0%** gravity torque) — while the local-X-hinge `realrod`
+  asset is **DEAD** there (12.7%). So the two goals genuinely use different attachments, each
+  the live one at its own pose.
+- **CRITICAL**: that reference video was produced with **guards OFF**
+  (`config/_candidate_split_pan_lift_elbow_*` drives the task from joints `[0,1,2]` =
+  pan/lift/elbow, `split_base_wrist_task_dims: [0,1,2]`). Per this repo's standing rule, **a
+  result that needs guards disabled is a NEGATIVE result**. That video is a direction and a
+  motion reference, NOT a passing result. Goal 2 must reproduce it with **guards ON**.
+
+### Why pan/lift/elbow sidesteps the wrist singularity
+
+That config family drives the Cartesian task using **only** joints `[0,1,2]`, never the wrist. A
+wrist-2 singularity costs the *wrist* its authority; if the wrist is not carrying the task in the
+first place, `cond(J6)` of the full 6x6 Jacobian overstates the problem for that joint subset.
+This is the structural reason Goal 2 is viable at a pose where plain 6-DOF OSC is mismatched —
+and why `cond(J6)` is the wrong number to judge that config by.
+
+### Pose <-> controller pairing (do not mix these up)
+
+| pose | cond(J) | correct low-level controller |
+|---|---|---|
+| old / well-conditioned pose | 6.93 | plain OSC is fine — the only flip this repo ever achieved |
+| `ARM_Q0` (wrist_2 singular) | 1395.76 | 2-axis controller, or a pan/lift/elbow joint subset |
+
+A real mistake made 2026-08-14, recorded so it is not repeated: a ~40-minute swing-up search ran
+at `ARM_Q0` (`cond(J)=1396`) using **plain OSC** (`controller_kind: "impedance"` +
+`config/ur5e_mujoco_torque_osc_tuned.yaml`) — the hardest pose paired with the controller known
+to be structurally mismatched for it. A null from that pairing cannot distinguish "the swing-up
+law is insufficient" from "this controller cannot hold this pose". **Check `CONTROLLER_KIND` and
+the config path against the pose at dispatch time, not after.** Verifying that a search is
+*running* is not the same as verifying it is running the *right thing*.
+
+### Swing-up method: energy shaping (Astrom-Furuta). NOT RL.
+
+```
+u = clip( -k_e*thetadot*cos(phi)*(E_top - E)  -  k_pos*(x - x0)  -  k_vel*v_ref,  -a_max, +a_max )
+```
+`u` is a cart acceleration, integrated twice into the position target the low-level controller
+tracks. `phi = theta - theta_hanging` (0 hanging, +-pi inverted);
+`E = 0.5*I*thetadot^2 + M*g*r*(1-cos phi)`; `E_top = 2*M*g*r`.
+
+Term 1 is a Lyapunov construction, not a heuristic: since `Edot = -M*r*a*thetadot*cos(phi)`,
+choosing `a` proportional to `-thetadot*cos(phi)*(E_top-E)` gives
+`Edot ∝ (E_top-E)*(thetadot*cos phi)^2 >= 0` — energy can only increase, and the drive
+self-limits to zero at the top. Term 2 is the leash that keeps net drift inside the guard budget
+(the reason this beats a single kick, which spends its whole displacement budget one-way and
+still falls short of `E_top`). A seed kick is **mandatory**: at rest `thetadot = 0` makes term 1
+identically zero. Reference implementation:
+`tools/diagnostics/pendulum_toolY_swingup_search.py::run_energy_shaping_trial`.
+
+### CURVED (2-D) pivot motion — measured 2026-08-14, changes the feasibility argument
+
+The single-axis law above uses only horizontal pivot acceleration. That is leaving half the
+available authority on the table. For a pivot accelerating with components `(a_par, a_z)` the
+pivot-frame pseudo-force adds to gravity, so
+
+```
+I*thetaddot = -M*r*[ (g + a_z)*sin(phi) + a_par*cos(phi) ] - b*thetadot
+Edot        = -M*r*thetadot*[ a_par*cos(phi) + a_z*sin(phi) ]
+```
+
+Verified against the compiled model (hinge torque vs a unit pivot acceleration, `ARM_Q0`,
+`pendulum_attachment.xml`): `a_par` traces `-cos(phi)` and `a_z` traces `+sin(phi)`, with
+**equal peak authority — 0.00282 vs 0.00284 Nm per 1 m/s^2, within 0.7%**:
+
+| phi | tau from `a_par` | tau from `a_z` |
+|---|---|---|
+| 0 deg (hanging) | **-0.00282** | 0.00000 |
+| 90 deg (horizontal) | +0.00036 (~0) | **+0.00284** |
+| 180 deg (inverted) | +0.00282 | 0.00000 |
+
+Two consequences:
+
+1. **The two axes are complementary, not redundant.** Vertical drive is at MAXIMUM authority
+   exactly where horizontal drive has NONE (rod horizontal), and vice versa at the bottom. Since
+   `Edot = -M*r*thetadot*(a . n_hat)` with `n_hat = (cos phi, sin phi)` normal to the rod, the
+   optimal instantaneous drive direction is PERPENDICULAR TO THE ROD — and that direction
+   rotates as the rod swings, so following it traces a CURVE.
+
+2. **A curve sidesteps the bandwidth objection, which was about REVERSAL, not speed.**
+   Straight-line pumping must stop the cart dead and reverse every half-period (0.290 s for the
+   0.12 m rod, outside the arm's ~0.5 s response — the tension logged in "Open" item 3). A
+   curved/elliptical path never reverses: the pivot keeps moving and only TURNS, so the demand
+   becomes a turning rate instead of a stop-start. **Do not cite the 0.290 s half-period against
+   a curved trajectory — that budget was measured for linear reversal and is the wrong yardstick
+   here.** This is untested as a swing-up strategy; it is a measured-authority result plus a
+   mechanism argument, not yet a flip.
+
+3. **Shape the loop to the floor, do not center it.** Floor clearance at `ARM_Q0` is 6.3 cm DOWN
+   and effectively unlimited UP (see the clearance section above), so the loop should be an
+   up-biased ellipse rather than a centered circle. This costs nothing: the `sin(phi)` term
+   depends on the PHASING of vertical acceleration, not on where the loop is centered.
+
+This is the strongest available argument for the 2-axis controller: it is not merely a way to
+survive the wrist singularity, it is the machinery needed to command a 2-D curved pump at all.
+
+**Do not use RL for this.** `rl_gain_scheduling/` is a gain-scheduling env (action = gain
+multipliers, no pendulum in it) and is not reusable here. Its record on a strictly easier
+problem: 0/20, 0/20, 1/20 across three reward redesigns and ~4.4M steps, versus a fixed-gain
+baseline at 100%. Search with `differential_evolution`, per §7.
+
+### Floor clearance at `ARM_Q0` is only 6.3 cm — and floor penetration is SILENT
+
+Measured 2026-08-14 with `pendulum_attachment.xml` at `ARM_Q0`: the rod tip sits **0.0634 m**
+above the floor at the HANGING equilibrium (EE at z=0.1839), and hanging is the tip's lowest
+point over a full 360 deg hinge sweep. That is the pose swing-up starts from and returns to
+every half cycle, so any DOWNWARD arm drift eats straight into it.
+
+It is already being violated in a plain transport move. A 2-axis-controller run at
+`dx = +0.12 m` drives the tip to **-0.0142 m at t=3.22 s — 1.4 cm BELOW the floor** (the same
+run's Z drift was 0.0771 m; 0.0634 - 0.0771 = -0.0137, which is where the number comes from).
+The mirrored `dx = -0.12 m` run never drops below its start (min +0.0634 m) — the same
+X-direction asymmetry §7 warns about.
+
+**Nothing detects this.** The pendulum geoms are declared `contype="0" conaffinity="0"`, so the
+rod passes THROUGH the floor with no contact force, no penetration warning, and no error — it
+only shows up if you render it or explicitly track the tip site's world z. Do not assume a run
+that "passed" kept the hardware out of the table.
+
+Note the near-coincidence: the Z-corridor guard trips at 0.06 m and the clearance is 0.0634 m,
+so at THIS pose a Z-guard trip is roughly the floor-contact threshold — margin behind the guard
+is ~3 mm, not a comfortable buffer. That is luck, not design, and it will not hold at another
+pose or with a longer rod (the 0.30 m rod is 18 cm longer and would be through the floor at
+rest here).
+
+### LQR CATCH: FIXED 2026-08-14 — `frictionloss` was HIDING the instability from the linearizer
+
+**Both halves of Goal 1 now work.** Swing-up delivers `0.1875 rad @ thetadot = 0.0102 rad/s`; the
+LQR holds from that state with margin on both sides.
+
+`tools/diagnostics/pendulum_balance_torque_lqr.py` previously FELL at every perturbation
+(0.05-0.40 rad, fall times 0.18-0.56 s) at this pose/asset. It was **a wrong MODEL, not wrong
+weights** — sweeping `r_weight` over 2e9 (1e6 -> 0.0005) barely moved the closed-loop eigenvalues,
+which is the signature to watch for.
+
+Root cause: Coulomb `frictionloss` (0.001 Nm on the hinge) completely dominates at the
+microscopic velocities `mjd_transitionFD` perturbs with, so the linearizer saw a nearly-STUCK
+hinge and reported the inverted equilibrium as almost non-divergent. Measured (dt=0.002,
+`omega=10.8334 rad/s`), and note every corrected entry lands on its analytic value:
+
+| entry | as-modelled | frictionloss zeroed for linearization | analytic |
+|---|---|---|---|
+| `A[thd,thd]` | 0.810829 | **0.999157** | 0.99916 |
+| `A[thd,th]` | 0.023741 | **0.234904** | `w^2*dt` = 0.234725 |
+| max abs eig | 1.000252 | **1.021474** | `exp(w*dt)` = 1.021903 |
+
+0.810829 means the linearizer believed the hinge loses **19% of its velocity every 2 ms**. Viscous
+damping cannot do that (`exp(-b*dt/I) = 0.99916`, 0.08%/step) — it is the Coulomb term. An LQR
+designed against that plant has ~1-2 s closed-loop time constants against a pendulum whose real
+divergence time constant is `1/omega = 0.092 s`, i.e. 10-20x too slow. It was correctly solving
+for a plant that does not fall.
+
+Fix: `linearize_and_design_lqr(..., zero_hinge_frictionloss_for_linearization=True)` /
+CLI `--zero-frictionloss-for-linearization`. It zeroes the hinge `frictionloss` for the
+`mjd_transitionFD` call ONLY and restores it in a `finally`; **the simulated plant keeps its
+friction throughout**. Result at `wrist_2=-90` with `realrod`:
+
+| perturbation | before | after |
+|---|---|---|
+| 0.05 rad | FELL @ 0.54 s | **SURVIVED** (final err 0.0184) |
+| **0.1875 rad** (the swing-up's arrival) | FELL @ 0.30 s | **SURVIVED** (final err -0.0017) |
+| 0.30 rad | FELL @ 0.22 s | **SURVIVED** (final err -0.1130) |
+| 0.40 rad | FELL @ 0.18 s | **SURVIVED** (final err -0.0444) |
+
+At `r_weight=100` every final error is `<= 0.0162 rad`. Default is **False**, preserving
+previously-derived gains bit-for-bit (verified: the default path still FELL at t=0.296 s,
+identical to the pre-change run).
+
+**This is a GENERAL MuJoCo trap, not specific to this pose**: any `mjd_transitionFD`
+linearization of a joint carrying `frictionloss` will understate that joint's dynamics, because
+FD perturbations live entirely inside the stiction band. The long-rod LQR (task #130) was derived
+through the same code path and is likely affected — it was NOT re-derived here, and the default
+was deliberately left off rather than silently changing those results.
+
+### `min_theta_dist_from_inverted` IS THE WRONG OBJECTIVE FOR A HANDOFF (found 2026-08-14)
+
+That metric rewards REACHING inverted, so it also rewards a fast fly-THROUGH — which is useless
+for a catch. Measured, same pose/asset, both flips guard-checked and independently reproduced:
+
+| | single-axis energy shaping | curved / 2-axis |
+|---|---|---|
+| `min_theta_dist_from_inverted` | 0.1875 rad | **2.6e-05 rad** (looks 7000x better) |
+| **`thetadot` at closest approach** | **+0.0102 rad/s** | **+1.0504 rad/s** (100x WORSE) |
+| time to top | 2.206 s | 0.680 s |
+| time inside the 0.4 rad ball | 0.918 s | 0.410 s |
+| guard | none | `\|Y-Y0\| > 0.03 m` FIRES at 14 s |
+
+The single-axis law "loses" on the metric while producing a far better catch state, because its
+self-limiting energy term (`drive -> 0` as `E -> E_top`) genuinely PARKS the pendulum at the top.
+The curved law reaches the top faster and with 32x lower `k_e`, but arrives moving.
+
+**Any swing-up objective intended to feed the LQR must penalize `|thetadot|` at closest approach,
+not just `|theta - theta_inv|`.** A run that reaches inverted at speed has not solved the problem
+it appears to have solved.
+
+**CORRECTED 2026-08-16 — the quantity above is still wrong, though in a smaller way.** Measuring
+the 117-cell capture envelopes directly shows they are not a ball around the origin but an
+**ANTI-DIAGONAL BAND**: capture needs `theta` and `thetadot` of OPPOSITE sign, i.e. the pendulum
+must be moving TOWARD vertical. The governing quantity is the inverted pendulum's **unstable
+mode**
+
+```
+s = thetadot + omega*phi          omega = sqrt(m*g*r/I) = 10.8334 rad/s
+```
+
+and the single threshold `|s| <= 1.2` classifies **94%** of the 117 cells (drift 0.03; 87% at
+drift 0.06). The stable-mode coordinate `thetadot - omega*phi` has NO predictive power —
+captured median 3.92 vs failed 2.84, i.e. backwards — so this is that specific mode, not merely
+a better-fitting weighted combination.
+
+Consequences:
+
+- **Arriving at rest at the top is NOT the best arrival.** The swing-up's celebrated
+  `(phi=0.1875, thetadot=0)` gives `|s| = 2.03`, **1.7x OVER threshold** — outside the band
+  despite looking optimal on every metric used so far. Arriving with a small velocity of the
+  correct sign is strictly better than arriving at rest.
+- Penalizing `|thetadot|` alone actively drives a search toward the `thetadot = 0` column, which
+  is the **worst** column of the band at any nonzero `phi`. Use `|thetadot + omega*phi|`.
+
+### GOAL 1 COMPLETE 2026-08-16 — FLIP **AND** HOLD, guards ON, stock drift tolerance
+
+End-to-end in ONE continuous rollout (one `MjData`, one adapter, **no teleport**):
+`tools/diagnostics/pendulum_flip_catch_hold.py`, pose `ARM_Q0` with `wrist_2 = -90 deg`,
+`pendulum_attachment_realrod.xml`, `config/ur5e_mujoco_torque_osc_tuned_friction_ff.yaml`
+(`max_abs_*_drift_m = 0.03` — **no guard loosening anywhere**).
+
+```
+switch at t = 2.130 s   phi = -14.283 deg   thetadot = +1.8518 rad/s   |s| = 0.849
+held 10.0 s, settles to final |phi| = 0.15 deg
+guard_fired = False
+drift  x = 0.1871   y = 0.0239   z = 0.0095 m      cond(J) 7.203 -> 8.170
+tip min world z = 0.1950 m (clears floor by 19.5 cm)   arm contacts = 0
+```
+
+**K=0 counterfactual on the identical swing-up and switch point: falls to 179.98 deg and trips
+the orientation guard at t=7.702 s.** The hold is control, not passive hinge friction — this
+repo has retracted that exact result before, so the counterfactual is not optional.
+
+Note the drift-0.06 balance config is **not required**: measured Y excursion is 0.0239 m, inside
+the stock 0.03 guard. The widened config was only ever the LQR search's own config.
+
+Two things the seam needed that neither half revealed alone: (1) the LQR half had only ever been
+tested from a **teleport** (pendulum placed, arm at rest, reference zeroed) — the real arrival
+has the arm mid-stroke, carrying cart velocity, tracking a reference running for seconds;
+(2) `target_x`/`target_x_vel` must be **carried across** the switch, not re-zeroed, or the step
+into the inner loop looks like a catch failure that is really a handoff artifact.
+
+Video (HUD carries phi, thetadot, `s`, and guard state so a frame can be checked against the
+claim): `tools/diagnostics/render_flip_catch_hold_video.py`. Tests:
+`tests/mujoco/test_pendulum_flip_catch_hold.py` (8 passed).
+
+Second lesson from the same comparison: the curved search's saved record says
+`guard_fired=False`, but reproducing the SAME parameters at a longer `duration_s` DOES trip the
+Y-drift guard. A guard-clean claim is only valid for the duration it was evaluated at — re-check
+at the duration you intend to use before reporting a run as clean.
+
+### Open — needs a human decision, do not silently pick one
+
+1. ~~Goal 1's exact `wrist_2`~~ — **RESOLVED 2026-08-14: `-90 deg`**, with the local-X-hinge
+   `realrod` asset. Rest of `ARM_Q0` unchanged. See Goal 1 above for the measured basis. Worth
+   committing to `hardware/poses.py` as a named pose rather than left as a literal; note a
+   "dual-constraint pose" (`pan=-86 deg`, `cond(J)=8.31`, hinge elevation `89.92 deg`) was
+   validated 2026-08-13 and also never committed there — likely the same finding reached by a
+   different route, worth reconciling before adding a second near-duplicate constant.
+2. ~~Goal 2's pendulum asset~~ — **RESOLVED 2026-08-14: `pendulum_attachment.xml`**, by the
+   hinge-orientation physics above rather than by preference.
+3. **Known physical tension on the 0.12 m rod (locked by user; flagged, not re-litigated)**: its
+   half-period is 0.290 s vs the arm's ~0.5 s closed-loop bandwidth, so the cart reversal it
+   requires is outside what the arm can track; the 0.30 m rod's 0.449 s is inside it, which is
+   why that is the one that ever flipped. If a goal stalls, **rod length is the first suspect,
+   not the controller**.
+4. **LQR capture envelope has never been measured in 2-D** (`theta`, `thetadot`). The existing
+   0.05-0.4 rad came mostly from *position* perturbations, but a swing-up arrives *with
+   velocity*. This is the handoff gate and the likeliest silent failure of either goal.
+
 ## 1. Project reality
 
 - The folder name is historical: this is a **UR5e torque-control workspace**, not a cartpole
