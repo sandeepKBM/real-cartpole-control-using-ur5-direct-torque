@@ -306,6 +306,9 @@ def run_flip_catch_hold(
                 "phi_up_deg": float(np.degrees(phi_up)), "thetadot": thetadot,
                 "s_unstable": s_unstable, "u": u,
                 "x_dev": float(ee[0]) - x0, "target_x_vel": target_x_vel,
+                # Full qpos so a video can be replayed kinematically without
+                # re-simulating (same approach as render_trace_video.py).
+                "qpos": [float(v) for v in data.qpos],
             })
 
     switched = switch_step is not None
