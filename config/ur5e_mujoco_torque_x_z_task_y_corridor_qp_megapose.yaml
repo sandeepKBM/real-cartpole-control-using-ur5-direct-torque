@@ -1,0 +1,119 @@
+# ARM (c): Z TRACKED (task row) INSTEAD OF BOUNDED, Y left as the corridor
+# axis, at the WELL-CONDITIONED transport pose (MEGA_SEARCH_WINNER_Q,
+# cond(J)=6.93) -- generated 2026-08-13.
+#
+# Derived field-by-field from
+# config/ur5e_mujoco_torque_x_z_task_y_corridor_qp_enabled.yaml (unmodified),
+# which is another agent's ARM_Q0 work-in-progress. Items 2-5 of the arm-(b)
+# config's header apply here verbatim and are not repeated.
+#
+# PROVISIONAL. The base file's own header states its kp_rot/kd_rot were to be
+# a fresh differential_evolution search centred on 36.23/54.45, but the values
+# actually in its gains block (35.121920/52.787714) are the X-ONLY config's
+# search result verbatim, comment included -- i.e. that search's result is not
+# in the file. Any arm-(c) number here inherits that.
+#
+# GAINS, re-measured at THIS pose with eps=0.1 and the row-restricted operator
+# each row set actually sees:
+#     X+Z rows (0,2,3,4,5): diag = [3.74461, 4.39878, 0.10220, 0.19336, 0.09118]
+#                           -> transX 3.74461, transZ 4.39878, rot mean 0.12891
+#   kp_x = 400 * 3.74461 = 1497.8      kd_x = 40 * 3.74461 = 149.8
+#   kp_z = 120 * 4.39878 =  527.9      kd_z = 20 * 4.39878 =  88.0
+#     (Z is a TASK axis here, so these convert osc_tuned's own HARD-task Z
+#      gains 120/20, exactly as the base file does -- not the 5.0/2.0 soft
+#      bias, which is a different mechanism.)
+#   kp_rot/kd_rot: same conversion rule as arm (b), this row set's rotation
+#   mean: 57.19*0.12891 = 7.372, 85.95*0.12891 = 11.080.
+
+mujoco:
+  scene_xml: assets/ur5e_torque/scene.xml
+  joint_order:
+  - shoulder_pan_joint
+  - shoulder_lift_joint
+  - elbow_joint
+  - wrist_1_joint
+  - wrist_2_joint
+  - wrist_3_joint
+  actuator_order:
+  - shoulder_pan_torque
+  - shoulder_lift_torque
+  - elbow_torque
+  - wrist_1_torque
+  - wrist_2_torque
+  - wrist_3_torque
+  site_name: attachment_site
+  home_qpos:
+  - 0.0
+  - -1.5707963267948966
+  - 0.0
+  - -1.5707963267948966
+  - 0.0
+  - 0.0
+  use_home_qpos_as_start: true
+  gravity_mode: gravity_comp
+  gravity_source: pinocchio
+  coriolis_feedforward: true
+  default_controller: x_task_yz_corridor_qp
+  output_dir: outputs/ur5e_mujoco_torque_x_z_task_y_corridor_qp_megapose
+controller:
+  torque_limits_mode: initial
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 1497.8
+    kd_x: 149.8
+    kp_y: 5.0
+    kd_y: 2.0
+    kp_z: 527.9
+    kd_z: 88.0
+    kp_rot: 7.372
+    kd_rot: 11.08
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  task_axis_rows:
+  - 0
+  - 2
+  corridor_axis_rows:
+  - 1
+  task_excluded_joints: []
+  yz_corridor_enabled: true
+  y_corridor_half_width_m: 0.025
+  z_corridor_half_width_m: 0.025
+  yz_corridor_alpha1: 10.0
+  yz_corridor_alpha2: 10.0
+  manipulability_cbf: false
+  manipulability_cbf_epsilon: 0.0003
+  manipulability_cbf_alpha1: 10.0
+  manipulability_cbf_alpha2: 10.0
+  dual_sweeps: 4
+  dual_root_iters: 10
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

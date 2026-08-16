@@ -1,0 +1,105 @@
+# Y-CORRIDOR HALF-WIDTH SWEEP VARIANT, derived field-by-field from arm (c)
+# (config/ur5e_mujoco_torque_x_z_task_y_corridor_qp_megapose.yaml, unmodified) -- generated 2026-08-14.
+#
+# Follow-up to the 2026-08-13 OLD_POSE (MEGA_SEARCH_WINNER_Q) 48-run sweep:
+# arms (b)/(c) both fixed +X Z-drift but lost every -X cell (0/8), each
+# failing on move_phase_target_tracking (75-77% of target) while max|Y| sat
+# at 0.022-0.026 m against corridor_axis_rows=[1]'s 0.025 m half-width,
+# binding 65-74% of the trajectory. This variant changes ONLY:
+#   controller.y_corridor_half_width_m: 0.025 -> 0.040
+# Nothing else differs from arm (c): same gains, same task_axis_rows=[0,2],
+# same corridor_axis_rows=[1], same task_excluded_joints=[], same
+# manipulability_cbf=false, same safety guards (0.03 m).
+
+mujoco:
+  scene_xml: assets/ur5e_torque/scene.xml
+  joint_order:
+  - shoulder_pan_joint
+  - shoulder_lift_joint
+  - elbow_joint
+  - wrist_1_joint
+  - wrist_2_joint
+  - wrist_3_joint
+  actuator_order:
+  - shoulder_pan_torque
+  - shoulder_lift_torque
+  - elbow_torque
+  - wrist_1_torque
+  - wrist_2_torque
+  - wrist_3_torque
+  site_name: attachment_site
+  home_qpos:
+  - 0.0
+  - -1.5707963267948966
+  - 0.0
+  - -1.5707963267948966
+  - 0.0
+  - 0.0
+  use_home_qpos_as_start: true
+  gravity_mode: gravity_comp
+  gravity_source: pinocchio
+  coriolis_feedforward: true
+  default_controller: x_task_yz_corridor_qp
+  output_dir: outputs/ur5e_mujoco_torque_x_z_task_y_corridor_qp_megapose_ycorr0p040
+controller:
+  torque_limits_mode: initial
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 1497.8
+    kd_x: 149.8
+    kp_y: 5.0
+    kd_y: 2.0
+    kp_z: 527.9
+    kd_z: 88.0
+    kp_rot: 7.372
+    kd_rot: 11.08
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  task_axis_rows:
+  - 0
+  - 2
+  corridor_axis_rows:
+  - 1
+  task_excluded_joints: []
+  yz_corridor_enabled: true
+  y_corridor_half_width_m: 0.04
+  z_corridor_half_width_m: 0.025
+  yz_corridor_alpha1: 10.0
+  yz_corridor_alpha2: 10.0
+  manipulability_cbf: false
+  manipulability_cbf_epsilon: 0.0003
+  manipulability_cbf_alpha1: 10.0
+  manipulability_cbf_alpha2: 10.0
+  dual_sweeps: 4
+  dual_root_iters: 10
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

@@ -1,0 +1,150 @@
+# ARM (b): Z/Y CORRIDOR HOCBF at the WELL-CONDITIONED transport pose
+# (MEGA_SEARCH_WINNER_Q / hardware.poses, cond(J)=6.93, sigma_min=0.260,
+# wrist_2=+89.50 deg) -- generated 2026-08-13.
+#
+# Derived field-by-field from
+# config/ur5e_mujoco_torque_x_task_yz_corridor_qp_enabled.yaml (unmodified).
+# EVERY difference from that file is listed here.
+#
+# 1. GAINS DO NOT TRANSFER BETWEEN POSES. The base file's kp_x=2400 is
+#    osc_tuned's acceleration gain 400 times a Lambda_xx MEASURED AT ARM_Q0
+#    (5.9298). Re-measured at THIS pose with the same eps=0.1 and the same
+#    row-restricted operator Lambda_red = (J_red M^-1 J_red^T + eps I)^-1:
+#        X-only rows (0,3,4,5): diag = [3.58544, 0.10220, 0.13141, 0.09117]
+#                               -> translation 3.58544, rotation mean 0.10826
+#    so kp_x = 400*3.58544 = 1434.2 and kd_x = 40*3.58544 = 143.4.
+#    kp_rot/kd_rot: the base file's 35.121920/52.787714 came from a DE search
+#    at ARM_Q0, where the rotational Lambda mean is 0.61418. Carried across by
+#    the SAME conversion rule (the implied acceleration gains, 57.19/85.95,
+#    times this pose's 0.10826): 6.191/9.306. This is a pose transfer of the
+#    documented conversion, NOT a retune -- no search was run at this pose.
+#
+# 2. task_excluded_joints: [] (base file: [0] = shoulder_pan pinned).
+#    SCREENED at this pose, as that field's docstring requires, and the answer
+#    is the opposite of ARM_Q0's:
+#      * shoulder_pan is the DOMINANT world-Y actuator here (J_y column 0 =
+#        -0.4857; the only other nonzero is wrist_2 at +0.1000). Pinning its
+#        torque box shut would leave the Y corridor rows with almost no
+#        authority to enforce with -- it would gut the mechanism under test.
+#      * shoulder_pan does not move world Z at all here (J_z column 0 = 0.0),
+#        so it is not what the Z corridor acts through either way.
+#      * the conditioning argument that motivated [0] at ARM_Q0 does not
+#        apply: cond(J_reduced) 5.68 (all six) vs 5.96 (no pan) here, against
+#        10.06 vs 518.69 at ARM_Q0.
+#      * shoulder_pan is 0.0 rad at this pose -- there is no -45 deg wall/base
+#        clearance constraint to protect, which is the physical reason the
+#        base file pins it.
+#
+# 3. CORRIDOR HALF-WIDTH 0.025 m, not the base file's 0.05 m. The base file's
+#    0.05 m was sized from the -45deg pose's measured 0.0423 m natural Y
+#    transient and is meaningless here. At THIS pose the number that matters
+#    is that BOTH the pass criterion (transport_metrics._NORMAL_YZ_DRIFT_TOL =
+#    0.03 m) and the safety guard (0.03 m, item 4) sit at 0.03 m, so a
+#    corridor at or beyond 0.03 m cannot help BY CONSTRUCTION -- the barrier
+#    would only begin pushing after the run has already been scored a failure.
+#    0.025 m leaves 5 mm (17%) of margin inside 0.03 m for the transient
+#    overshoot this HOCBF explicitly permits (it drops Jdot_y qd and is
+#    relative-degree 2). It is also wide enough not to fight motion measured
+#    healthy at this pose: the arm-(a) baseline's own worst excursions here
+#    are |Y| <= 0.0180 m and |Z| <= 0.0095 m on every clean run.
+#
+# 4. SAFETY GUARDS BACK TO 0.03 m (base file: 0.06 m). The base file widened
+#    them so that its own 0.05 m corridor, not the guard, decided the outcome.
+#    Here the whole question is whether the barrier keeps Z inside the SAME
+#    0.03 m limit the arm-(a) baseline is held to, so all three arms are run
+#    against identical guards and scored by the identical, unmodified
+#    transport_metrics tolerances.
+#
+# 5. manipulability_cbf: false (base file: true). Measured no-op at this pose:
+#    mu = 7.292e-2 against the base file's epsilon = 3.0e-4, a barrier margin
+#    of h = +0.0726, four orders of magnitude of slack. Disabled so the QP
+#    carries the corridor rows ALONE and the measurement attributes to the
+#    mechanism under test, with no second mechanism in the loop.
+
+mujoco:
+  scene_xml: assets/ur5e_torque/scene.xml
+  joint_order:
+  - shoulder_pan_joint
+  - shoulder_lift_joint
+  - elbow_joint
+  - wrist_1_joint
+  - wrist_2_joint
+  - wrist_3_joint
+  actuator_order:
+  - shoulder_pan_torque
+  - shoulder_lift_torque
+  - elbow_torque
+  - wrist_1_torque
+  - wrist_2_torque
+  - wrist_3_torque
+  site_name: attachment_site
+  home_qpos:
+  - 0.0
+  - -1.5707963267948966
+  - 0.0
+  - -1.5707963267948966
+  - 0.0
+  - 0.0
+  use_home_qpos_as_start: true
+  gravity_mode: gravity_comp
+  gravity_source: pinocchio
+  coriolis_feedforward: true
+  default_controller: x_task_yz_corridor_qp
+  output_dir: outputs/ur5e_mujoco_torque_x_task_yz_corridor_qp_megapose
+controller:
+  torque_limits_mode: initial
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 1434.2
+    kd_x: 143.4
+    kp_y: 5.0
+    kd_y: 2.0
+    kp_z: 5.0
+    kd_z: 2.0
+    kp_rot: 6.191
+    kd_rot: 9.306
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  task_excluded_joints: []
+  yz_corridor_enabled: true
+  y_corridor_half_width_m: 0.025
+  z_corridor_half_width_m: 0.025
+  yz_corridor_alpha1: 10.0
+  yz_corridor_alpha2: 10.0
+  manipulability_cbf: false
+  manipulability_cbf_epsilon: 0.0003
+  manipulability_cbf_alpha1: 10.0
+  manipulability_cbf_alpha2: 10.0
+  dual_sweeps: 4
+  dual_root_iters: 10
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

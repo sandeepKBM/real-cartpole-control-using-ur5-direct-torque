@@ -1,0 +1,259 @@
+# Reduced-task (X + orientation) torque QP -- ENABLED variant: Y/Z corridor
+# HOCBF + manipulability CBF both ON (2026-08-13).
+#
+# Identical to config/ur5e_mujoco_torque_x_task_yz_corridor_qp.yaml except for
+# (a) the two mechanism flags and (b) the widened drift tolerances explained
+# below. Nothing else differs, so a comparison between the two files measures
+# the mechanisms alone.
+#
+# ================= WIDENED DRIFT TOLERANCE: THE REASONING ==================
+# The corridor half-width (0.05 m) is deliberately LARGER than
+# ImpedanceSafetyMonitor's 0.03 m default drift guard
+# (controller_core/safety.py, unchanged class default -- this is a config-only
+# override scoped to this one file). Both numbers were re-verified against the
+# repo on 2026-08-13:
+#
+#   * controller_core/safety.py: max_abs_y_drift_m / max_abs_z_drift_m /
+#     max_abs_orthogonal_drift_m all default to 0.03 m. CONFIRMED.
+#   * The one validated real dose-response measurement (the -45deg pose,
+#     dx = 0.06 m, docs/status/neg45_y_axis_diagnosis_and_fix_2026-08-01.md)
+#     recorded a NATURAL Y excursion peaking at 0.0423 m during the move and
+#     decaying to 0.0058 m by the end of the hold -- a bounded, self-correcting
+#     transient, already LARGER than the 0.03 m guard. CONFIRMED.
+#   * docs/status/neg45_drift_tolerance_validation_2026-08-01.md subsequently
+#     raised max_abs_orthogonal_drift_m to 0.05 m for that one pose on exactly
+#     this evidence. CONFIRMED.
+#
+# So a 0.03 m guard would trip on motion this repo has already validated as
+# healthy, and a corridor narrower than 0.0423 m would put the HOCBF in a
+# fight with that same motion. Half-width 0.05 m is ~18% above the measured
+# peak; the guards below are set to 0.06 m so the guard sits OUTSIDE the
+# corridor the controller is actively enforcing (otherwise the guard, not the
+# corridor, decides the outcome and the mechanism cannot be evaluated at all).
+#
+# SCOPE OF THAT JUSTIFICATION: the 0.0423 m dose-response point was measured
+# at dx = 0.06 m only. The transient grows with displacement. Do NOT read
+# these numbers as validated for larger moves.
+#
+# ALL THREE FIELDS ARE WIDENED, not just max_abs_y_drift_m. On the MuJoCo
+# adapter path ImpedanceSafetyMonitor.set_initial_position() is always called
+# (simulation/ur5e_mujoco_torque.py::MujocoUR5eTorqueAdapter.reset), which
+# selects the max_abs_ORTHOGONAL_drift_m branch of
+# ImpedanceSafetyMonitor.check() -- max_abs_y_drift_m/max_abs_z_drift_m are
+# NOT consulted on this path at all. Verified by reading the class directly
+# (controller_core/safety.py lines ~95-109), the same check
+# docs/status/neg45_drift_tolerance_validation_2026-08-01.md documents making.
+# Widening only max_abs_y_drift_m would therefore have had ZERO effect in sim.
+# ===========================================================================
+#
+#
+# Selects controller_core/x_task_yz_corridor_qp (controller_kind:
+# "x_task_yz_corridor_qp"), a NEW controller, not a variant of the tuned OSC
+# impedance controller. See docs/status/x_task_yz_corridor_qp_2026-08-13.md.
+#
+# GAINS come from config/ur5e_mujoco_torque_osc_tuned.yaml so the closed-loop
+# comparison against that config measures CONTROLLER STRUCTURE, not gain
+# values. kp_posture 25 / kd_posture 6, kd_joint 4 are copied verbatim;
+# kp_rot/kd_rot are NOT -- see the bug-2/bug-3 block at the gains below; kp_x/kd_x are copied THROUGH A UNIT CONVERSION (400 -> 2400,
+# 40 -> 240) because they mean different physical things in the two
+# controllers -- see the long comment at the gains block below. Nothing here
+# was tuned for this controller and none of it is claimed to be optimal.
+#
+# THE FOUR SOFT GAINS ARE DIFFERENT ON PURPOSE. kp_y/kd_y/kp_z/kd_z here are
+# NOT a Cartesian hold task -- they are a low-priority joint-space PD bias
+# (tau_yz_soft) that enters only the QP's linear term, never its Hessian.
+# 5.0/2.0 instead of the tuned config's 80/15 and 120/20: reusing hard-task
+# gains as a bias would recreate exactly the stiff Y/Z hold this controller
+# exists to remove (and which docs/status/neg45_y_axis_diagnosis_and_fix_
+# 2026-08-01.md showed no P/D/I gain can reconcile with X-tracking at the real
+# transport pose).
+#
+# Fields inherited but NOT wired into this controller in v1 (they would look
+# enabled and provably do nothing, so they are deliberately absent here rather
+# than set to false): task_space_inertia_shaping, nullspace_posture,
+# lambda_*_regularization, svd_singularity_filtering, wrist_orientation_task,
+# friction_feedforward, reduced_task_dims, split_base_wrist_task,
+# y_control_mode, ki_x/ki_y, acceleration_feedforward,
+# posture_reanchor_on_settle.
+
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "x_task_yz_corridor_qp"
+  output_dir: "outputs/ur5e_mujoco_torque_x_task_yz_corridor_qp_enabled"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    # UNIT CONVERSION, NOT A RETUNE. config/ur5e_mujoco_torque_osc_tuned.yaml's
+    # kp_x=400/kd_x=40 are ACCELERATION gains: that controller has
+    # task_space_inertia_shaping on, so the wrench it applies is Lambda(q) *
+    # (kp_x*e_x + ...). This controller has no Lambda shaping -- kp_x here is a
+    # plain FORCE gain (N/m), so reusing 400 unchanged would apply Lambda_xx
+    # times LESS force for the same error. Measured at ARM_Q0 with the tuned
+    # config's own lambda_regularization=0.1: Lambda_xx = 5.9298, so
+    # 400 * 5.9298 = 2372 -> 2400 (and 40 * 5.9298 = 237 -> 240). This makes the
+    # two controllers apply comparable X force for the same error at this pose,
+    # which is the only way the closed-loop comparison measures STRUCTURE
+    # rather than a 5.9x gain difference. Measured with the naive copy first:
+    # X-tracking 0.155 vs the tuned controller's 0.368 at dx=0.02 m -- exactly
+    # the ratio this conversion predicts.
+    kp_x: 2400.0
+    kd_x: 240.0
+    # Soft Y/Z centering bias only -- see the header. NOT a hold task.
+    kp_y: 5.0
+    kd_y: 2.0
+    kp_z: 5.0
+    kd_z: 2.0
+    # BUG 2 + BUG 3 FIX (2026-08-13). Both rotational gains were wrong, for two
+    # independent reasons, and the search below was run only after
+    # task_excluded_joints landed (the fixes interact -- see the design doc).
+    #
+    # BUG 2, kd_rot was never unit-converted. kp_x/kd_x above were correctly
+    # scaled by a measured Lambda_xx = 5.9298; kd_rot was copied from
+    # osc_tuned.yaml unchanged. Re-measured at ARM_Q0 with that config's own
+    # lambda_regularization = 0.1:
+    #     Lambda[3:6,3:6] diag = [0.12063, 0.14517, 3.27179]
+    #     factor = trace(Lambda_rot)/3 = 1.1792   (NOT 5.9298 -- the rotational
+    #     block is ~5x smaller than Lambda_xx, so reusing the translational
+    #     factor would have overshot by that ratio)
+    # -> the unit-correct kd_rot is 10 * 1.1792 = 11.79. That is the CENTRE of
+    # the search range, not the final value: Lambda_rot's diagonal spans a
+    # factor of 27 here, so one scalar cannot match all three orientation rows.
+    #
+    # BUG 3, kp_rot = 0 was a stale assumption. In osc_tuned.yaml it is
+    # deliberate and correct -- the task rotation PD is unstable through that
+    # controller's eps-regularized Lambda near the wrist singularity. THIS
+    # controller has no Lambda term anywhere, so that instability cannot occur,
+    # and the value was carried over without re-examination. The cost was worse
+    # than a missing restoring term: task_weights = diag(kp_x, kp_rot x3) with a
+    # 1e-6 floor, so at kp_rot = 0 the Hessian carried essentially NO weight on
+    # the three orientation rows and the QP was free to discard
+    # orientation-directed torque (including wrist damping) for 2*reg.
+    #
+    # VALUES BELOW: scipy.optimize.differential_evolution over (kp_rot, kd_rot)
+    # in [0,400] x [0,60], popsize 8 / maxiter 12 / seed 0, 112 evaluations,
+    # converged. Objective = sum over dx in {-0.06/1.5s, +0.06/0.1s, +0.12/1.5s}
+    # of (max orientation error + 3*tracking shortfall vs the pre-fix run
+    # + 10*guard trip + oscillation penalties). Measured result vs pre-fix:
+    #     dx=-0.06 m  orientation 0.1417 -> 0.0797 rad
+    #     dx=+0.06 m  orientation 0.1167 -> 0.0536 rad   (0.1 s move)
+    #     dx=+0.12 m  orientation 0.2423 -> 0.0483 rad
+    # kd_rot landing at 4.5x the unit-derived 11.79 is a real finding, not a
+    # contradiction: the conversion fixes the SCALE, and a PD pair with a
+    # newly-nonzero kp_rot needs its own matched damping on top.
+    kp_rot: 35.121920
+    kd_rot: 52.787714
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  # Same value and same reason as config/ur5e_mujoco_torque_osc_tuned.yaml:
+  # disables the global cond(J) wrench back-off for any physically realizable
+  # Jacobian. At the real deployment pose ARM_Q0 (cond(J) ~= 1396) the class
+  # default 1.0e5 would not trigger anyway, so this is not what makes ARM_Q0
+  # work -- it is here so that a config which DOES wander toward a true wrist
+  # singularity cannot reproduce the documented freeze/TCP-accel failure mode
+  # (docs/status/disable_global_singular_scale_validation_2026-07-30.md).
+  # Singularity approach is the manipulability CBF's job in this controller.
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+
+  # --- WHICH JOINTS THE TASK MAY DRIVE (bug fix, 2026-08-13) ---------------
+  # shoulder_pan (index 0) is held OUT of the task entirely. Not a preference:
+  # ARM_Q0 pins shoulder_pan at -135.7 deg for real wall/base clearance in the
+  # lab, and before this fix the reduced task -- which has 2 genuinely
+  # redundant DOF and, at this pose, gives shoulder_pan the LARGEST world-X
+  # Jacobian coefficient of any joint (0.2366) -- swung it 4.32/5.20/8.93/
+  # 12.16/13.15 deg across the five-case matrix, with only the soft posture
+  # spring resisting. About half of the orientation error was the same thing
+  # seen from the task side: shoulder_pan's rz Jacobian coefficient here is
+  # 1.0, so its drift IS an end-effector rotation about world Z.
+  #
+  # The mechanism is BOTH a zeroed Jacobian column and a shut torque box (see
+  # controller_core/x_task_yz_corridor_qp/config.py's task_excluded_joints
+  # docstring and docs/status/x_task_yz_corridor_qp_2026-08-13.md sec 2 for
+  # the head-to-head measurements that showed neither alone is sufficient).
+  # Set to [] to reproduce the pre-fix behavior exactly.
+  #
+  # SCREENED against this pose, as that docstring requires: dropping
+  # shoulder_pan takes cond(J_reduced) 10.1 -> 519 but keeps rank 4, and the
+  # least-squares joint velocity for 1 m/s of world X at zero angular velocity
+  # is 5.15 rad/s vs 4.87 with all six joints. The task is genuinely feasible
+  # without it at ARM_Q0. Do NOT carry this index set to another pose without
+  # repeating that check.
+  task_excluded_joints: [0]
+
+  # --- the two new mechanisms, both ON in this file ---
+  yz_corridor_enabled: true
+  y_corridor_half_width_m: 0.05
+  z_corridor_half_width_m: 0.05
+  yz_corridor_alpha1: 10.0
+  yz_corridor_alpha2: 10.0
+  manipulability_cbf: true
+  # 3.0e-4, NOT the class default 1.0e-3. Measured on this model: mu(ARM_Q0)
+  # = 4.326e-4 (tools/diagnostics/x_task_yz_corridor_qp_sim_check.py --mode
+  # profile). With epsilon=1e-3 the START POSE is already inside the barrier's
+  # exclusion region (h = mu - epsilon < 0), which turns the high-order CBF
+  # from a barrier into a permanent recovery push -- measured active on
+  # 1250/1250 cycles of a dx=0.02 m rollout. 3.0e-4 sits just below mu at the
+  # start pose (h = +1.3e-4 > 0), so the row is a real barrier here.
+  manipulability_cbf_epsilon: 3.0e-4
+  manipulability_cbf_alpha1: 10.0
+  manipulability_cbf_alpha2: 10.0
+
+  dual_sweeps: 4
+  dual_root_iters: 10
+
+  safety:
+    max_joint_velocity_radps: 3.0
+    # 0.06 m, NOT the 0.03 m class default -- see the header block. The
+    # enforced field on the MuJoCo path is max_abs_orthogonal_drift_m; the
+    # other two are set to match so this config behaves the same on any
+    # caller that takes the other branch.
+    max_abs_y_drift_m: 0.06
+    max_abs_z_drift_m: 0.06
+    max_abs_orthogonal_drift_m: 0.06
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
