@@ -19,7 +19,7 @@ set -euo pipefail
 cd /common/users/ss5772/real_Cartpole
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 export DE_WORKERS="${DE_WORKERS:-32}"
-OUT=/common/home/ss5772/.claude/jobs/3a0b9f03/tmp/goal2_inplane_signfixed.json
+OUT="${OUT_JSON:-/common/home/ss5772/.claude/jobs/3a0b9f03/tmp/goal2_inplane_signfixed.json}"
 mkdir -p "$(dirname "$OUT")"
 echo "host=$(hostname -s) cores=$(nproc) load=$(uptime|sed 's/.*average: //') DE_WORKERS=$DE_WORKERS"
 exec /common/users/ss5772/miniforge3/envs/mujoco_ur5e/bin/python \

@@ -241,15 +241,23 @@ def compute_pump_basis(model: mujoco.MjModel, arm_q: np.ndarray, hanging_angle: 
 
 
 def curved_pump_accel(thetadot: float, phi: float, energy_j: float, e_top_j: float,
-                       k_e: float) -> tuple[float, float]:
-    """a_vec = -k_e * thetadot * (E_top - E) * (cos phi, sin phi).
+                       k_e: float, energy_sign: float = -1.0) -> tuple[float, float]:
+    """a_vec = energy_sign * k_e * thetadot * (E_top - E) * (cos phi, sin phi).
+
+    ``energy_sign`` defaults to -1.0, reproducing the shipped law bit-for-bit.
+    It exists because that leading sign is NOT a constant: it encodes
+    c0 = Q/a = -m * n_hat . (r x u), a property of (hinge axis, drive
+    direction). Measured 2026-08-16, c0 = -0.001993 at Goal 1's pose (so -1.0
+    is right there) but +0.002841 at the singular ARM_Q0 -- where this law as
+    shipped would DAMP in BOTH components at once, since a_pump and a_vert
+    share one cross-product geometry and therefore one sign.
 
     Returns (a_pump, a_vert), the "energy" component of the commanded
     acceleration BEFORE the position leash and the clip. Pure function of
     scalars -- reused identically by the trial loop and by the unit tests
     that check the Edot >= 0 / cos-vs-sin-scaling properties this docstring
     (and the module docstring above) derive."""
-    common = -float(k_e) * float(thetadot) * (float(e_top_j) - float(energy_j))
+    common = float(energy_sign) * float(k_e) * float(thetadot) * (float(e_top_j) - float(energy_j))
     return common * np.cos(phi), common * np.sin(phi)
 
 
@@ -320,6 +328,14 @@ def run_curved_swingup_trial(
 
     config = load_config(CONFIG_PATH if config_path is None else Path(config_path))
     arm_q = GOAL1_ARM_Q if arm_q is None else np.asarray(arm_q, dtype=np.float64).reshape(6)
+    # MEASURED energy sign for THIS (pose, asset, pump direction). a_pump and
+    # a_vert come from one cross-product geometry, so a single sign governs
+    # both -- get it wrong and the 2-D pump damps in both components at once.
+    # -1.0 (the shipped constant) is correct at Goal 1's pose and WRONG at the
+    # singular ARM_Q0; see measure_pivot_coupling.
+    from tools.diagnostics.pendulum_swingup_energy_shaping import measure_pivot_coupling
+    _c0 = measure_pivot_coupling(model, arm_q, hanging_angle, np.array([1.0, 0.0, 0.0]))
+    energy_sign = -1.0 if _c0 < 0.0 else 1.0
     if constants is None:
         constants = derive_pendulum_constants(model, arm_q)
     mgr = constants.mgr_nm
@@ -395,7 +411,8 @@ def run_curved_swingup_trial(
             a_pump = float(0.5 * kick_amplitude_m * omega_kick * omega_kick * np.cos(omega_kick * t))
             a_vert = 0.0
         else:
-            a_pump_energy, a_vert_energy = curved_pump_accel(thetadot, phi, E, e_top, k_e)
+            a_pump_energy, a_vert_energy = curved_pump_accel(
+                thetadot, phi, E, e_top, k_e, energy_sign=energy_sign)
 
             a_pump_leash = -k_pos * s_pump - k_vel * s_pump_vel
             # One-sided vertical leash: only restores when the reference has
