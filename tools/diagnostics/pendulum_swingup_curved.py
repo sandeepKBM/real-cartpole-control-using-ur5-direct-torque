@@ -584,6 +584,10 @@ def build_parser() -> argparse.ArgumentParser:
                              "instead of a large, resonantly-tuned single kick -- a real "
                              "confound found in this file's own dev process, see "
                              "run_curved_swingup_trial's enable_vertical docstring.")
+    parser.add_argument("--search-backend", default="de", choices=["de", "optuna"],
+                        help="de = differential_evolution (unchanged default). optuna = TPE.")
+    parser.add_argument("--n-trials", type=int, default=None,
+                        help="optuna only: evaluation budget.")
     parser.add_argument("--disable-vertical", action="store_true",
                         help="Ablation: force a_vert=0 always, reducing the trial to a "
                              "genuine single-axis pump along the TRUE par_hat direction "
@@ -631,10 +635,13 @@ def main(argv=None) -> int:
     enable_vertical = not args.disable_vertical
     print(f"=== searching (k_e, a_max, k_pos, k_vel, kick_amplitude_m, kick_duration_s) "
           f"via differential_evolution, workers={workers}, enable_vertical={enable_vertical} ===")
-    res = differential_evolution(
+    from tools.diagnostics.pendulum_search_backends import minimize as _minimize
+
+    res = _minimize(
         functools.partial(objective, ctx=ctx, duration_s=args.duration_s, enable_vertical=enable_vertical),
-        bounds, maxiter=args.maxiter, popsize=args.popsize, tol=1e-4,
-        seed=args.seed, workers=workers, polish=False)
+        bounds, backend=args.search_backend, maxiter=args.maxiter,
+        popsize=args.popsize, seed=args.seed, workers=workers, n_trials=args.n_trials)
+    print(f"search backend={res.backend}  evaluations={res.nfev}")
     print(f"Best params: k_e={res.x[0]:.4f}, a_max={res.x[1]:.4f}, k_pos={res.x[2]:.4f}, "
           f"k_vel={res.x[3]:.4f}, kick_amplitude_m={res.x[4]:.4f}, kick_duration_s={res.x[5]:.4f}")
     print(f"Best cost: {res.fun:.4f}")
