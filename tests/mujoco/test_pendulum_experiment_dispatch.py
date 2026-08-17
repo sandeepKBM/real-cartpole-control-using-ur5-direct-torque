@@ -132,3 +132,29 @@ def test_the_two_poses_disagree_about_which_asset_is_live():
     # tight to pass on a merely-degraded pairing.
     assert mgr[("arm_q0", "default")] > 6 * mgr[("arm_q0", "realrod")]
     assert mgr[("w2neg90", "realrod")] > 6 * mgr[("w2neg90", "default")]
+
+
+# ============ 4. THE SIGN, WHICH EVERY OTHER CHECK IS BLIND TO ===========
+
+def test_pump_sign_is_pose_dependent_and_goal1_keeps_the_shipped_sign():
+    """The energy law's -k_e sign was hardcoded from ONE measurement. It is
+    correct at Goal 1's validated configuration and WRONG at ARM_Q0 -- so a
+    measured sign leaves the validated flip bit-identical while fixing the pose
+    where every swing-up ever run was fighting a damper."""
+    from tools.diagnostics.pendulum_experiment import check_pump_sign
+    # Each run's ACTUAL drive direction: Goal 1 drives world +X; Goal 2 drives
+    # its config's task_rotation row 0, which is the OPPOSITE end of the
+    # in-plane line from the render's e_h. Sign matters, so use what runs.
+    c_g1 = check_pump_sign(ASSETS["realrod"], POSES["w2neg90"], np.array([1.0, 0.0, 0.0]))
+    c_g2 = check_pump_sign(ASSETS["default"], POSES["arm_q0"], np.array([0.716, 0.698, 0.0]))
+    assert c_g1 < 0, "Goal 1's validated flip must keep the shipped -k_e sign"
+    assert c_g2 > 0, "ARM_Q0 needs the corrected sign"
+
+
+def test_reversing_the_drive_axis_reverses_the_pump():
+    """Sign-blind checks cannot see this; c0 must."""
+    from tools.diagnostics.pendulum_experiment import check_pump_sign
+    _, _, u, _ = axis_alignment(ASSETS["default"], POSES["arm_q0"], "in-plane-horiz")
+    a = check_pump_sign(ASSETS["default"], POSES["arm_q0"], u)
+    b = check_pump_sign(ASSETS["default"], POSES["arm_q0"], -np.asarray(u))
+    assert a * b < 0 and abs(abs(a) - abs(b)) < 1e-12

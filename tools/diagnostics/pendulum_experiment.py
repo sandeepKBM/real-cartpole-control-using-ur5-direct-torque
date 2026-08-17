@@ -182,6 +182,28 @@ def check_guard_frame_or_die(config: Path | None, drive_vec, drive: str) -> None
         )
 
 
+def check_pump_sign(pendulum_xml: Path, arm_q, drive_vec) -> float:
+    """PREFLIGHT: report the SIGNED pivot coupling for the chosen direction.
+
+    Every other check here is absolute-valued -- kappa, kappa_hang and the
+    guard-frame |cos| all pass a perfectly BACKWARDS drive axis without
+    complaint, which is exactly how a damping run reached a full search. The
+    energy law's sign must match sign(c0) or it removes the energy it is
+    written to add.
+    """
+    import mujoco
+
+    from tools.diagnostics.pendulum_swingup_energy_shaping import (
+        measure_pivot_coupling, resolve_equilibria)
+
+    model = compose_ur5e_pendulum_model(pendulum_xml=str(pendulum_xml))
+    hang, _ = resolve_equilibria(model, np.asarray(arm_q, dtype=np.float64))
+    c0 = measure_pivot_coupling(model, arm_q, hang, drive_vec)
+    print(f"  pump coupling c0 = {c0:+.6f}  -> energy_sign {-1 if c0 < 0 else +1:+d} "
+          f"({'shipped -k_e' if c0 < 0 else 'CORRECTED +k_e'})")
+    return c0
+
+
 def backend_for(pose_name: str, asset_name: str, drive: str) -> str:
     """toolY where it can express the request, generic otherwise -- and say why."""
     if drive == "tool-y" and pose_name == "arm_q0" and asset_name == "default":
@@ -221,6 +243,21 @@ def main(argv=None) -> int:
     check_axis_or_die(asset, arm_q, args.drive_axis, args.i_know_this_axis_is_weak)
     _, _, drive_vec, _ = axis_alignment(asset, arm_q, args.drive_axis)
     check_guard_frame_or_die(args.config, drive_vec, args.drive_axis)
+    # A named axis fixes only the LINE. The config's task_rotation row 0 fixes
+    # the DIRECTION, and the pump sign depends on direction, so c0 must be
+    # evaluated on what the run will actually drive -- not on the render's
+    # arbitrary choice of which end of the line to name.
+    effective = drive_vec
+    if args.config is not None:
+        import yaml
+        _rot = (yaml.safe_load(args.config.read_text()).get("controller") or {}).get("task_rotation")
+        if _rot is not None:
+            effective = np.asarray(_rot, dtype=np.float64).reshape(3, 3)[:, 0]
+            if float(effective @ drive_vec) < 0:
+                print(f"  note: config drives {np.round(effective, 4)}, the OPPOSITE end of "
+                      f"the {args.drive_axis} line from the render's {np.round(drive_vec, 4)}. "
+                      "Same axis, opposite direction -- the pump sign follows the config.")
+    check_pump_sign(asset, arm_q, effective)
     if args.stage == "axes":
         return 0
 

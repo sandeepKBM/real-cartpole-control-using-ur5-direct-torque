@@ -260,6 +260,63 @@ def find_hanging_and_inverted_angle(model, data, pend_qpos_adr: int) -> tuple[fl
     return hanging, inverted
 
 
+def measure_pivot_coupling(model, arm_q, hanging_angle: float, drive_axis_world) -> float:
+    """Q/a: hinge generalized force per unit pivot acceleration along
+    ``drive_axis_world``, evaluated at the HANGING equilibrium.
+
+    Q = -m * n_hat . (r x u), with n_hat the hinge axis, r = com - pivot, both
+    in world. This is the coefficient the energy law's SIGN depends on, and it
+    is a property of (pose, asset, drive axis) -- not a constant.
+
+    WHY THIS IS MEASURED AND NOT HARDCODED (2026-08-16). The law shipped with
+    ``a_energy = -k_e * ...``, a sign taken from ONE measurement at ONE pose in
+    ONE direction. Measured across the configurations actually in use:
+
+        w2=-90, realrod, world X   c0 = -0.001993   -k_e PUMPS  (Goal 1's flip)
+        ARM_Q0, default, world X   c0 = +0.002035   -k_e DAMPS
+        ARM_Q0, default, in-plane  c0 = +0.002841   -k_e DAMPS
+
+    So the hardcoded sign was correct only where it was validated, and every
+    ARM_Q0 swing-up ever run was fighting a damper -- the law removing exactly
+    the energy it was written to add. Symptom: the pendulum decays to rest while
+    the drive saturates its clip, and k_e becomes inert (k_e=0 and k_e=50 give
+    identical results, because both end at rest).
+
+    A wrong gain is mistuned; a wrong sign inverts the objective. Hence measured.
+    """
+    import mujoco as _mj
+
+    data = _mj.MjData(model)
+    jid = _mj.mj_name2id(model, _mj.mjtObj.mjOBJ_JOINT, "/pendulum_hinge")
+    if jid < 0:
+        jid = _mj.mj_name2id(model, _mj.mjtObj.mjOBJ_JOINT, "pendulum_hinge")
+    data.qpos[:6] = np.asarray(arm_q, dtype=np.float64).reshape(6)
+    data.qpos[model.jnt_qposadr[jid]] = float(hanging_angle)
+    data.qvel[:] = 0.0
+    _mj.mj_forward(model, data)
+    n = data.xmat[model.jnt_bodyid[jid]].reshape(3, 3) @ model.jnt_axis[jid]
+    n = n / np.linalg.norm(n)
+    pivot = np.asarray(data.xanchor[jid], dtype=np.float64).copy()
+    bid = int(model.jnt_bodyid[jid])
+    mass, com = 0.0, np.zeros(3)
+    for b in range(model.nbody):          # every body outboard of the hinge
+        p, hit = b, False
+        while p > 0:
+            if p == bid:
+                hit = True
+                break
+            p = int(model.body_parentid[p])
+        if hit and model.body_mass[b] > 0:
+            mass += float(model.body_mass[b])
+            com += float(model.body_mass[b]) * np.asarray(data.xipos[b], dtype=np.float64)
+    if mass <= 0:
+        raise ValueError("no mass outboard of the pendulum hinge -- wrong joint?")
+    com /= mass
+    u = np.asarray(drive_axis_world, dtype=np.float64)
+    u = u / np.linalg.norm(u)
+    return float(-mass * float(n @ np.cross(com - pivot, u)))
+
+
 def run_energy_swingup_trial(
     model,
     k_e: float,
@@ -357,7 +414,15 @@ def run_energy_swingup_trial(
     # that skipped the re-reset was a silent no-op that reproduced the unfixed
     # numbers to four decimals, which is indistinguishable from "the fix did not
     # help" unless the frame is checked directly.
-    _task_rot = (config.get("controller") or {}).get("task_rotation")
+    # ENERGY-LAW SIGN, measured for THIS (pose, asset, drive axis). See
+    # measure_pivot_coupling. sign(K) must equal sign(c0) or the law damps.
+    _rot_cfg = (config.get("controller") or {}).get("task_rotation")
+    _drive_axis = (np.asarray(_rot_cfg, dtype=np.float64).reshape(3, 3)[:, 0]
+                   if _rot_cfg is not None else np.array([1.0, 0.0, 0.0]))
+    _c0 = measure_pivot_coupling(model, arm_q, hanging_angle, _drive_axis)
+    energy_sign = -1.0 if _c0 < 0.0 else 1.0
+
+    _task_rot = _rot_cfg
     if _task_rot is not None:
         adapter.configure_task_frame(
             task_rotation=np.asarray(_task_rot, dtype=np.float64).reshape(3, 3))
@@ -468,7 +533,9 @@ def run_energy_swingup_trial(
             # not have recovered the correct sign by flipping k_e either. The
             # bound is left positive and the sign is fixed here instead, so
             # "larger k_e = more pumping" now holds.
-            a_energy = -k_e * thetadot * np.cos(phi) * (e_top - E)
+            # energy_sign is MEASURED, not assumed: -1.0 reproduces the shipped
+            # law exactly wherever the shipped sign was correct (c0 < 0).
+            a_energy = energy_sign * k_e * thetadot * np.cos(phi) * (e_top - E)
             a_recenter = -k_pos * (target_x - x0) - k_vel * target_x_vel
             a_cmd = float(np.clip(a_energy + a_recenter, -a_max, a_max))
 
