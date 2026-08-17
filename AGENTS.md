@@ -1060,6 +1060,31 @@ Do-not-recreate (gravity/dynamics bugs, still relevant):
 - Never silently change units, control rate, action scaling, torque limits, or checkpoint
   selection; state control-rate and scaling assumptions when touching controllers.
 - Preserve old configs — add new named configs instead of mutating shared ones.
+- **A TEST THAT NEVER EXERCISES THE PATH IS NOT COVERAGE (2026-08-17).** Write the test at the
+  setting the production run actually uses, not the default that happens to be convenient.
+  The Optuna backend shipped with 7 passing tests, ALL of which ran at `workers=1` -- so none
+  of them touched the parallel path, and the parallel path was wrong: `study.optimize(n_jobs=N)`
+  parallelises with THREADS, and these objectives are Python-level rollout loops holding the
+  GIL. Measured 1 process at **114% total CPU with n_jobs=48**, i.e. ~1.1x. At 1200 trials it
+  would have been ~7 h -- SLOWER than the DE run it replaced, inverting the entire point of
+  the backend, while every test stayed green. Fixed with an ask/tell process pool (12.8 s ->
+  1.9 s on 8 workers) and a test that FAILS on the thread version by asserting a real speedup.
+  Generalise: when a feature exists to change behavior under load, scale, or parallelism, the
+  test must run it under that condition. Otherwise the suite certifies the one case nobody runs.
+- **VERIFY THE EFFECT, NOT THE INVOCATION (2026-08-17).** Five silent no-ops in one session,
+  all shaped identically -- the operation appears to succeed:
+  * a config parser that never read the keys, so the YAML could not enable the feature;
+  * an edit whose pattern did not match, so only a header comment landed;
+  * a call placed after the `reset()` that consumes it, reproducing the unfixed numbers to
+    FOUR DECIMALS -- indistinguishable from "the fix did not help";
+  * a CLI flag that parsed and was then discarded (`controller_kind=controller_kind`,
+    a bare name absent from that scope), so the run used a different controller than the
+    command line said;
+  * a `git add` that hit `fatal: pathspec ... did not match` -- which aborts the WHOLE add --
+    leaving a commit that contained only a rename while reporting success.
+  Check the downstream state: re-parse the config, assert the monitor took the rotation,
+  confirm the flag reached the CONTEXT and not just argparse, `git show --stat` the commit.
+  A hash, a green test, or an exit code is not evidence that the intended thing happened.
 - **LOOK AT THE POSE BEFORE YOU RUN IT (2026-08-16). Mandatory, and it needs a HUMAN.**
   Before dispatching any swing-up or balance run, render the pose with
   `tools/diagnostics/render_pose_task_axes.py`, SHOW IT TO THE USER, and ask which axis of
