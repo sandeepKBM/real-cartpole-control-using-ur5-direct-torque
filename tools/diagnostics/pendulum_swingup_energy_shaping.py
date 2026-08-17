@@ -802,6 +802,16 @@ def build_parser() -> argparse.ArgumentParser:
                              "preserves historical behavior. Raise it when a search "
                              "reports best a_max at the ceiling AND no guard fired -- "
                              "that means the bound, not safety, capped the result.")
+    parser.add_argument("--search-backend", default="de", choices=["de", "optuna"],
+                        help="de = differential_evolution (unchanged default). optuna = "
+                             "TPE, typically a comparable optimum in ~10-20x fewer "
+                             "rollouts on this 6-D space. A faster optimizer does NOT fix "
+                             "a broken objective: when a result looks insensitive to a "
+                             "parameter, SWEEP that parameter -- flat responses are how "
+                             "this lane's real bugs were found (k_e=0 == k_e=50).")
+    parser.add_argument("--n-trials", type=int, default=None,
+                        help="optuna only: evaluation budget. Set EQUAL to the DE count "
+                             "to compare optimizer quality rather than budget.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--duration-s", type=float, default=6.0,
                         help="Trial duration used inside the search objective.")
@@ -839,10 +849,14 @@ def main(argv=None) -> int:
     # pendulum_swingup_multi_kick imports FROM this module at import time; a
     # top-level import here would be circular.
     from tools.diagnostics.pendulum_swingup_multi_kick import _de_workers
-    res = differential_evolution(
+    from tools.diagnostics.pendulum_search_backends import minimize as _minimize
+
+    res = _minimize(
         functools.partial(objective, ctx=ctx, duration_s=args.duration_s),
-        bounds, maxiter=args.maxiter, popsize=args.popsize, tol=1e-4,
-        seed=args.seed, workers=_de_workers(), polish=False)
+        bounds, backend=args.search_backend, maxiter=args.maxiter,
+        popsize=args.popsize, seed=args.seed, workers=_de_workers(),
+        n_trials=args.n_trials)
+    print(f"search backend={res.backend}  evaluations={res.nfev}")
     print(f"Best params: k_e={res.x[0]:.4f}, a_max={res.x[1]:.4f}, k_pos={res.x[2]:.4f}, "
           f"k_vel={res.x[3]:.4f}, kick_amplitude_m={res.x[4]:.4f}, kick_duration_s={res.x[5]:.4f}")
     print(f"Best cost: {res.fun:.4f}")
