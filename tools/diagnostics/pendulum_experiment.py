@@ -130,6 +130,58 @@ def check_axis_or_die(pendulum_xml: Path, arm_q: np.ndarray, drive: str, force: 
         print(f"  NOTE: {100 * (1 - min(kap, kh)):.0f}% of this axis is not doing useful work.")
 
 
+def check_guard_frame_or_die(config: Path | None, drive_vec, drive: str) -> None:
+    """PREFLIGHT: the drift guard must resolve in the SAME basis the controller
+    drives in.
+
+    If the drive axis is not a world axis and the config does not carry a
+    ``task_rotation``, the ImpedanceSafetyMonitor measures displacement along
+    WORLD axes while the controller commands a diagonal -- so legitimate on-axis
+    travel is counted as lateral drift and the guard fires on the motion the
+    controller was told to produce.
+
+    Measured at ARM_Q0 2026-08-16, this cost a whole day's worth of wrong
+    conclusions. Drive axis [0.716 0.698 0], so 0.698 of every metre travelled
+    lands in world Y; against the 0.06 m guard that caps useful travel at
+    0.086 m while the validated flip needed 0.187 m. The visible symptom was a
+    swing-up search that "chose" a 20x-too-weak pump gain (k_e 13.58 vs the
+    277.75 that flips) -- every stronger value tripped |Y-Y0| at 0.77 s. The
+    guard was selecting the gain, and nothing in the logs said so: no guard
+    fired at the chosen point, and the search looked converged.
+
+    This is NOT a licence to widen a guard. The threshold and the number of
+    checked components are unchanged; only the axes they resolve onto.
+    """
+    v = np.asarray(drive_vec, dtype=np.float64)
+    off_world = float(np.min([np.linalg.norm(v - e) for e in
+                              (np.eye(3).tolist() + (-np.eye(3)).tolist())]))
+    if off_world < 1e-6:
+        return                      # a world axis: the world-frame guard is correct
+    rot = None
+    if config is not None:
+        import yaml
+        rot = (yaml.safe_load(config.read_text()).get("controller") or {}).get("task_rotation")
+    if rot is None:
+        raise SystemExit(
+            f"REFUSING: --drive-axis {drive} = {np.round(v, 4)} is NOT a world axis, but "
+            f"{'no --config was given' if config is None else config.name + ' sets no controller.task_rotation'}"
+            ". The drift guard would resolve in WORLD axes while the controller drives a "
+            "diagonal, counting on-axis travel as lateral drift and capping the run "
+            "without ever reporting why. Give a config whose task_rotation puts this axis "
+            "on row 0."
+        )
+    r0 = np.asarray(rot, dtype=np.float64).reshape(3, 3)[:, 0]
+    align = abs(float(r0 @ (v / np.linalg.norm(v))))
+    print(f"  guard frame  config row 0 vs drive axis: |cos| = {align:.6f}")
+    if align < 0.999:
+        raise SystemExit(
+            f"REFUSING: the config's task_rotation row 0 is {np.round(r0, 4)} but the "
+            f"axis just checked is {np.round(v, 4)} (|cos| = {align:.4f}). The guard and "
+            "the drive would resolve in DIFFERENT bases, which is the same bug in a "
+            "harder-to-see form."
+        )
+
+
 def backend_for(pose_name: str, asset_name: str, drive: str) -> str:
     """toolY where it can express the request, generic otherwise -- and say why."""
     if drive == "tool-y" and pose_name == "arm_q0" and asset_name == "default":
@@ -167,6 +219,8 @@ def main(argv=None) -> int:
     print(f"pose  {pose_name}  {list(np.round(arm_q, 6))}")
     print(f"asset {args.asset}  ({asset.name})")
     check_axis_or_die(asset, arm_q, args.drive_axis, args.i_know_this_axis_is_weak)
+    _, _, drive_vec, _ = axis_alignment(asset, arm_q, args.drive_axis)
+    check_guard_frame_or_die(args.config, drive_vec, args.drive_axis)
     if args.stage == "axes":
         return 0
 
