@@ -336,8 +336,7 @@ def run_curved_swingup_trial(
     # -1.0 (the shipped constant) is correct at Goal 1's pose and WRONG at the
     # singular ARM_Q0; see measure_pivot_coupling.
     from tools.diagnostics.pendulum_swingup_energy_shaping import measure_pivot_coupling
-    _c0 = measure_pivot_coupling(model, arm_q, hanging_angle, np.array([1.0, 0.0, 0.0]))
-    energy_sign = -1.0 if _c0 < 0.0 else 1.0
+    # (energy sign is resolved AFTER the pump basis is built -- see below)
     if constants is None:
         constants = derive_pendulum_constants(model, arm_q)
     mgr = constants.mgr_nm
@@ -345,6 +344,22 @@ def run_curved_swingup_trial(
     e_top = constants.e_top_j
 
     par_hat, vert_hat, n_hat = compute_pump_basis(model, arm_q, hanging_angle)
+    # ENERGY SIGN, measured along par_hat -- the direction this law actually
+    # drives. compute_pump_basis ALREADY flips (par_hat, vert_hat) together when
+    # the coupling comes out positive, so this is guaranteed to resolve to -1.0
+    # and reproduce the shipped law exactly. It is kept as a CHECK, not a fix:
+    # if the basis construction ever stops self-correcting, this catches it
+    # instead of silently inverting the pump.
+    #
+    # A previous attempt measured this along WORLD X and got +0.002035 -> +1,
+    # which INVERTED a law that was already correct. It cost two full searches:
+    # 1.2417 rad (plain OSC) and 1.9661 rad (2-axis), both worse than the
+    # single-axis 1.5105 they were meant to beat. The single-axis lane genuinely
+    # needed a measured sign; this one never did. Same fix, opposite verdict --
+    # which is exactly why the axis it is measured along has to be the one the
+    # law drives.
+    _c0 = measure_pivot_coupling(model, arm_q, hanging_angle, par_hat)
+    energy_sign = -1.0 if _c0 < 0.0 else 1.0
     R = pumping_rotation_matrix(tool_x=vert_hat, tool_y=par_hat, tool_z=n_hat)
 
     data = mujoco.MjData(model)
