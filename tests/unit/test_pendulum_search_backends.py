@@ -76,3 +76,32 @@ def test_optuna_respects_an_explicit_budget():
     """Needed for the only fair optimizer comparison: EQUAL evaluation counts."""
     r = minimize(_f, BOUNDS, backend="optuna", n_trials=60, seed=0)
     assert r.nfev == 60
+
+
+# ============ 4. OPTUNA MUST ACTUALLY PARALLELISE ========================
+
+def _slow(x):
+    """Module-level so fork+Pool can pickle it; burns real CPU so a
+    thread-based 'parallelism' shows up as no speedup at all."""
+    import time
+    t0 = time.time()
+    while time.time() - t0 < 0.05:
+        pass
+    return float((x[0] - 1.3) ** 2 + (x[1] + 0.7) ** 2)
+
+
+def test_optuna_uses_processes_not_threads():
+    """study.optimize(n_jobs=...) is THREAD-based, and these objectives are
+    Python-level rollout loops holding the GIL -- measured 114% total CPU with
+    n_jobs=48, i.e. ~1.1x. That would make TPE SLOWER than DE in wall clock
+    despite needing far fewer evaluations, turning the whole point of the
+    backend upside down. Guards the ask/tell process pool."""
+    import time
+    t0 = time.time()
+    minimize(_slow, BOUNDS, backend="optuna", n_trials=24, seed=0, workers=1)
+    serial = time.time() - t0
+    t0 = time.time()
+    minimize(_slow, BOUNDS, backend="optuna", n_trials=24, seed=0, workers=6)
+    parallel = time.time() - t0
+    assert parallel < 0.5 * serial, (
+        f"no real parallelism: {serial:.2f}s serial vs {parallel:.2f}s on 6 workers")

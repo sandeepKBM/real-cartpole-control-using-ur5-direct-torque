@@ -88,10 +88,30 @@ def minimize(
             direction="minimize",
             sampler=optuna.samplers.TPESampler(seed=seed, n_startup_trials=max(20, 4 * len(bounds))),
         )
-        # n_jobs uses threads; the objective releases the GIL inside MuJoCo, and
-        # each trial recompiles its own model, so this parallelises acceptably
-        # without the fork-pool that DE needs.
-        study.optimize(_obj, n_trials=budget, n_jobs=max(1, int(workers)), show_progress_bar=False)
+        # ASK/TELL over a PROCESS pool, not study.optimize(n_jobs=...).
+        # n_jobs is THREAD-based, and these objectives are Python-level rollout
+        # loops that hold the GIL -- measured 114% total CPU with n_jobs=48,
+        # i.e. ~1.1x parallelism, which would make TPE SLOWER than DE in wall
+        # clock despite needing far fewer evaluations. Batching ask() -> Pool ->
+        # tell() keeps TPE's sequential model updates between batches while
+        # getting real parallelism inside them.
+        n_proc = max(1, int(workers))
+        if n_proc == 1:
+            study.optimize(_obj, n_trials=budget, show_progress_bar=False)
+        else:
+            import multiprocessing as mp
+
+            ctx_mp = mp.get_context("fork")
+            done = 0
+            with ctx_mp.Pool(n_proc) as pool:
+                while done < budget:
+                    batch = min(n_proc, budget - done)
+                    trials = [study.ask() for _ in range(batch)]
+                    xs = [[t.suggest_float(f"p{i}", lo, hi)
+                           for i, (lo, hi) in enumerate(bounds)] for t in trials]
+                    for t, v in zip(trials, pool.map(objective, xs)):
+                        study.tell(t, float(v))
+                    done += batch
         best = study.best_trial
         x = np.array([best.params[f"p{i}"] for i in range(len(bounds))], dtype=np.float64)
         return SearchResult(x, float(best.value), len(study.trials), "optuna")
