@@ -7,6 +7,14 @@
 # elapsed, 2 runnable vs 1216 sleeping, no output past the search banner. Memory
 # was NOT the cause (81.4 GB cgroup cap vs ~30 GB used), so worker count is the
 # remaining suspect. 32 leaves headroom on a shared teaching machine either way.
+#
+# LAUNCH NOTE: invoke over SSH WITH KEEPALIVES --
+#   ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o TCPKeepAlive=yes ...
+# A previous run of this exact script died to "client_loop: send disconnect:
+# Broken pipe" ~2 min in: the remote job is a FOREGROUND child of the ssh
+# session (deliberately, since AGENTS.md 8 documents nohup+disown being
+# unreliable on these hosts when logind Linger is off), so a transient network
+# drop kills it. Keepalives cover the drop without giving up that property.
 set -euo pipefail
 cd /common/users/ss5772/real_Cartpole
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
