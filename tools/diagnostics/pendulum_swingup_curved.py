@@ -299,6 +299,7 @@ def run_curved_swingup_trial(
     arm_q: np.ndarray | None = None,
     constants: PendulumConstants | None = None,
     enable_vertical: bool = True,
+    controller_kind: str | None = None
 ) -> dict:
     """CURVED 2-D pivot-pumping swing-up trial.
 
@@ -327,6 +328,7 @@ def run_curved_swingup_trial(
     from tools.diagnostics.pendulum_swingup_energy_shaping import load_config
 
     config = load_config(CONFIG_PATH if config_path is None else Path(config_path))
+    controller_kind = CONTROLLER_KIND if controller_kind is None else str(controller_kind)
     arm_q = GOAL1_ARM_Q if arm_q is None else np.asarray(arm_q, dtype=np.float64).reshape(6)
     # MEASURED energy sign for THIS (pose, asset, pump direction). a_pump and
     # a_vert come from one cross-product geometry, so a single sign governs
@@ -498,7 +500,7 @@ def default_context() -> PendulumRunContext:
         pendulum_xml=str(PENDULUM_XML),
         arm_q=tuple(float(v) for v in GOAL1_ARM_Q),
         config_path=str(CONFIG_PATH),
-        controller_kind=CONTROLLER_KIND,
+        controller_kind=controller_kind,
     )
 
 
@@ -510,7 +512,11 @@ def context_from_args(args) -> PendulumRunContext:
         pendulum_xml=pendulum_xml,
         arm_q=arm_q,
         config_path=str(Path(args.config).resolve()),
-        controller_kind=CONTROLLER_KIND,
+        # Read the FLAG. This previously referenced a bare `controller_kind`
+        # that exists nowhere in scope, so --controller-kind parsed fine and was
+        # then silently discarded -- the run would use plain OSC while the
+        # command line said otherwise.
+        controller_kind=(args.controller_kind or CONTROLLER_KIND),
     )
 
 
@@ -543,7 +549,13 @@ def objective(x, ctx: PendulumRunContext | None = None, duration_s: float = 6.0,
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="CURVED (2-D) pivot-pumping swing-up search, Goal 1 pose.")
-    add_common_pendulum_args(parser, default_config=CONFIG_PATH, with_controller_kind=False)
+    add_common_pendulum_args(parser, default_config=CONFIG_PATH, with_controller_kind=True)
+    # controller_kind is now selectable: the CURVED 2-D pump can run through the
+    # 2-AXIS controller (x_task_yz_corridor_qp), whose in-plane config already
+    # tracks task_axis_rows (0,2) -- the horizontal drive and the vertical, both
+    # perpendicular to the hinge, which is exactly the pair curved pumping needs.
+    # Plain OSC (the previous hardcoded default) can only drive WORLD X here,
+    # wasting 28% of the horizontal component along the hinge at ARM_Q0.
     # add_common_pendulum_args hardcodes --pendulum-xml's default to
     # DEFAULT_PENDULUM_XML (the local-Z-hinge asset) regardless of
     # default_config -- override it here so an unqualified run uses Goal 1's
