@@ -11,7 +11,7 @@ set -euo pipefail
 cd /common/users/ss5772/real_Cartpole
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 export DE_WORKERS="${DE_WORKERS:-32}"
-OUT=/common/home/ss5772/.claude/jobs/3a0b9f03/tmp/goal2_inplane.json
+OUT=/common/home/ss5772/.claude/jobs/3a0b9f03/tmp/goal2_inplane_signfixed.json
 mkdir -p "$(dirname "$OUT")"
 echo "host=$(hostname -s) cores=$(nproc) load=$(uptime|sed 's/.*average: //') DE_WORKERS=$DE_WORKERS"
 exec /common/users/ss5772/miniforge3/envs/mujoco_ur5e/bin/python \
@@ -20,6 +20,6 @@ exec /common/users/ss5772/miniforge3/envs/mujoco_ur5e/bin/python \
   --start-q-rad -2.3688 -2.1801 -1.8838 -0.7962 0.004714693 0.0206 \
   --controller-kind x_task_yz_corridor_qp \
   --config config/ur5e_mujoco_torque_x_task_inplane_goal2.yaml \
-  --a-max-upper 12.0 --maxiter 40 --popsize 16 --seed 2 \
+  --a-max-upper 12.0 --maxiter 60 --popsize 24 --seed 2 \
   --duration-s 10.0 --final-duration-s 14.0 \
   --output-json "$OUT"
