@@ -109,6 +109,19 @@ JOINT_NAMES = (
 V_MAX_MPS = 1.00
 AXIS_NAMES = ("world_X", "world_Y", "world_Z")
 
+# DIRECT FLOOR GUARD. The pendulum geoms are contype=0/conaffinity=0, so the rod
+# passes THROUGH the floor (world z = 0) with no contact force, no penetration
+# warning, and no error -- floor penetration is SILENT. Worse, the shared
+# ImpedanceSafetyMonitor's per-axis max_abs_z_drift_m is NOT consulted on the
+# task_rotation path (controller_core/safety.py::check only applies the single
+# max_abs_orthogonal_drift_m there), so a measured 4.9 cm downward EE drift --
+# tip to 0.0144 m, 1.4 cm off the floor -- did NOT trip any guard. This is a
+# positive guard on the ACTUAL hazard (tip world z), local to the sim rollout
+# because the tip site needs mujoco and cannot live in the numpy-only monitor.
+# 0.03 m matches the config's intended max_abs_z_drift_m=0.035 (hanging tip
+# 0.063 - 0.035 = 0.028) rounded to a clean 3 cm hard floor margin.
+FLOOR_MARGIN_M = 0.03
+
 
 @dataclass(frozen=True)
 class EnergyScheduleParams:
@@ -424,7 +437,13 @@ def run_energy_scheduled_trial(
             data.ctrl[:6] = np.asarray(tau, dtype=np.float64).reshape(6)
             mujoco.mj_step(model, data)
             if tip_site >= 0:
-                min_tip_z = min(min_tip_z, float(data.site_xpos[tip_site][2]))
+                tip_z_now = float(data.site_xpos[tip_site][2])
+                min_tip_z = min(min_tip_z, tip_z_now)
+                if tip_z_now < FLOOR_MARGIN_M and not guard_fired:
+                    guard_fired = True
+                    guard_reason = f"tip world z {tip_z_now:.4f} < floor margin {FLOOR_MARGIN_M} m"
+                    guard_t = t
+                    break
             if track_history:
                 history.append({"t": t, "phase": "lqr", "a_cmd": a_cmd,
                                 "phi_inv_deg": float(np.degrees(phi_inv)),
@@ -490,7 +509,13 @@ def run_energy_scheduled_trial(
         mujoco.mj_step(model, data)
 
         if tip_site >= 0:
-            min_tip_z = min(min_tip_z, float(data.site_xpos[tip_site][2]))
+            tip_z_now = float(data.site_xpos[tip_site][2])
+            min_tip_z = min(min_tip_z, tip_z_now)
+            if tip_z_now < FLOOR_MARGIN_M and not guard_fired:
+                guard_fired = True
+                guard_reason = f"tip world z {tip_z_now:.4f} < floor margin {FLOOR_MARGIN_M} m"
+                guard_t = t
+                break
         if track_history:
             history.append({"t": t, "phase": "swingup", "blend": blend,
                             "amplitude": amplitude, "deadband": deadband, "a_cmd": a_cmd,
