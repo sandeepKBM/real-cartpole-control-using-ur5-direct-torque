@@ -431,12 +431,36 @@ def default_context() -> PendulumRunContext:
 # elsewhere in this repo -- AGENTS.md Sec.7 -- so both signs are swept, not
 # just magnitude).
 # ---------------------------------------------------------------------------
+# EXTENDED 2026-08-19 TO COVER THE REAL ARRIVAL. The set below used to stop at
+# |phi| = 12 deg and |thetadot| = 3.0 rad/s. The measured swing-up handoff
+# arrives at phi = -18.0 deg with thetadot = +3.42 rad/s -- OUTSIDE the set on
+# BOTH axes -- so the search was fitting K on a set that does not contain its
+# own operating point. Consequence, measured: a retune scored BETTER on this
+# objective (cost 0.637 vs 0.742) and then DROPPED THE POLE at the real handoff
+# (|phi| -> 179.98 deg, lost between +0.5 s and +1 s), because it chose softer
+# gains and a_max 6.73 vs 9.07 that the perturbation set never punished.
+#
+# The added pairs follow the existing anti-diagonal pattern, which is not
+# arbitrary: capture is governed by the unstable mode s = thetadot + omega*phi
+# (omega = 10.8334), so a catchable state has phi and thetadot of OPPOSITE
+# sign. At (-18 deg, +3.42) that gives |s| ~ 0.02. Both signs are swept because
+# X-direction asymmetry is real and recurring here (AGENTS.md sec.7).
+#
+# STILL NOT THE WHOLE STORY, stated so it is not mistaken for one: every state
+# here starts with the ARM AT REST, while the real arrival has the arm
+# mid-stroke carrying cart velocity and tracking a reference that has been
+# running for seconds. That seam is exactly what broke the LQR half before
+# (AGENTS.md sec.0). This extension closes the pendulum-state gap, not the
+# arm-state gap.
 TUNING_STATES = [
     (np.radians(d), w)
     for d, w in [
         (3.0, 0.0), (-3.0, 0.0), (5.0, -1.0), (-5.0, 1.0),
         (8.0, -1.5), (-8.0, 1.5), (12.0, -2.0), (-12.0, 2.0),
         (0.0, -3.0), (0.0, 3.0),
+        # --- the real arrival, and a bracket beyond it ---
+        (18.0, -3.4), (-18.0, 3.4),
+        (22.0, -4.0), (-22.0, 4.0),
     ]
 ]
 
@@ -485,13 +509,31 @@ def tuning_objective(params, ctx: PendulumRunContext, duration_s: float = 4.0) -
 
 
 def search_lqr_gains(ctx: PendulumRunContext, *, maxiter: int, popsize: int, seed: int,
-                      duration_s: float) -> dict:
+                      duration_s: float, a_max_upper: float = 10.0) -> dict:
+    """``a_max_upper`` bounds the cart acceleration the LQR is allowed to ask for.
+
+    IT IS NOT A FREE PARAMETER -- it should come from the pose's MEASURED command
+    envelope. The historical default 10.0 has no relation to any measurement, and
+    the consequence is concrete: at ARM_Q0/wrist_2=-90 the search returned
+    a_max = 9.7238 (97% of this ceiling) and the resulting gain STABILISED THE
+    PENDULUM -- four of seven envelope cells ended within 1.3 deg of vertical --
+    while tripping |Y-Y0| > 0.03 m in every single one. The pole was held; the arm
+    could not execute the motion. The pose-hold ladder
+    (tools/diagnostics/pose_hold_orientation_check.py) measured this pose holding
+    a sustained command to ~1.0 m/s^2 and tripping by 1.5, so 10.0 authorised
+    roughly 5-10x what the arm delivers.
+
+    This is the same failure AGENTS.md already records for the SWING-UP search's
+    a_max bound, pointed the other way: there the bound was too tight and hid a
+    feasible flip; here it is too loose and produces an infeasible catch. Either
+    way an arbitrary bound, not the physics, decided the answer.
+    """
     bounds = [
         (-1.0, 4.0),   # log10(qx)
         (-1.0, 4.0),   # log10(qxdot)
         (-1.0, 6.0),   # log10(qphi)
         (-1.0, 5.0),   # log10(qphidot)
-        (0.5, 10.0),   # a_max
+        (0.5, float(a_max_upper)),   # a_max -- from the MEASURED envelope
     ]
     res = differential_evolution(
         functools.partial(tuning_objective, ctx=ctx, duration_s=duration_s),
@@ -499,7 +541,7 @@ def search_lqr_gains(ctx: PendulumRunContext, *, maxiter: int, popsize: int, see
         workers=_de_workers(), polish=False,
     )
     Q = _q_matrix(res.x)
-    a_max = float(np.clip(res.x[4], 0.3, 10.0))
+    a_max = float(np.clip(res.x[4], 0.3, float(a_max_upper)))
     model = ctx.build_model()
     damping = hinge_damping(model)
     A, B = linearize_cartpole(ctx.constants, damping, model, ctx.arm_q_array, ctx.inverted_angle)
@@ -579,6 +621,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="After the gain search, also run the capture-envelope grid "
                              "(phi0 x thetadot0) with the K=0 counterfactual check.")
     parser.add_argument("--envelope-duration-s", type=float, default=5.0)
+    parser.add_argument("--a-max-upper", type=float, default=10.0,
+                        help="Upper bound on the LQR's commanded cart acceleration. "
+                             "Set it from the pose's MEASURED command envelope "
+                             "(pose_hold_orientation_check.py), not by habit. Default "
+                             "10.0 preserves historical behaviour and is known to "
+                             "authorise ~5-10x what the arm delivers at ARM_Q0.")
     return parser
 
 
@@ -587,7 +635,8 @@ def main(argv=None) -> int:
     ctx = context_from_args(args).resolve()
     print(describe_context(ctx))
     print("=== searching 4-state cartpole LQR Q/R (+a_max) via differential_evolution ===")
-    result = search_lqr_gains(ctx, maxiter=args.maxiter, popsize=args.popsize, seed=args.seed,
+    result = search_lqr_gains(ctx, a_max_upper=float(args.a_max_upper),
+                              maxiter=args.maxiter, popsize=args.popsize, seed=args.seed,
                                duration_s=args.duration_s)
     print("Q_diag =", result["Q_diag"], "a_max =", result["a_max"])
     print("K =", result["K"])

@@ -1,0 +1,143 @@
+# UNVALIDATED demonstration config: config/ur5e_mujoco_torque_osc_tuned.yaml with
+# singularity-consistent inversion (SCI) turned on. Added 2026-08-12.
+#
+# NOT VALIDATED, NOT A HARDWARE CANDIDATE. This exists so the new mechanism is
+# reproducible from a named config; it has NOT been through this repo's 4-category
+# rigor sweep (canonical grid / long holds / large displacements / torque-scale
+# robustness) at any height_alpha, and has never been near real hardware. The
+# real-hardware default remains config/ur5e_mujoco_torque_osc_tuned.yaml,
+# unmodified.
+#
+# WHAT CHANGES. controller_core/x_axis_cartesian_impedance handles ill-conditioning
+# with two UNIFORM (isotropic) mechanisms today: a scalar eps*I inside
+# Lambda = (J M^-1 J^T + eps I)^-1, and singular_scale (one scalar on the whole
+# wrench). At a UR wrist singularity exactly ONE task direction is genuinely lost.
+# svd_singularity_filtering replaces the scalar eps with a per-direction damping
+# lambda_i(sigma_i) (Chiaverini/Siciliano/Egeland, IEEE T-RA 10(2), 1994) computed
+# in the eigenbasis of J M^-1 J^T, so well-conditioned directions get the exact
+# undamped inverse and only the lost direction is backed off; singular_scale is
+# bypassed while the flag is on (jacobian_singular_cond_max is left untouched and
+# still governs the default path -- it is already 1.0e18 here anyway).
+#
+# MEASURED, at the real HEIGHT_ALPHA_0_5_Q wrist singularity (cond(J) = 7.3e16),
+# via tools/diagnostics/svd_singularity_filtering_sim_check.py:
+#   mass-weighted sigma            = [0, 0.1997, 0.3150, 0.5306, 3.356, 4.350]
+#   fraction of ideal kept, eps=0.1: [0, 0.285,  0.498,  0.738,  0.991, 0.995]
+#   fraction of ideal kept, SCI    : [0, 1.000,  1.000,  1.000,  1.000, 1.000]
+#   pure X-acceleration command, delivered: 72.77% (uniform) -> 100.00% (SCI)
+#   cross-axis leak norm                  : 2.5e-01 (uniform) -> 2.3e-14 (SCI)
+# Closed-loop move+hold at the same pose, both directions, move 1.5 s / hold 1.0 s,
+# zero guard trips in all eight runs (tracking fraction, uniform -> SCI):
+#   dx = +0.02 m: 91.11% -> 96.33%    dx = -0.02 m: 91.41% -> 96.40%
+#   dx = +0.05 m: 95.55% -> 98.10%    dx = -0.05 m: 95.48% -> 97.79%
+#
+# KNOWN RISK, the reason this is not proposed as a default. SCI is not uniformly
+# conservative: by construction it commands MORE force than today wherever the
+# task is well-conditioned. That is not confined to singular poses -- eps = 0.1 is
+# large compared to the mass-weighted sigma^2 this arm actually operates at, so at
+# the well-conditioned MEGA_SEARCH_WINNER_Q pose (cond(J) = 6.9) today's uniform
+# eps already keeps only 49-70% of the ideal response in the three translational
+# directions, and SCI commands 1.78x the task torque there. The tuned gains in
+# this file were never validated against that undamped response, and this repo has
+# prior evidence (see wrench_lambda_adaptive_regularization's docstring) that
+# reducing the wrench-shaping eps can cause joint-velocity blowup at
+# cond(J) ~ 1e3-1e4. Treat any use of this config as a gain-retuning exercise, not
+# a drop-in.
+#
+# Mutually exclusive with lambda_diagonal_shaping and with
+# wrench_lambda_adaptive_regularization (the controller raises rather than running
+# an unanalyzed combination). Compatible with lambda_adaptive_regularization, which
+# schedules the NULLSPACE-projector eps -- SCI deliberately does not touch that
+# projector.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  # Still read by the NULLSPACE-posture projector's Lambda, which SCI does not
+  # touch. It no longer damps the wrench-shaping Lambda while the flag below is on.
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  # --- the only functional difference from ur5e_mujoco_torque_osc_tuned.yaml ---
+  svd_singularity_filtering: true
+  # Sits in the seven-decade gap measured at HEIGHT_ALPHA_0_5_Q between the lost
+  # direction (sigma ~ 1.4e-8) and the smallest surviving one (sigma = 0.1997), so
+  # it damps exactly the genuinely lost direction there and nothing else.
+  svd_sigma_threshold: 0.05
+  # sqrt(0.1): lambda_max^2 == lambda_regularization, so at the exact singularity
+  # the lost direction gets exactly today's damping magnitude.
+  svd_lambda_max: 0.31622776601683794
+  # ---------------------------------------------------------------------------
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  # Unchanged from the tuned config -- no guard, threshold or tolerance is
+  # weakened by this config.
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

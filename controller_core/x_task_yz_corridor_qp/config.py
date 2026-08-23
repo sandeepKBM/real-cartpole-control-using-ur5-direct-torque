@@ -27,6 +27,10 @@ would silently change the physical meaning of the task
 
 from __future__ import annotations
 
+import numpy as np
+
+from controller_core.x_axis_cartesian_impedance.config import JOINT_NAME_ORDER
+
 import math
 
 from dataclasses import dataclass
@@ -157,6 +161,45 @@ class XTaskYZCorridorQPConfig(TorqueTaskQPConfig):
     #: pose-dependent and is NOT checked -- at ARM_Q0, dropping shoulder_pan
     #: takes ``cond(J_reduced)`` from 10.1 to 519 (still rank 4). Screen a new
     #: index set against the intended start pose before trusting it.
+    #: Per-joint multipliers on the posture spring/damper, length 6, in
+    #: JOINT_NAME_ORDER. ``None`` (default) means uniform weight 1.0 for every
+    #: joint, which reproduces the previous behaviour EXACTLY -- the term is
+    #: then untouched, not multiplied by an array of ones.
+    #:
+    #: WHY THIS EXISTS. ``kp_posture``/``kd_posture`` are single scalars, so the
+    #: only way to hold ONE joint harder was to stiffen all six, which perturbs
+    #: every joint and invalidates the validated ``kp_posture = 25``. Concretely:
+    #: at Goal 1's pose ``wrist_2 = -90 deg`` is the entire reason the pose works
+    #: (cond(J) 7.20 instead of 1395.76, hinge horizontal), yet it drifts 11.6 deg
+    #: over a swing-up because posture holds it only as weakly as everything
+    #: else. Excluding it from the task instead would hold it, but costs a rank:
+    #: with joints {0,4} both excluded the 4x4 (X + 3 orientation) task matrix
+    #: drops to rank 3, making one rotational direction uncontrollable -- exactly
+    #: where the orientation guard already binds. A per-joint weight holds the
+    #: joint WITHOUT removing it from the task, so rank 4 is preserved.
+    #: TRUE ENFORCEMENT of joint motion, as opposed to the posture spring.
+    #: ``posture_joint_weights`` above only makes a joint STIFFER -- it resists
+    #: motion but nothing bounds it, so a large enough disturbance moves the
+    #: joint as far as the torque budget allows. These rows put a high-order
+    #: control barrier on |q_j - q_j(0)| directly in the QP, so a torque that
+    #: would breach the bound is INFEASIBLE rather than merely penalised.
+    #:
+    #: Implemented by reusing ``_corridor_rows`` unchanged: that function builds
+    #: the HOCBF pair for any scalar whose Jacobian row maps qdot to the
+    #: scalar's rate, and for joint j that row is simply the unit vector e_j
+    #: (qdot_j = e_j . qdot). No new barrier algebra.
+    #:
+    #: NOTE this can make the QP infeasible if the bound fights the task -- that
+    #: is the point of a hard constraint, and it is why the half-width is
+    #: explicit rather than defaulted tight.
+    joint_corridor_enabled: bool = False
+    joint_corridor_joints: tuple[int, ...] = ()
+    joint_corridor_half_width_rad: float = 0.05
+    joint_corridor_alpha1: float = 20.0
+    joint_corridor_alpha2: float = 20.0
+
+    posture_joint_weights: tuple[float, ...] | None = None
+
     task_excluded_joints: tuple[int, ...] = (0,)
 
     # --- Which translation axes are TRACKED vs BOUNDED ---------------------
@@ -225,6 +268,53 @@ class XTaskYZCorridorQPConfig(TorqueTaskQPConfig):
     #: means "row 0 must be tracked" -- under ``"tool"`` that is tool X, not
     #: world X. The transport-axis guard is a ROW index check, not a world-axis
     #: check, so it is satisfied by the intended tool mapping [0, 1].
+    #: Rows (world/task indices, same space as ``task_axis_rows``) tracked in
+    #: VELOCITY ONLY: the position term ``kp*(pos_des - p)`` is dropped and the
+    #: row becomes ``kd*(vel_des - v)``.
+    #:
+    #: WHY THIS IS A ROW MODE AND NOT A SEPARATE CONTROLLER (2026-08-18). A
+    #: swing-up that must flip in one or two strokes needs a stiff, high-
+    #: bandwidth inner loop; the obvious build is a joint-velocity PD alongside
+    #: the QP, phase-switched. That would be a REGRESSION in the one thing this
+    #: pose is short of: a plain velocity PD carries no corridor, orientation or
+    #: manipulability CBF row, so drift protection would be weakest during the
+    #: single most aggressive phase -- and drift, not actuation, is what has
+    #: actually been ending these runs (measured: the LQR catch trips |Y-Y0| at
+    #: dX=0.070/dY=0.059 identically for a_max in {9.603, 14, 20, 30}).
+    #: Dropping one term from an existing task row keeps every CBF row, the
+    #: torque box, the joint exclusion and the posture weighting untouched.
+    #:
+    #: NO GAIN RE-DERIVATION IS NEEDED, and that is a derivation rather than an
+    #: omission: this repo's conversion is ``kp_QP = 400*Lambda`` and
+    #: ``kd_QP = 40*Lambda``, where 40 is OSC's VELOCITY gain. So the existing
+    #: kd_axis entry already IS the velocity-tracking gain for its row, in the
+    #: frame it was fitted in. What changes is its ROLE (damping -> tracking),
+    #: which is exactly the substitution AGENTS.md sec.7 warns about -- here the
+    #: number survives the role change because both roles read the same 40*Lambda.
+    #:
+    #: Also removes one integrator from the loop: the drive law produces an
+    #: acceleration that is otherwise double-integrated into a position target,
+    #: so a velocity row is fed the FIRST integral and carries strictly less lag.
+    #:
+    #: Must be a subset of ``task_axis_rows`` -- a row that is not tracked has
+    #: no position term to drop. Empty (default) => byte-identical behavior.
+    # NOTE (2026-08-18): friction_feedforward / friction_ff_coulomb_nm /
+    # friction_ff_viscous / friction_ff_qd_deadband are INHERITED from
+    # CartesianImpedanceConfig and already parsed by its
+    # from_controller_yaml_section (joint-name-keyed dicts for the two arrays).
+    # They were present but simply never READ by this controller -- which is
+    # what the parent config's header meant by "inherited but NOT wired into
+    # this controller". The controller now reads them; redeclaring them here
+    # would shadow the parent's parsing, so it deliberately does not.
+    #
+    # Set friction_ff_viscous explicitly to zeros in a config for this
+    # controller: the parent's default (0.4/0.15) cancels the model's viscous
+    # damping too, and the ablation that motivated wiring this up zeroed
+    # frictionloss ONLY and settled cleanly with viscous damping intact.
+    # Viscous damping is passive and stabilising -- there is no evidence this
+    # controller needs it cancelled, and real evidence it does not.
+    task_velocity_rows: tuple[int, ...] = ()
+
     task_frame: str = "world"
 
     #: EXPLICIT constant task basis, 3x3, columns = task axes in world coords
@@ -410,6 +500,40 @@ class XTaskYZCorridorQPConfig(TorqueTaskQPConfig):
     dual_sweeps: int = 4
     dual_root_iters: int = 10
 
+    @staticmethod
+    def _parse_joint_corridor_joints(raw) -> tuple[int, ...]:
+        """Validate joint indices: unique, in range, sorted for determinism."""
+        if raw is None:
+            return ()
+        out = sorted({int(v) for v in raw})
+        for j in out:
+            if not (0 <= j <= 5):
+                raise ValueError(
+                    f"joint_corridor_joints entries must be in 0..5, got {j}"
+                )
+        return tuple(out)
+
+    @staticmethod
+    def _parse_posture_joint_weights(raw) -> tuple[float, ...] | None:
+        """Validate ``posture_joint_weights``: 6 finite, non-negative floats."""
+        if raw is None:
+            return None
+        vals = list(raw)
+        if len(vals) != 6:
+            raise ValueError(
+                f"posture_joint_weights must have 6 entries (one per joint, "
+                f"JOINT_NAME_ORDER), got {len(vals)}"
+            )
+        out = []
+        for i, v in enumerate(vals):
+            f = float(v)
+            if not np.isfinite(f) or f < 0.0:
+                raise ValueError(
+                    f"posture_joint_weights[{i}] must be finite and >= 0, got {v!r}"
+                )
+            out.append(f)
+        return tuple(out)
+
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "XTaskYZCorridorQPConfig":
         base = TorqueTaskQPConfig.from_controller_yaml_section(ctrl)
@@ -489,6 +613,60 @@ class XTaskYZCorridorQPConfig(TorqueTaskQPConfig):
             base_kwargs["task_axis_rows"] = task_rows
         if corridor_rows is not None:
             base_kwargs["corridor_axis_rows"] = corridor_rows
+        # FRICTION FEEDFORWARD: same "not in the propagated subset" trap as the
+        # manipulability_cbf_* and lambda-shaping fields above. The dataclass
+        # fields are inherited from CartesianImpedanceConfig and ITS parser reads
+        # them, but TorqueTaskQPConfig.from_controller_yaml_section forwards only
+        # a fixed subset, so without this block a YAML saying
+        # `friction_feedforward: true` silently produces False and the term can
+        # never be enabled from a config at all. Verified by re-parsing, not by
+        # reading the file.
+        #
+        # Array form matches the parent's convention exactly -- joint-name-keyed
+        # mappings over JOINT_NAME_ORDER -- so the same YAML block means the same
+        # thing to both controllers.
+        base_kwargs["friction_feedforward"] = bool(ctrl.get("friction_feedforward", False))
+        for _key, _dflt in (
+            ("friction_ff_coulomb_nm", (5.0, 5.0, 5.0, 1.0, 1.0, 1.0)),
+            ("friction_ff_viscous", (0.4, 0.4, 0.4, 0.15, 0.15, 0.15)),
+        ):
+            if ctrl.get(_key) is not None:
+                _raw = ctrl[_key]
+                _vals = ([float(_raw[n]) for n in JOINT_NAME_ORDER]
+                         if isinstance(_raw, dict) else [float(v) for v in _raw])
+                if len(_vals) != 6:
+                    raise ValueError(f"{_key} must have 6 entries, got {len(_vals)}")
+                if not all(np.isfinite(_vals)):
+                    raise ValueError(f"{_key} contains NaN/Inf: {_vals}")
+                if any(v < 0.0 for v in _vals):
+                    # A negative entry adds friction-shaped torque ALONG the motion,
+                    # i.e. negative damping -- the opposite of compensation.
+                    raise ValueError(f"{_key} entries must be >= 0; got {_vals}")
+                base_kwargs[_key] = np.asarray(_vals, dtype=np.float64)
+            else:
+                base_kwargs[_key] = np.asarray(_dflt, dtype=np.float64)
+        _db = float(ctrl.get("friction_ff_qd_deadband", 0.05))
+        if not (_db > 0.0):
+            raise ValueError(f"friction_ff_qd_deadband must be > 0; got {_db}")
+        base_kwargs["friction_ff_qd_deadband"] = _db
+
+        raw_vel_rows = ctrl.get("task_velocity_rows", None)
+        if raw_vel_rows is not None:
+            vel_rows = tuple(sorted({int(r) for r in raw_vel_rows}))
+            if any(r < 0 or r > 2 for r in vel_rows):
+                raise ValueError(
+                    f"task_velocity_rows entries must be in 0..2; got {vel_rows}")
+            declared_task = tuple(base_kwargs.get("task_axis_rows", (0,)))
+            missing = [r for r in vel_rows if r not in declared_task]
+            if missing:
+                # A row with no position term to drop is a silent no-op, and a
+                # silent no-op here looks exactly like "velocity mode did not
+                # help" -- refuse instead.
+                raise ValueError(
+                    f"task_velocity_rows {vel_rows} must be a subset of "
+                    f"task_axis_rows {declared_task}; {missing} are not tracked rows")
+            base_kwargs["task_velocity_rows"] = vel_rows
+
         frame, frame_update = _parse_task_frame(
             ctrl.get("task_frame", None), ctrl.get("task_frame_update", None)
         )
@@ -500,11 +678,12 @@ class XTaskYZCorridorQPConfig(TorqueTaskQPConfig):
         if raw_rot is not None:
             # Validated with the SAME checker the drift monitor uses, so a basis
             # legal here cannot be illegal for the guard watching this run.
-            # Local imports: this module is otherwise numpy-free (see `import
-            # math` at the top), and importing safety at module scope would add
-            # an import cycle for a path most configs never take.
-            import numpy as np
-
+            # Local import: importing safety at module scope would add an import
+            # cycle for a path most configs never take. (numpy is imported at
+            # module scope now -- re-importing it HERE made `np` a function-local
+            # name for the whole method, so any earlier use of np in this same
+            # method raised UnboundLocalError. The comment that used to sit here
+            # claiming the module is numpy-free is no longer true.)
             from controller_core.safety import validated_task_rotation
 
             if frame == "tool":
@@ -519,6 +698,18 @@ class XTaskYZCorridorQPConfig(TorqueTaskQPConfig):
             base_kwargs["task_rotation"] = tuple(tuple(float(v) for v in row) for row in rot)
         return cls(
             **base_kwargs,
+            posture_joint_weights=cls._parse_posture_joint_weights(
+                ctrl.get("posture_joint_weights")
+            ),
+            joint_corridor_enabled=bool(ctrl.get("joint_corridor_enabled", False)),
+            joint_corridor_joints=cls._parse_joint_corridor_joints(
+                ctrl.get("joint_corridor_joints", ())
+            ),
+            joint_corridor_half_width_rad=float(
+                ctrl.get("joint_corridor_half_width_rad", 0.05)
+            ),
+            joint_corridor_alpha1=float(ctrl.get("joint_corridor_alpha1", 20.0)),
+            joint_corridor_alpha2=float(ctrl.get("joint_corridor_alpha2", 20.0)),
             yz_corridor_enabled=bool(ctrl.get("yz_corridor_enabled", False)),
             y_corridor_half_width_m=_parse_corridor_half_width(
                 ctrl.get("y_corridor_half_width_m", 0.05), "y_corridor_half_width_m"

@@ -122,6 +122,28 @@
 # reduced_task_dims, split_base_wrist_task, y_control_mode, ki_x/ki_y,
 # acceleration_feedforward, posture_reanchor_on_settle.
 
+# ---------------------------------------------------------------------------
+# MACHINE-CHECKED derivation case. controller_core/config_provenance.py refuses
+# to let this file run at any other pose/asset (see AGENTS.md sec.7, "A gain
+# belongs to the case it was derived for"). This is not decoration: every gain
+# below was fitted HERE, and the prose header above saying so did not stop a
+# ~20 h search plus five capture-envelope grids from being dispatched at the
+# SINGULAR ARM_Q0 (wrist_2 ~ 0) with pendulum_attachment.xml, where Lambda_xx
+# is 5.9298 rather than the 3.8317 kp_x was derived from -- kp_x 1.55x too
+# small, silently, with every run completing and reporting 0/117.
+# ---------------------------------------------------------------------------
+provenance:
+  derived_for:
+    # ARM_Q0 with wrist_2 = -90 deg. Same constant as
+    # tools/diagnostics/x_task_orientation_cbf_balance_gain_search.py::ARM_Q_W2M90
+    # (the script that measured this file's Lambda) and
+    # tools/diagnostics/pendulum_flip_catch_hold.py::ARM_Q_W2NEG90.
+    arm_q_rad: [-2.3688, -2.1801, -1.8838, -0.7962, -1.5707963, 0.0206]
+    controller_kind: "x_task_yz_corridor_qp"
+    pendulum_xml: pendulum_attachment_realrod.xml
+  notes: >-
+    Single-variable derivative of ..._orientation_cbf_balance.yaml (task_excluded_joints [0] -> []), so it inherits that file's gains and therefore its derivation pose. CAVEAT: this file's own pan-exclusion measurements say only 'at ARM_Q0' without naming wrist_2, so which ARM_Q0 those particular numbers were taken at is ambiguous in the source; the GAIN provenance recorded here is the parent's and is not ambiguous.
+
 mujoco:
   scene_xml: "assets/ur5e_torque/scene.xml"
   joint_order:

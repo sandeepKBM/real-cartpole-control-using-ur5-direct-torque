@@ -44,7 +44,13 @@ from .x_axis_cartesian_impedance import (
     XAxisCartesianImpedanceController,
 )
 from .filters import TorqueCommandFilter
-from .safety import ImpedanceSafetyConfig, ImpedanceSafetyMonitor, ImpedanceSafetyStatus
+from .safety import (
+    ImpedanceSafetyConfig,
+    ImpedanceSafetyMonitor,
+    ImpedanceSafetyStatus,
+    validated_task_rotation,
+    validated_tracked_axes,
+)
 from .logging_utils import JsonlTraceWriter, json_dumps_safe
 from .kinematics_utils import cartesian_force_to_joint_torque
 from .x_axis_controller import XAxisController, XAxisControllerConfig
@@ -97,6 +103,8 @@ __all__ = [
     "TorqueCommandFilter",
     "ImpedanceSafetyConfig",
     "ImpedanceSafetyMonitor",
+    "validated_task_rotation",
+    "validated_tracked_axes",
     "ImpedanceSafetyStatus",
     "JsonlTraceWriter",
     "json_dumps_safe",

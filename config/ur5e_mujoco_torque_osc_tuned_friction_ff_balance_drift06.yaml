@@ -1,0 +1,155 @@
+# DERIVED 2026-08-15 from ur5e_mujoco_torque_osc_tuned_friction_ff.yaml.
+# SINGLE VARIABLE CHANGED: max_abs_y_drift_m / max_abs_z_drift_m /
+# max_abs_orthogonal_drift_m 0.03 -> 0.06. Gains untouched.
+#
+# FOR BALANCE ONLY, NOT TRANSPORT. Rationale, measured on the cascade-LQR
+# capture-envelope grid at ARM_Q0/wrist_2=-90 with pendulum_attachment_realrod.xml:
+#
+#   plain OSC (drift 0.03):        32/117 captured; 54 |Y-Y0| fails, 31 orientation
+#   reduced-task QP + Y/Z corridors + orientation CBF:
+#                                  16/117 captured; 97 |Y-Y0| fails,  2 orientation
+#
+# Across five configurations each barrier removed its OWN failure mode completely
+# (Y-drift 54->0 with corridors; orientation 103->2 with the orientation CBF) yet
+# net capture stayed ~15-16/117, because the cart's total excursion is conserved:
+# constrain orientation and the motion goes into Y, constrain Y and it goes into
+# orientation. Balancing an inverted pendulum REQUIRES cart travel -- the excursion
+# is the control action, not an error. Plain OSC wins precisely because it clamps
+# neither and therefore keeps the freedom to move.
+#
+# So the intervention that should help is the opposite of clamping: keep OSC's
+# freedom and RAISE the off-axis tolerance. 0.06 m matches the value the corridor
+# configs already use, and follows the precedent of
+# ur5e_mujoco_torque_osc_tuned_wrist_orient_fixed_neg45_pose.yaml, which raised the
+# same field 0.03 -> 0.05 for one pose on measured dose-response.
+#
+# NOT validated for transport, and NOT a general default. controller_core/safety.py's
+# class default is untouched; this is a config-only override for the balance regime.
+# config/ur5e_mujoco_torque_osc_tuned.yaml (unmodified) with friction_feedforward: true
+# added (controller_core/x_axis_cartesian_impedance.py's CartesianImpedanceConfig).
+#
+# Why: real UR5e hardware tonight (2026-07-31) only achieved ~55-72% of a small commanded
+# X displacement at the plain tuned config (kp_x=400, no overrides), with steady-state
+# hold-phase torque that never decayed toward zero -- a friction/stiction signature. A
+# same-night sim smoke test (after a separate background task added real joint friction to
+# assets/ur5e_torque/ur5e_torque.xml -- see docs/status/ur5e_sim_friction_modeling_2026-07-31.md)
+# confirmed pure proportional gain cannot close this: closed-loop kp_x alone still recovered
+# ~99% of displacement in sim even with friction added, far short of the real shortfall --
+# a friction-like disturbance needs feedforward cancellation or integral action to fully
+# zero out at steady state, not more gain.
+#
+# Coulomb/viscous values below mirror the friction model's own landed MJCF values as a
+# starting point (size3 joints -- shoulder_pan/shoulder_lift/elbow -- 5.0 Nm / 0.4 Nm*s/rad;
+# size1 joints -- wrist_1/wrist_2/wrist_3 -- 1.0 Nm / 0.15 Nm*s/rad), independently tunable
+# since the real robot's true friction need not match the sim model exactly.
+#
+# friction_ff_qd_deadband validated at 0.05 (NOT the initial 0.01 guess) -- a real closed-
+# loop instability was found and fixed before this config was used for anything further:
+# at deadband=0.01, hold-phase qd (which sits ~0.005-0.02 rad/s in practice) lands right in
+# the tanh term's steep transition region (slope ~coulomb/deadband = 500 Nm per rad/s at
+# that setting), acting like a large local negative-damping gain -- measured smoke test
+# (dx=0.04m) showed a genuine growing limit cycle (elbow qd oscillating and NOT decaying,
+# x_error diverging instead of settling). At deadband=0.05, the same smoke test shows clean
+# monotonic settling: x_error 0.00175->0.000046 over the 2s hold (5.7x lower steady-state
+# error than the friction-only/no-feedforward baseline's 0.00026), with LESS commanded
+# torque throughout (tau_l1 2.84->0.19 vs the no-FF baseline's 6.10->0.36) -- real evidence
+# the feedforward is compensating friction efficiently, not just adding gain.
+#
+# NOT YET VALIDATED beyond this one smoke test as of authoring -- see docs/status/ (dated
+# entry once the height_alpha 0.2/0.3 sim sweep and, if that looks solid, real-hardware
+# smoke test land) for real pass/fail numbers before trusting this broadly or on the real
+# robot.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  friction_feedforward: true
+  friction_ff_qd_deadband: 0.05
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 5.0
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.06
+    max_abs_z_drift_m: 0.06
+    max_abs_orthogonal_drift_m: 0.06
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

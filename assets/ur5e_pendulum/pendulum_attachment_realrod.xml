@@ -1,0 +1,169 @@
+<mujoco model="ur5e_pendulum_realrod">
+  <!--
+  THE WORKING CONFIGURATION: real 0.12 m rod on a local-X hinge, with
+  measured hinge friction. Created 2026-08-14.
+  ============================================================
+  This is the asset to use for swing-up/balance work at the well-conditioned
+  pose. It is a third asset, alongside (and replacing neither):
+    * pendulum_attachment.xml         -- 0.12 m rod, local-Z hinge, PLACEHOLDER friction
+    * pendulum_attachment_longrod.xml -- 0.30 m rod, local-X hinge, placeholder friction
+
+  WHY A THIRD ASSET -- neither existing one is usable here
+  ============================================================
+  The intended arm pose is the well-conditioned one,
+    OLD_POSE = [0.0, -1.091985784398452, 2.0935362786892546,
+                -2.7685637962327356, 1.5620693866337145, 0.0]
+  with cond(J) = 6.93, sigma_min = 0.260, wrist_2 = +89.50 deg -- 201x better
+  conditioned than ARM_Q0 (cond 1395.76), and worth ~1.06 m/s of allowed cart
+  speed with orientation held versus ARM_Q0's 0.0096 m/s (a 111x difference,
+  measured).
+
+  At that pose:
+    * pendulum_attachment.xml's LOCAL-Z hinge is only 11.25 deg from world
+      vertical -> mgr = 0.0054 Nm. Gravity produces almost no torque about it;
+      it is not a functional pendulum there. (That asset's local-Z axis was
+      derived for ARM_Q0, where it IS 89.73 deg from vertical. Axis and pose
+      are one decision, not two.)
+    * pendulum_attachment_longrod.xml's LOCAL-X hinge is 89.51 deg from
+      vertical there, with world-X coupling kappa = 0.999999 -- correct. But
+      its 0.30 m rod needs E_top = 0.348 J, 6.2x the 0.12 m rod's 0.0557 J.
+
+  So this asset takes the long-rod's HINGE GEOMETRY (local X, 0.12 m
+  along-axis housing standoff) and the real 0.12 m ROD LENGTH.
+
+  MEASURED per-kick margin, why the short rod wins
+  ============================================================
+  A guard-clean kick at OLD_POSE delivers dE = 0.1052 J.
+                                   this asset (0.12 m)   long-rod (0.30 m)
+    E_top                              0.0557 J              0.348 J
+    guard-clean kick energy            0.1052 J              0.026-0.066 J
+    ratio (kick / E_top)                 1.9x                  0.19x
+  E_top scales ~L^2 while kick energy does not fall nearly as fast, so the
+  SHORTER rod is the easier one to flip. A single guard-clean kick carries
+  1.9x the energy needed to reach inverted. The binding guard is |qd| > 3.0
+  rad/s, and it is a sharp cliff: kick amplitude 0.2025 m gives qd_max
+  2.9968 (clean), 0.2125 m gives 3.0076 (trips).
+
+  HINGE FRICTION -- real values, not the placeholders
+  ============================================================
+  damping = 0.0001 Nms/rad and frictionloss = 0.001 Nm are the REAL hardware
+  values supplied by the user. Both other assets carry damping="0.02" /
+  frictionloss="0.01", which are unvalidated CAD placeholders with no
+  provenance (flagged as such in
+  docs/status/pendulum_balance_friction_sweep_2026-08-10.md).
+
+  That placeholder is not a small error and it inverted a headline conclusion.
+  With it, this pendulum has zeta = 3.97 -- OVERDAMPED, physically unable to
+  oscillate, with a ~21 deg stiction dead-band around BOTH equilibria -- and a
+  swing-up feasibility analysis correctly concluded that kick energy saturates
+  at ~9% of E_top and that no finite number of kicks converges. With the real
+  values, zeta = 0.0194 and the dead-band is 2.06 deg.
+
+  MEASURED at (0.12 m, b=0.0001, fl=0.001) @ OLD_POSE, from the compiled
+  model -- these are simulated measurements, not the analytic approximation:
+    m_total 0.09735 kg   mgr 0.027869 Nm   I_pivot 2.3747e-4 kg m^2
+    omega 10.833 rad/s   T 0.57999 s       zeta 0.019436
+    E_top 0.055739 J     stiction dead-band 2.056 deg
+    world-X coupling kappa +0.999999       M*r_perp 0.002841 kg m
+  Retention per half-swing, by release amplitude (frozen-arm decay):
+    30 deg 64.8% | 60 deg 75.2% | 90 deg 78.0% | 135 deg 78.6% | 175 deg 77.7%
+  Loss at full amplitude is 0.01243 J/half-swing (22.3% of E_top), of which
+  Coulomb 0.00521 J and viscous 0.00723 J. NOTE this is ~2x the small-angle
+  analytic estimate (exp(-pi*zeta) predicts ~6%); the linear approximation
+  understates loss at large amplitude because Coulomb loss scales with swept
+  angle. Use the measured numbers.
+  Against 0.1052 J available per guard-clean kick, that is an 8.5x margin.
+
+  PROVENANCE / STATUS
+  ============================================================
+  Rod length 0.12 m and the hinge friction values are real, user-supplied
+  hardware figures. The hinge AXIS (local X) is inherited from
+  pendulum_attachment_longrod.xml and is an inference from standard mounting
+  convention plus a measurement that it is operable at OLD_POSE -- it is NOT
+  verified against the CAD assembly's mate geometry (the SolidWorks mates are
+  unreadable in this environment). Tool-changer dimensions/masses and the
+  steel density carry over from pendulum_attachment.xml's own provenance.
+  Not validated on real hardware. Re-derive axis and clearances before using
+  this asset at any other arm pose.
+  -->
+
+  <default>
+    <default class="pendulum">
+      <!-- REAL measured hinge friction (see note above), NOT the 0.02/0.01
+           placeholders the other two assets carry. -->
+      <joint damping="0.0001" frictionloss="0.001"/>
+      <geom contype="0" conaffinity="0" density="7850"/>
+    </default>
+  </default>
+
+  <asset>
+    <mesh name="toolchanger_robot_side_mesh" file="meshes/toolchanger_robot_side.stl"/>
+    <mesh name="toolchanger_tool_side_mesh" file="meshes/toolchanger_tool_side.stl"/>
+  </asset>
+
+  <worldbody>
+    <!-- Flush on the flange. A tool changer is BOLTED to the flange; any
+         nonzero flange->plate offset is physically impossible. (An older
+         version of the main asset carried pos="0 -0.11 0.08", which rendered
+         as an assembly floating 13.6 cm off the wrist with 8.1 cm of air
+         between them -- a real bug, not reproduced here.) -->
+    <body name="pendulum_mount" pos="0 0 0">
+      <geom name="toolchanger_robot_side" type="mesh" mesh="toolchanger_robot_side_mesh"
+            pos="0 0 0.0025" mass="0.0606" class="pendulum" rgba="0.35 0.35 0.38 1"/>
+      <!-- +90 deg about X maps the STL's own +Y plate normal to mount +Z, so
+           the coupling face seats on the robot-side plate's outer face at
+           z = 0.0161 and the stack ends at z = 0.0445. -->
+      <geom name="toolchanger_tool_side" type="mesh" mesh="toolchanger_tool_side_mesh"
+            pos="0 0 0.0161" quat="0.70710678 0.70710678 0 0"
+            mass="0.1394" class="pendulum" rgba="0.3 0.3 0.32 1"/>
+
+      <!-- Shaft/sensor housing, seated on the corrected top of the
+           tool-changer stack (z = 0.0445). Runs ALONG the hinge axis (local X)
+           so it is coaxial with the hinge: its centre of mass sits ON the axis
+           and contributes exactly zero gravity torque, and it is visually
+           static under rotation, matching a real fixed housing.
+
+           0.12 m standoff, measured not guessed. With a local-X hinge the
+           rod's swing disc lies in a plane CONTAINING the tool axis, so it
+           sweeps through the wrist unless the housing carries it clear. Swept
+           rod-vs-arm clearance over the full +-180 deg hinge rotation at
+           OLD_POSE, measured with the 0.30 m rod (the worse case -- a 0.12 m
+           rod sweeps a smaller disc and clears by more):
+               0.06 m -> -1.56 cm (COLLIDES) | 0.10 m -> +2.41 cm
+               0.12 m -> +4.41 cm (chosen)   | 0.15 m -> +7.40 cm
+           Moving this length changes NO pendulum dynamics: it is a
+           translation ALONG the hinge axis, leaving both the gravity torque
+           about that axis and the moment of inertia about it unchanged. -->
+      <body name="pendulum_hub" pos="0 0 0.0445">
+        <geom name="pendulum_hub_geom" type="cylinder" fromto="0 0 0  0.12 0 0" size="0.020"
+              class="pendulum" rgba="0.15 0.15 0.18 1" mass="0.05"/>
+
+        <!-- Hinge on LOCAL X. At OLD_POSE this lands 89.51 deg from world
+             vertical (so gravity produces near-maximal torque about it) with
+             |axis x xhat| coupling kappa = 0.999999 (so the cart's own X
+             acceleration pumps it near-optimally). Both conditions must hold;
+             re-measure BOTH before using this asset at any other pose. -->
+        <joint name="pendulum_hinge" type="hinge" axis="1 0 0" pos="0 0 0"
+               class="pendulum" range="-3.14159 3.14159" limited="false"/>
+        <site name="pendulum_hinge_site" pos="0 0 0" size="0.004" rgba="1 0 0 1"/>
+
+        <!-- Rod: the REAL 0.12 m length, along local +Z, perpendicular to the
+             local-X hinge. (A rod collinear with its own hinge would be an
+             offset crank spinning about its centreline with zero gravity
+             torque, not a pendulum.) Clamped at the outboard end of the
+             housing -- a translation along the hinge axis, which changes no
+             dynamics. Diameter 8 mm is archive-supported ("8mm Bore Clamp");
+             mass is density-derived (steel 7850) = 0.04735 kg. -->
+        <body name="pendulum_rod" pos="0.12 0 0">
+          <geom name="pendulum_rod_geom" type="cylinder" fromto="0 0 0  0 0 0.12" size="0.004"
+                class="pendulum" rgba="0.6 0.6 0.65 1"/>
+          <site name="pendulum_tip_site" pos="0 0 0.12" size="0.006" rgba="0 1 0 1"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <sensor>
+    <jointpos name="pendulum_angle_sensor" joint="pendulum_hinge"/>
+  </sensor>
+</mujoco>

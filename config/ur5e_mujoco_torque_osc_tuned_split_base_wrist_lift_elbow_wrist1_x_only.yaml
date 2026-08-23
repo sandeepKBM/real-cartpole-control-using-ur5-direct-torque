@@ -1,0 +1,167 @@
+# config/ur5e_mujoco_torque_osc_tuned_split_base_wrist_pan_fixed.yaml with TWO fields changed:
+#   split_base_wrist_active_joints: [1, 2, 3]   (was [2, 3, 4])
+#   split_base_wrist_task_dims:     [0]         (new field, added 2026-08-12)
+#
+# What that changes (see controller_core/x_axis_cartesian_impedance/config.py::
+# split_base_wrist_task_dims): until 2026-08-12 `split_base_wrist_task` restricted the
+# translation task to a subset of joint COLUMNS but always used all three position ROWS
+# (X, Y, Z), and combining it with row selection was refused outright. This file uses both at
+# once, giving a 1x3 task Jacobian instead of a 3x3 one:
+#   TASK ROW    (regulated by kp_x/kd_x through the task pipeline): world X only
+#   ACTIVE COLS (carry the task torque): shoulder_lift, elbow, wrist_1
+#   HELD JOINTS (no task torque can structurally reach them): shoulder_pan, wrist_2, wrist_3
+#   HELD ROWS   (world Y, Z): force still computed and reported (`wrench`, y_error/z_error)
+#               but not routed into the task pipeline -- held by the joint-space posture
+#               spring, projected through the nullspace projector (nullspace_posture is on).
+# "Held" means a finite-stiffness spring anchored at the trial-start pose, NOT a kinematic
+# lock, for both the held joints and the held rows. Use `posture_kp_by_joint` if one held
+# joint needs a stiffer anchor than the scalar kp_posture gives it.
+#
+# Motivation (a real measured robot setup, 2026-08-12, not a hypothetical): wrist_2 must be
+# kept away from a permanent physical singularity limit AND shoulder_pan held fixed for
+# wall/base clearance, which leaves {shoulder_lift, elbow, wrist_1} to do the transport. The
+# task there is genuinely 1-dimensional: front/back along world X.
+#
+# WHY ROW SELECTION IS REQUIRED HERE, measured at the real start pose
+# q = [-2.3688, -2.1801, -1.8838, -0.7962, 0.004714693, 0.0206] on assets/ur5e_torque/scene.xml:
+#   * cond(J[0:3, [1,2,3]]) = 2.9e16, rank 2 of 3, singular values 0.695 / 0.286 / 2.4e-17.
+#     shoulder_lift, elbow and wrist_1 are the UR planar sub-chain -- three mutually parallel
+#     axes -- so they span at most a 2D subspace of 3D linear velocity at ANY configuration.
+#     No pose and no gain fixes that; as a 3-row task this joint set is permanently unusable.
+#   * The X ROW ALONE over those same columns has norm 0.2353 -- essentially identical to the
+#     0.2351 of [elbow, wrist_1, wrist_2] = (2,3,4), the full-rank pan-free set that
+#     config/ur5e_mujoco_torque_osc_tuned_split_base_wrist_pan_fixed.yaml already uses (cond
+#     1.45e3 at this pose). So world X sits comfortably inside the 2D subspace these joints do
+#     span, with the same X authority as a combination this repo already treats as usable. The
+#     missing third rank direction was never needed for a 1D transport task.
+# Screen your own start pose the same way before trusting a different selection:
+#   python tools/diagnostics/split_base_wrist_task_dims_sim_check.py --mode authority \
+#       --start-q-rad -2.3688 -2.1801 -1.8838 -0.7962 0.004714693 0.0206
+#
+# READ BEFORE CHANGING GAINS OR FLAGS HERE -- consequences of the 1-row task specifically:
+#   * `jacobian_cond` in traces is the task block's NORM, not a condition number (cond of any
+#     nonzero 1xN matrix is exactly 1.0, which would say nothing). Consequently the
+#     `singular_scale` term never engages for a single-row task -- the `jacobian_singular_cond_max:
+#     1.0e18` below already disabled it anyway, but do not re-enable it expecting it to work.
+#   * `lambda_adaptive_regularization` / `wrench_lambda_adaptive_regularization` are REFUSED
+#     (hard error) with a single task row, for the same reason: they schedule eps by
+#     log(cond_task).
+#   * `acceleration_feedforward` and `y_integral_action` are also refused with row selection.
+#   * `lambda_regularization: 0.1` is NOT small compared to this 1x3 task's own inertia scale
+#     (J M^-1 J^T = 0.0975 at the pose above), so the nullspace projector removes only about
+#     half of the posture torque's task-direction acceleration here. That is the known,
+#     already-documented static-eps projector leak (AGENTS.md sec 3), not a new defect -- but
+#     it is more pronounced with one task row than with three, and the usual mitigation
+#     (adaptive eps) is refused above. Left as-is deliberately: changing eps would be gain
+#     tuning bundled into a mechanism change.
+#
+# NOT VALIDATED BEYOND SIM. A closed-loop MuJoCo move+hold at the real start pose above does
+# converge in both directions with no guard trip (tests/mujoco/test_split_base_wrist_task_dims_closed_loop.py
+# is the reproducible assertion layer, tools/diagnostics/split_base_wrist_task_dims_sim_check.py
+# the standalone script). NO real-hardware run has been done with this configuration, and no
+# 4-category rigor sweep either. Treat it as a kinematically-screened, sim-converging starting
+# point, not an asserted-good configuration.
+#
+# Everything below this comment block is byte-identical to
+# config/ur5e_mujoco_torque_osc_tuned_split_base_wrist_pan_fixed.yaml except the
+# `split_base_wrist_active_joints` value and the added `split_base_wrist_task_dims` line.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+    kp_rot_wrist: 0.0
+    kd_rot_wrist: 10.0
+  wrist_orientation_task: true
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  split_base_wrist_task: true
+  split_base_wrist_active_joints: [1, 2, 3]
+  split_base_wrist_task_dims: [0]
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  friction_feedforward: true
+  friction_ff_qd_deadband: 0.05
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 5.0
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

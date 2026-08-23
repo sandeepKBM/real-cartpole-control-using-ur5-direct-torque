@@ -1,0 +1,415 @@
+{
+  "mode": "controller-rollout",
+  "controller_kind": "x_task_yz_corridor_qp",
+  "scene_xml": "/common/users/ss5772/real_Cartpole/assets/ur5e_torque/scene.xml",
+  "config_path": "/common/users/ss5772/real_Cartpole/config/ur5e_mujoco_torque_x_task_yz_corridor_qp_megapose.yaml",
+  "output_dir": "/common/users/ss5772/real_Cartpole/repro_b/_runs/dx+0.200_move2_hold1/controller-rollout_x_task_yz_corridor_qp_20260814_012638",
+  "gravity_mode": "gravity_comp",
+  "gravity_source": "pinocchio",
+  "coriolis_feedforward": true,
+  "trajectory_profile": "min_jerk_move_hold",
+  "move_duration_s": 2.0,
+  "move_duration_source": "cli",
+  "hold_duration_s": 1.0,
+  "success": true,
+  "failure_reason": "",
+  "model_nq": 6,
+  "model_nv": 6,
+  "model_nu": 6,
+  "joint_ids": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "actuator_ids": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "site_id": 0,
+  "joint_names": [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint"
+  ],
+  "actuator_names": [
+    "shoulder_pan_torque",
+    "shoulder_lift_torque",
+    "elbow_torque",
+    "wrist_1_torque",
+    "wrist_2_torque",
+    "wrist_3_torque"
+  ],
+  "source_validation": {
+    "scene_xml": "/common/users/ss5772/real_Cartpole/assets/ur5e_torque/scene.xml",
+    "checked_files": [
+      "/common/users/ss5772/real_Cartpole/assets/ur5e_torque/scene.xml",
+      "/common/users/ss5772/real_Cartpole/assets/ur5e_torque/ur5e_torque.xml"
+    ],
+    "actuator_kinds": {
+      "motor": 6
+    },
+    "source_tree_ok": true
+  },
+  "compiled_model_diagnostics": {
+    "nu": 6,
+    "neq": 0,
+    "gravity": [
+      0.0,
+      0.0,
+      -9.81
+    ],
+    "actuator_biastype": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "actuator_gaintype": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "actuator_dyntype": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "actuator_trntype": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "actuator_ctrllimited": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "actuator_forcelimited": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "actuator_ctrlrange": [
+      [
+        -150.0,
+        150.0
+      ],
+      [
+        -150.0,
+        150.0
+      ],
+      [
+        -150.0,
+        150.0
+      ],
+      [
+        -28.0,
+        28.0
+      ],
+      [
+        -28.0,
+        28.0
+      ],
+      [
+        -28.0,
+        28.0
+      ]
+    ],
+    "actuator_forcerange": [
+      [
+        -150.0,
+        150.0
+      ],
+      [
+        -150.0,
+        150.0
+      ],
+      [
+        -150.0,
+        150.0
+      ],
+      [
+        -28.0,
+        28.0
+      ],
+      [
+        -28.0,
+        28.0
+      ],
+      [
+        -28.0,
+        28.0
+      ]
+    ],
+    "jnt_type": [
+      3,
+      3,
+      3,
+      3,
+      3,
+      3
+    ],
+    "jnt_range": [
+      [
+        -6.28319,
+        6.28319
+      ],
+      [
+        -6.28319,
+        6.28319
+      ],
+      [
+        -3.1415,
+        3.1415
+      ],
+      [
+        -6.28319,
+        6.28319
+      ],
+      [
+        -6.28319,
+        6.28319
+      ],
+      [
+        -6.28319,
+        6.28319
+      ]
+    ],
+    "jnt_stiffness": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "dof_damping": [
+      0.4,
+      0.4,
+      0.4,
+      0.15,
+      0.15,
+      0.15
+    ],
+    "dof_armature": [
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1
+    ],
+    "site_name": "attachment_site",
+    "site_id": 0
+  },
+  "true_torque_verified": true,
+  "controller_gains": {
+    "kp_x": 1434.2,
+    "kd_x": 143.4,
+    "kp_y": 5.0,
+    "kd_y": 2.0,
+    "kp_z": 5.0,
+    "kd_z": 2.0,
+    "kp_rot": 6.191,
+    "kd_rot": 9.306,
+    "kp_posture": 25.0,
+    "kd_posture": 6.0,
+    "kd_joint": 4.0
+  },
+  "kp_x": 1434.2,
+  "kd_x": 143.4,
+  "kp_y": 5.0,
+  "kd_y": 2.0,
+  "kp_z": 5.0,
+  "kd_z": 2.0,
+  "kp_rot": 6.191,
+  "kd_rot": 9.306,
+  "kp_posture": 25.0,
+  "kd_posture": 6.0,
+  "kd_joint": 4.0,
+  "start_q_source": "cli",
+  "start_q_rad": [
+    0.0,
+    -1.091985784398452,
+    2.0935362786892546,
+    -2.7685637962327356,
+    1.5620693866337145,
+    0.0
+  ],
+  "target_x_delta": 0.2,
+  "duration_s": 3.0,
+  "total_duration_s": 3.0,
+  "transport_axis_index": 0,
+  "termination_reason": "duration_complete",
+  "steps": 1500,
+  "timestep_count": 1500,
+  "sim_time_s": 2.999999999999891,
+  "dt_s": 0.002,
+  "initial_q": [
+    0.0,
+    -1.091985784398452,
+    2.0935362786892546,
+    -2.7685637962327356,
+    1.5620693866337145,
+    0.0
+  ],
+  "initial_qd": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "initial_ee_pos": [
+    -0.4856802519943472,
+    -0.13487268293883928,
+    0.32759480074048186
+  ],
+  "final_q": [
+    0.059018505406544776,
+    -1.2408357143427986,
+    2.532596080132519,
+    -3.0183521476868713,
+    1.568847979526472,
+    0.08556349597560402
+  ],
+  "final_qd": [
+    0.001101797128136395,
+    -0.0037211375592761755,
+    0.013916276617012288,
+    0.0029829672904296534,
+    0.0028730411888331538,
+    0.029901868667160138
+  ],
+  "final_ee_pos": [
+    -0.32045480290652156,
+    -0.15336363996130767,
+    0.3025406786174762
+  ],
+  "final_ee_quat": [
+    0.7539893387816898,
+    -0.05359532400339994,
+    0.05642934414726275,
+    -0.6522601837975627
+  ],
+  "failure_time_s": null,
+  "max_torque_saturation_fraction": 0.06221974232266972,
+  "max_torque_clip_fraction": 0.0,
+  "min_joint_limit_fraction": 0.09691292692463489,
+  "mean_control_effort_l2": 26.767134453965927,
+  "mean_control_energy_proxy": 2.004811623266019,
+  "trace_path": "/common/users/ss5772/real_Cartpole/repro_b/_runs/dx+0.200_move2_hold1/controller-rollout_x_task_yz_corridor_qp_20260814_012638/trace.jsonl",
+  "plot_path": "",
+  "diagnostics_plot_path": "",
+  "clip_observed": false,
+  "torque_limit_scale": 1.0,
+  "achieved_x_delta_m": 0.16522544908782566,
+  "final_x_displacement_m": 0.16522544908782566,
+  "final_x_error_m": 0.03477455091217435,
+  "max_abs_x_error_m": 0.04311988284180479,
+  "max_abs_y_drift_m": 0.018927715561045527,
+  "max_abs_z_drift_m": 0.025054122123005673,
+  "max_abs_orthogonal_drift_m": 0.025054122123005673,
+  "final_orientation_error_rad": 0.15013693387949475,
+  "max_abs_orientation_error_rad": 0.15013693387949475,
+  "max_abs_qd_radps": 0.425059012217714,
+  "final_ee_error_norm_m": 0.04667862378117698,
+  "max_abs_tau_nm": 32.59969302295097,
+  "mean_abs_tau_nm": 5.938826979596073,
+  "torque_saturation_percentage": 0.0,
+  "clipping_count": 0,
+  "max_abs_q_rad": 3.0192935038758093,
+  "velocity_guard_ok": true,
+  "velocity_guard_margin_radps": 2.574940987782286,
+  "joint_limit_guard_ok": true,
+  "joint_limit_margin_fraction": 0.09691292692463489,
+  "max_abs_tau_controller_nm": 6.722776972628267,
+  "max_abs_tau_gravity_nm": 26.606197825539006,
+  "max_abs_tau_applied_nm": 32.59969302295097,
+  "mean_abs_tau_controller_nm": 2.464334242265455,
+  "mean_abs_tau_applied_nm": 5.938826979596073,
+  "torque_limit_nm": [
+    150.0,
+    150.0,
+    150.0,
+    28.0,
+    28.0,
+    28.0
+  ],
+  "gravity_mode_used": "gravity_comp",
+  "gravity_compensation_active": true,
+  "raw_mode_used": false,
+  "mean_abs_tau_gravity_nm": 4.892881590439571,
+  "max_abs_tau_controller_clipped_nm": 6.722776972628267,
+  "mean_abs_tau_controller_clipped_nm": 2.464334242265455,
+  "max_abs_tau_applied_clipped_nm": 32.59969302295097,
+  "mean_abs_tau_applied_clipped_nm": 5.938826979596073,
+  "controller_torque_clip_fraction": 0.0,
+  "applied_torque_clip_fraction": 0.0,
+  "controller_torque_clip_percentage": 0.0,
+  "applied_torque_clip_percentage": 0.0,
+  "controller_torque_clip_count": 0,
+  "applied_torque_clip_count": 0,
+  "gravity_torque_fraction": 0.8238801378201387,
+  "controller_torque_fraction": 0.414953028726401,
+  "move_phase_final_x_error_m": 0.04026716383826312,
+  "move_phase_achieved_x_delta_m": 0.15973283416473555,
+  "move_phase_max_abs_x_error_m": 0.04311988284180479,
+  "move_phase_max_abs_y_drift_m": 0.018927715561045527,
+  "move_phase_max_abs_z_drift_m": 0.022966808713356213,
+  "move_phase_max_abs_orthogonal_drift_m": 0.022966808713356213,
+  "move_phase_max_abs_orientation_error_rad": 0.10657091432771403,
+  "move_phase_max_abs_qd_radps": 0.425059012217714,
+  "move_phase_max_abs_tau_controller_nm": 6.722776972628267,
+  "move_phase_max_abs_tau_applied_nm": 32.59969302295097,
+  "hold_phase_final_x_error_m": 0.03477455091217435,
+  "hold_phase_max_abs_x_error_m": 0.0402829514601975,
+  "hold_phase_x_drift_from_hold_start_m": 0.005492614923090111,
+  "hold_phase_max_abs_y_drift_m": 0.0002213749653030006,
+  "hold_phase_max_abs_z_drift_m": 0.0020873134096494605,
+  "hold_phase_max_abs_orthogonal_drift_m": 0.0020873134096494605,
+  "hold_phase_max_abs_orientation_error_rad": 0.04370990442875287,
+  "hold_phase_max_abs_qd_radps": 0.053707688457507355,
+  "hold_phase_max_abs_tau_controller_nm": 5.320771683585096,
+  "hold_phase_max_abs_tau_applied_nm": 23.281459792570086,
+  "move_phase_complete": true,
+  "hold_phase_complete": true,
+  "valid_move_phase": true,
+  "valid_hold_phase": true,
+  "valid_move_and_hold": true,
+  "move_failure_reason": "none",
+  "hold_failure_reason": "none",
+  "move_tracking_score": 0.357938790601469,
+  "move_hold_quality_score": 0.11129072267672749,
+  "move_hold_tracking_score": 0.357938790601469,
+  "duration_pass": true,
+  "safety_pass": true
+}

@@ -943,11 +943,28 @@ def run() -> int:
         else np.array([state0.target_x, state0.ee_pos[1], state0.ee_pos[2]], dtype=np.float64)
     )
 
+    axis_index = int(args.transport_axis_index)
+
     with JsonlTraceWriter(trace_path) as trace_writer:
         for step_idx in range(steps):
+            # The reference is generated along the SELECTED transport axis:
+            # seeded from that axis' own start value and written into that
+            # component of target_ee_pos/target_ee_vel. For the default
+            # --transport-axis-index 0 this is bit-identical to the previous
+            # X-only code (`float(state0.ee_pos[0])` /
+            # `[target_x_now, ee_pos[1], ee_pos[2]]` / `[target_x_vel_now, 0, 0]`).
+            # It was NOT identical for axis 1/2: the profile was seeded from the
+            # X start value and the delta was written into component 0, while
+            # `target_axis=target_ee_pos[transport_axis_index]` below then read
+            # back the untouched Y/Z start value -- so a non-zero axis commanded
+            # a constant hold and the run reported achieved_x_delta_m == 0.0 with
+            # success=True. Caught by closed-loop MuJoCo validation
+            # (tests/mujoco/test_transport_axis_index_closed_loop.py); no
+            # plumbing/unit test could see it, since every piece was individually
+            # threaded correctly.
             target_x_now, target_x_vel_now = x_profile_target(
                 trajectory_profile,
-                float(state0.ee_pos[0]),
+                float(state0.ee_pos[axis_index]),
                 float(target_x_delta),
                 float(data.time),
                 float(args.duration),
@@ -962,8 +979,10 @@ def run() -> int:
                 move_duration_s=move_duration_s if trajectory_profile in _MOVE_DURATION_PROFILES else None,
                 target_accel_mps2=float(args.target_accel) if trajectory_profile in _ACCEL_DURATION_PROFILES else None,
             )
-            target_ee_pos = np.array([target_x_now, state0.ee_pos[1], state0.ee_pos[2]], dtype=np.float64)
-            target_ee_vel = np.array([target_x_vel_now, 0.0, 0.0], dtype=np.float64)
+            target_ee_pos = np.asarray(state0.ee_pos, dtype=np.float64).reshape(3).copy()
+            target_ee_pos[axis_index] = target_x_now
+            target_ee_vel = np.zeros(3, dtype=np.float64)
+            target_ee_vel[axis_index] = target_x_vel_now
             prev_tau = (
                 np.asarray(adapter._prev_tau, dtype=np.float64).reshape(6).copy()
                 if getattr(adapter, "_prev_tau", None) is not None
@@ -1429,10 +1448,13 @@ def run() -> int:
         summary.update(
             {
                 **transport_summary,
-                "final_x_error_m": float(final_target_x - final_ee[0]),
+                "final_x_error_m": float(final_target_x - final_ee[axis_index]),
                 "final_ee_error_norm_m": float(np.linalg.norm(target_ee - final_ee)),
-                "final_x_displacement_m": float(final_ee[0] - float(state0.ee_pos[0])),
-                "achieved_x_delta_m": float(final_ee[0] - float(state0.ee_pos[0])),
+                # Measured along the selected transport axis, matching
+                # transport_metrics.summarize_transport_trace and the hardware
+                # transport loops. Bit-identical for the default axis 0.
+                "final_x_displacement_m": float(final_ee[axis_index] - float(state0.ee_pos[axis_index])),
+                "achieved_x_delta_m": float(final_ee[axis_index] - float(state0.ee_pos[axis_index])),
                 "max_abs_x_error_m": float(np.max(np.abs(x_error_all))) if x_error_all.size else 0.0,
                 "max_abs_orientation_error_rad": float(np.max(np.abs(orientation_error_all))) if orientation_error_all.size else 0.0,
                 "final_orientation_error_rad": float(final_state.get("orientation_error_norm", 0.0)),

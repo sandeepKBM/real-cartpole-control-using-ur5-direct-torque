@@ -44,7 +44,11 @@ from .safety import (
 )
 from .telemetry_gap_bridge import TelemetryGapBridge
 from .timing import TimingTracker, monotonic_ns
-from .transport_common import impedance_safety_config_from_section, max_abs_qd_from_trace
+from .transport_common import (
+    impedance_safety_config_from_section,
+    max_abs_qd_from_trace,
+    validate_transport_axis_index,
+)
 
 
 @dataclass
@@ -148,6 +152,7 @@ def run_x_transport_direct_torque(
     duration_s: float,
     output_dir: Path | None = None,
     motion_opt_in: bool,
+    transport_axis_index: int = 0,
     trajectory_profile: str = "min_jerk_move_hold",
     target_accel_mps2: float | None = None,
     record_latency: bool = True,
@@ -173,8 +178,19 @@ def run_x_transport_direct_torque(
     telemetry_gap_bridge: bool = False,
     telemetry_gap_bridge_max_cycles: int = 2,
 ) -> DirectTorqueTransportResult:
+    """Run the bounded Cartesian move+hold under live ``directTorque()``.
+
+    ``transport_axis_index`` selects the world Cartesian axis the guards,
+    the commanded target pose and the reported metrics use (0=X default —
+    byte-identical to before this parameter existed, 1=Y, 2=Z). **The OSC
+    control law itself is world-X only** (``XAxisCartesianImpedanceController``
+    computes ``x_err = target_x - ee_pos[0]`` with no axis field), so a
+    non-zero value here would guard one axis while torque drives another —
+    ``hardware/x_transport.py`` rejects that combination before dispatch.
+    """
     if not motion_opt_in:
         raise ValueError("motion_opt_in must be True for a live direct-torque transport")
+    transport_axis_index = validate_transport_axis_index(transport_axis_index)
 
     dynamics_source = normalize_dynamics_source(dynamics_source)
     if coriolis_feedforward and dynamics_source not in ("local", "local_pinocchio"):
@@ -299,14 +315,26 @@ def run_x_transport_direct_torque(
 
     link.connect()
     state0 = link.read_state()
-    x0 = float(state0.tcp_pose[0])
+    x0 = float(state0.tcp_pose[transport_axis_index])
     if local_dynamics is not None:
         J0, M0 = local_dynamics.jacobian_and_mass_matrix(state0.q)
         init_robot_state = link.compose_robot_state(
-            state0, jacobian=J0, mass_matrix=M0, time_s=0.0, target_x=x0, target_x_vel=0.0
+            state0,
+            jacobian=J0,
+            mass_matrix=M0,
+            time_s=0.0,
+            target_x=x0,
+            target_x_vel=0.0,
+            transport_axis_index=transport_axis_index,
         )
     else:
-        init_robot_state = link.build_robot_state(state0, time_s=0.0, target_x=x0, target_x_vel=0.0)
+        init_robot_state = link.build_robot_state(
+            state0,
+            time_s=0.0,
+            target_x=x0,
+            target_x_vel=0.0,
+            transport_axis_index=transport_axis_index,
+        )
     controller.reset_from_state(init_robot_state)
     if residual_accel_estimator is not None:
         residual_accel_estimator.reset(state0.qd)
@@ -343,7 +371,7 @@ def run_x_transport_direct_torque(
     safety.reset()
     safety.set_initial_position(
         np.asarray(state0.tcp_pose[:3], dtype=np.float64),
-        move_axis=0,
+        move_axis=transport_axis_index,
     )
     # ImpedanceSafetyMonitor (above) has no TCP speed/acceleration/waypoint-jump
     # ceiling -- only drift/orientation/joint-velocity/axis-growth. Layer
@@ -409,7 +437,7 @@ def run_x_transport_direct_torque(
     if accel_overrides:
         move_limits = replace(move_limits, **accel_overrides)
     move_monitor = CartesianMoveMonitor(move_limits)
-    move_monitor.set_start(state0.tcp_pose, move_axis_index=0)
+    move_monitor.set_start(state0.tcp_pose, move_axis_index=transport_axis_index)
 
     trace_rows: list[dict[str, Any]] = []
     termination_reason = "duration_complete"
@@ -431,6 +459,14 @@ def run_x_transport_direct_torque(
         maxlen=PRE_TRIP_TREND_WINDOW_CYCLES
     )
     prev_tcp_pos_for_trend = np.asarray(state0.tcp_pose[:3], dtype=np.float64)
+    # Deliberately world-Y / world-Z, NOT "the two non-transport axes": the
+    # reported field names (y_drift_m/z_drift_m) are literal world axes and the
+    # values stay correct for any transport_axis_index. What they do NOT do is
+    # rename themselves to track the off-axis pair -- with
+    # transport_axis_index=1, y_drift_m would be the intended motion rather
+    # than a drift. Left as-is because a non-zero axis is rejected for this
+    # mode at dispatch (see hardware/x_transport.py); revisit together with an
+    # axis-aware control law, not before.
     y0_for_trend = float(state0.tcp_pose[1])
     z0_for_trend = float(state0.tcp_pose[2])
 
@@ -556,6 +592,7 @@ def run_x_transport_direct_torque(
                 target_x_vel=target_x_vel,
                 dt_s=real_dt_s,
                 target_x_accel=target_x_accel,
+                transport_axis_index=transport_axis_index,
             )
             if phases is not None:
                 phases.record("build_state_ns", monotonic_ns() - t_build)
@@ -628,11 +665,21 @@ def run_x_transport_direct_torque(
                 if phases is not None:
                     phases.record("telemetry_gap_bridge_ns", monotonic_ns() - t_bridge)
 
+            # Reference pose for the Cartesian guard: the start pose with only
+            # the transport-axis component replaced by this cycle's target.
+            # Was `np.concatenate(([target_x], state0.tcp_pose[1:6]))`, which
+            # baked in "the transport axis is component 0" -- for axis 1/2 that
+            # would have written the target into the X slot and left the real
+            # transport axis at its start value, i.e. guarded the wrong axis.
+            # Same allocation-per-cycle shape/dtype as the concatenate it
+            # replaces, and bit-identical for transport_axis_index=0.
+            target_tcp_pose = state0.tcp_pose.copy()
+            target_tcp_pose[transport_axis_index] = target_x
             move_decision = move_monitor.check(
                 q=guard_q,
                 qd=guard_qd,
                 tcp_pose=guard_tcp_pose,
-                target_tcp_pose=np.concatenate(([target_x], state0.tcp_pose[1:6])),
+                target_tcp_pose=target_tcp_pose,
                 orientation_error_rad=float(output.orientation_error_norm),
                 axis_target_moving=bool(t_s <= move_duration_s),
                 dt_s=dt_s,
@@ -855,7 +902,7 @@ def run_x_transport_direct_torque(
             residual_async_merged_count += 1
 
     final_state = last_link_state
-    achieved_x_delta_m = float(final_state.tcp_pose[0] - x0)
+    achieved_x_delta_m = float(final_state.tcp_pose[transport_axis_index] - x0)
     hold_duration_s = max(duration_s - move_duration_s, 0.0)
     max_abs_qd = max_abs_qd_from_trace(trace_rows)
     pre_trip_trend = _build_pre_trip_trend(pre_trip_window, termination_reason)
@@ -866,6 +913,7 @@ def run_x_transport_direct_torque(
         "gain_overrides": dict(gain_overrides) if gain_overrides else {},
         "target_x_delta": float(target_x_delta_m),
         "target_x_delta_m": float(target_x_delta_m),
+        "transport_axis_index": transport_axis_index,
         "trajectory_profile": trajectory_profile,
         "target_accel_mps2": None if target_accel_mps2 is None else float(target_accel_mps2),
         "move_duration_s": move_duration_s,
@@ -912,7 +960,7 @@ def run_x_transport_direct_torque(
             initial_ee_pos=state0.tcp_pose[:3],
             move_duration_s=move_duration_s,
             total_duration_s=duration_s,
-            transport_axis_index=0,
+            transport_axis_index=transport_axis_index,
         )
     )
     summary.update(compute_valid_move_hold_metrics(summary))

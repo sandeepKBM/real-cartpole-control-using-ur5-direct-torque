@@ -15,7 +15,15 @@ from typing import Any, Literal
 import numpy as np
 
 from .constants import JOINT_NAME_ORDER
-from .parsing import _parse_friction_model, _parse_y_control_mode
+from .parsing import (
+    _parse_friction_model,
+    _parse_manipulability_cbf_alpha,
+    _parse_manipulability_cbf_epsilon,
+    _parse_split_base_wrist_active_joints,
+    _parse_split_base_wrist_task_dims,
+    _parse_transport_axis_index,
+    _parse_y_control_mode,
+)
 
 
 @dataclass
@@ -56,6 +64,24 @@ class CartesianImpedanceConfig:
     posture_kp_by_joint: np.ndarray | None = None
     posture_kd_by_joint: np.ndarray | None = None
     kd_joint: float = 0.8
+    # Per-joint override for the plain joint-velocity damping term
+    # (tau_damping = -kd_joint*qd), independent of posture_kd_by_joint --
+    # that field only reaches joints inside nullspace_posture's projected
+    # null space (zero-dimensional whenever active columns == active rows,
+    # e.g. a square 3-joint split_base_wrist_task block), so it has no way
+    # to touch a joint that's directly task-solving. This field reaches
+    # every joint's damping term regardless. When set (length-6 array,
+    # JOINT_NAME_ORDER order), replaces the scalar kd_joint per-joint.
+    # NOTE on what this can and cannot do: -kd*qd vanishes at steady state
+    # by construction, so for a SQUARE task block (as many active joints as
+    # active task rows -- no redundancy to resolve) heavier damping on one
+    # joint changes how reluctantly/smoothly it moves during the transient,
+    # not the final joint angle the task equilibrium requires -- there is
+    # only one solution and every joint must reach its share of it. This is
+    # a transient-shaping lever there, not a "prefer other joints" lever;
+    # the latter needs genuine redundancy (more active joints than task
+    # rows) to have any effect on the steady-state split.
+    kd_joint_by_joint: np.ndarray | None = None
     tau_max_nm: np.ndarray = field(
         default_factory=lambda: np.array([8.0, 8.0, 8.0, 2.5, 2.5, 2.5], dtype=np.float64)
     )
@@ -149,6 +175,350 @@ class CartesianImpedanceConfig:
     # not something new and unvalidated.
     wrench_lambda_adaptive_regularization: bool = False
     wrench_lambda_regularization_far: float = 0.01
+    # Inertia-scaled nullspace-projector regularization (default off = today's
+    # static eps, byte-for-byte). Added 2026-08-12 for the ONE case both
+    # schedulers above are explicitly refused in: a split_base_wrist_task with
+    # fewer than three selected task rows, where cond_task is a NORM rather
+    # than a condition number (see split_base_wrist_task_dims' docstring) and a
+    # log(cond) schedule would therefore be driven by the wrong quantity.
+    #
+    # WHY A DIFFERENT SCHEDULING VARIABLE, and why not the block norm. The
+    # nullspace projector is N = I - J_task^T Lambda_ns J_task M^-1 with
+    # Lambda_ns = (A + eps I)^-1 and A = J_task M^-1 J_task^T. The task-space
+    # acceleration a posture torque still produces after projection is
+    #
+    #     J_task M^-1 N tau_posture = (I - A (A + eps I)^-1) J_task M^-1 tau
+    #                               = eps (A + eps I)^-1  J_task M^-1 tau
+    #
+    # so the LEAK OPERATOR is exactly eps (A + eps I)^-1, whose spectral norm is
+    # eps / (lambda_min(A) + eps). The quantity that decides how much of the
+    # posture spring leaks into the task is therefore lambda_min(A) -- the
+    # task-space inverse-inertia scale -- and NOT ||J_task||, which drops M
+    # entirely. (Measured at the motivating pose
+    # q = [-2.3688, -2.1801, -1.8838, -0.7962, 0.004714693, 0.0206],
+    # rows (0,) x cols (1,2,3): ||J_task_block|| = 0.2353 but A = 0.09746, and
+    # a direct closed-loop measurement of the residual leak matches
+    # eps/(A+eps) to 9 decimal places at every eps tried -- 0.5064 at the
+    # shipped eps=0.1, i.e. only ~49% of the leak is cancelled.) Scheduling
+    # against the norm would have been an unverified proxy for a quantity this
+    # controller already computes exactly, one line above, as a_mat.
+    #
+    # THE SCHEDULE, and the two properties that bound its blast radius:
+    #
+    #     lmin    = max(lambda_min(A), 0)
+    #     eps_ns  = min( max( nullspace_inertia_eps_ratio * lmin,
+    #                         lambda_regularization - lmin ),
+    #                    lambda_regularization )
+    #
+    #   (P1) eps_ns <= lambda_regularization ALWAYS. This mechanism can only
+    #        ever REDUCE the projector's damping relative to today, never add.
+    #   (P2) lmin + eps_ns >= lambda_regularization ALWAYS (that is what the
+    #        inner max()'s second branch buys), so
+    #        ||Lambda_ns||_2 = 1/(lmin + eps_ns) <= 1/lambda_regularization --
+    #        the projector's Lambda is never larger-gain than the worst case
+    #        today's static eps already permits. This matters: this repo has
+    #        already measured that naively shrinking eps blows joint velocity
+    #        up at cond(J)~1e3-1e4 (see wrench_lambda_adaptive_regularization's
+    #        docstring), and the failure mode there is exactly an unbounded
+    #        Lambda as lambda_min(A) -> 0. Here it is bounded by construction,
+    #        which is why a plain clip(ratio*lmin, floor, ceiling) was NOT used
+    #        -- that form drives eps to its floor precisely when A is
+    #        rank-deficient, i.e. the one place large eps is load-bearing.
+    #
+    # Between the two clamps -- lambda_regularization/(1+ratio) <= lmin <=
+    # lambda_regularization/ratio -- the residual leak fraction is exactly
+    # ratio/(1+ratio), independent of pose: ratio=0.05 -> 4.8% leak, vs. 50.6%
+    # today at the pose above. Outside that band a clamp binds and the leak is
+    # SMALLER than the target (P1 binds for a very stiff task, P2 for a very
+    # compliant one), never larger -- so ratio is an upper bound on residual
+    # leak, not an exact setpoint everywhere. The branches meet continuously.
+    #
+    # KNOWN, DELIBERATE CONSEQUENCE at the motivating pose: lmin = 0.09746 sits
+    # just below lambda_regularization = 0.1, so P2 binds and the smallest
+    # reachable leak there is (0.1 - 0.09746)/0.1 = 2.54%, no matter how small
+    # ratio goes. Ratios below ~0.026 are therefore indistinguishable at that
+    # pose (measured: identical closed-loop numbers at ratio 0.05 and 0.01).
+    # Going below 2.54% would mean lowering lambda_regularization itself, which
+    # also rescales the wrench-shaping Lambda -- a gain change, out of scope
+    # for this flag by design.
+    #
+    # SCOPE, deliberately narrow (same call as lambda_adaptive_regularization):
+    #   - Only the NULLSPACE projector's Lambda. The wrench-shaping Lambda
+    #     keeps the static lambda_regularization, because changing it rescales
+    #     the effective task stiffness (at the pose above, 1/(A+0.1)=5.06 vs
+    #     the exact 1/A=10.26 -- a ~2x gain change the tuned kp_x was never
+    #     validated against). That is a gain decision, not a leak fix.
+    #   - compute() RAISES unless split_base_wrist_task is on with
+    #     split_base_wrist_task_dims selecting fewer than 3 rows, and raises if
+    #     lambda_adaptive_regularization is also on (both would schedule the
+    #     same eps). Loud rather than a silent no-op, matching this file.
+    nullspace_inertia_adaptive_regularization: bool = False
+    nullspace_inertia_eps_ratio: float = 0.05
+    # Singularity-consistent inversion (SCI), a.k.a. SVD-filtered / selectively
+    # damped inversion. Default off = historical behavior, byte-for-byte.
+    #
+    # WHY. Both existing near-singularity mechanisms in this controller are
+    # UNIFORM (isotropic) across task directions:
+    #   1. lambda_regularization adds a SCALAR eps*I inside
+    #      Lambda = (J_task M^-1 J_task^T + eps I)^-1, damping every direction
+    #      by the same amount however well-conditioned it is;
+    #   2. jacobian_singular_cond_max's singular_scale multiplies the WHOLE
+    #      wrench vector by one scalar.
+    # At a UR wrist singularity (wrist_2 == 0, the pose family this repo's
+    # transport work lives at) exactly ONE task direction is genuinely lost --
+    # the other five stay well-conditioned -- so uniform damping throws away
+    # authority the robot actually has. Measured at the real
+    # HEIGHT_ALPHA_0_5_Q pose (assets/ur5e_torque/scene.xml, cond(J)=7.3e16):
+    # the mass-weighted singular values of a_mat = J M^-1 J^T are
+    # sigma = [4.350, 3.356, 0.5306, 0.3150, 0.1997, 1.4e-8] -- one dead
+    # direction, and a seven-order-of-magnitude gap above it. With the tuned
+    # eps=0.1, the surviving fraction of the ideal (undamped) response per
+    # direction, sigma^2/(sigma^2+eps), is
+    #   [0.995, 0.991, 0.738, 0.498, 0.285, ~0]
+    # i.e. the second-smallest WELL-CONDITIONED direction is degraded to 28.5%
+    # of ideal purely as collateral damage from damping sized for a direction
+    # it has nothing to do with. This flag removes that collateral damage.
+    #
+    # MATH. a_mat is symmetric PSD, and a_mat = Jw Jw^T for the mass-weighted
+    # Jacobian Jw = J_task M^-1/2, so eigh(a_mat) = (U, s) gives exactly the
+    # task-space singular directions U_i and s_i = sigma_i^2 of Jw. Applying
+    # Chiaverini/Siciliano/Egeland's numerical-filtering scheme (IEEE T-RA
+    # 10(2), 1994, "Review of the damped least-squares inverse kinematics with
+    # experiments on an industrial robot manipulator") per direction:
+    #
+    #     lambda_i^2 = 0                                      if sigma_i >= svd_sigma_threshold
+    #                = (1 - (sigma_i/svd_sigma_threshold)^2)
+    #                  * svd_lambda_max^2                     otherwise
+    #     Lambda_SCI = U diag( 1 / (sigma_i^2 + lambda_i^2) ) U^T
+    #
+    # continuous at sigma_i == svd_sigma_threshold (lambda_i -> 0 from below).
+    # Equivalently Lambda_SCI = U diag(a_i) U^T Lambda_exact with the
+    # per-direction attenuation a_i = sigma_i^2/(sigma_i^2 + lambda_i^2): the
+    # exact analytic inverse in every well-conditioned direction, smoothly
+    # attenuated toward zero only in a lost one. That attenuation IS the
+    # singularity back-off -- the joint torque this pipeline finally commands
+    # is tau = J_task^T Lambda a, whose per-direction gain works out to
+    # sigma_i/(sigma_i^2 + lambda_i^2), the classical damped reciprocal, which
+    # goes to zero as sigma_i does. (Note this also shows the EXISTING uniform
+    # eps is already a damped least-squares scheme in the torque domain, with
+    # lambda^2 == eps applied to every direction at once; SCI is the same
+    # scheme made per-direction, not a different family of fix.)
+    #
+    # WHAT IS FILTERED, AND WHERE. Two branches, because the correct matrix to
+    # filter depends on which operator actually maps the commanded quantity to
+    # joint torque:
+    #   - task_space_inertia_shaping ON: Lambda is the operator inverted, so
+    #     a_mat's own eigenbasis is filtered (the mass-weighted directions --
+    #     using raw J_task's left singular vectors would be wrong here, since
+    #     U_J does not diagonalize J M^-1 J^T unless M is proportional to I,
+    #     so the reconstruction would not reduce to the exact inverse in the
+    #     undamped directions).
+    #   - task_space_inertia_shaping OFF: there is no Lambda at all (the law
+    #     is a plain Jacobian-transpose force map, tau = J_task^T F), so the
+    #     lost direction is the KINEMATIC one, null(J_task^T), and the wrench
+    #     is attenuated directly: F <- U diag(a_i) U^T F with (U, sigma) from
+    #     svd(J_task). That operator has spectral norm <= 1, so this branch
+    #     can only ever reduce commanded torque, never amplify it.
+    # Numerical note on the first branch: going through eigh(a_mat) squares the
+    # conditioning, so a singular value a direct svd(J) resolves at 2.9e-17 comes
+    # back as ~1.3e-8 (about sqrt(eps)) -- the classic argument against forming
+    # J J^T. It is harmless here precisely because this filter THRESHOLDS rather
+    # than divides: anything below svd_sigma_threshold is treated as lost either
+    # way, and the resulting attenuation is identical to ~1e-15. (Contrast the
+    # URScript port's cond(J) estimator, which does have to resolve sigma_min
+    # accurately and therefore avoids exactly this route.)
+    #
+    # Consequence of the two branches: svd_sigma_threshold is read against the
+    # MASS-WEIGHTED sigma in the first case and the RAW J_task sigma in the
+    # second. Those scales differ (at the pose above: 1.4e-8..4.35 vs.
+    # 2.9e-17..2.12), which is a real wart of using one knob for both -- the
+    # default sits in the wide gap both branches have at a genuine singularity.
+    #
+    # SCOPE, deliberately narrow:
+    #   - Only the WRENCH-shaping Lambda is filtered, and only when
+    #     task_space_inertia_shaping is on (when it is off, the Lambda built for
+    #     acceleration_feedforward's mass weighting and for the nullspace
+    #     projector stays on the historical uniform eps -- neither is a
+    #     singularity-back-off mechanism). The nullspace-posture
+    #     projector keeps the uniform-eps Lambda it has today (and its own
+    #     lambda_adaptive_regularization scheduler), because this repo already
+    #     found the hard way that those two Lambdas must be tuned separately
+    #     (see lambda_adaptive_regularization's docstring above).
+    #   - When this flag is on, singular_scale is NOT applied (it is the other
+    #     uniform mechanism this replaces). jacobian_singular_cond_max itself
+    #     is untouched and still governs the default path.
+    #   - Mutually exclusive with lambda_diagonal_shaping (which would
+    #     diagonalize the filtered Lambda in the WORLD basis, destroying the
+    #     singular-direction structure just built) and with
+    #     wrench_lambda_adaptive_regularization (which schedules the very
+    #     scalar eps this flag replaces) -- both raise rather than silently
+    #     producing something unanalyzed.
+    #
+    # WHAT IS AND IS NOT VALIDATED (2026-08-12, sim only, never on hardware).
+    # Measured with tools/diagnostics/svd_singularity_filtering_sim_check.py;
+    # asserted in tests/unit/test_svd_singularity_filtering.py and
+    # tests/mujoco/test_svd_singularity_filtering_closed_loop.py.
+    #   GOOD, at HEIGHT_ALPHA_0_5_Q (the motivating wrist singularity): a pure
+    #   X acceleration command is delivered at 100.00% vs. 72.77% under uniform
+    #   eps, cross-axis leak 2.5e-1 -> 2.3e-14, and closed-loop move+hold
+    #   tracking improves in BOTH directions with zero guard trips
+    #   (+/-0.02 m: 91.1/91.4% -> 96.3/96.4%; +/-0.05 m: 95.6/95.5% -> 98.1/97.8%).
+    #   RISK 1 -- NOT uniformly conservative. By design SCI commands MORE force
+    #   than today wherever the task is well-conditioned, and that is NOT
+    #   confined to singular poses: eps=0.1 is large compared to the
+    #   mass-weighted sigma^2 this arm actually operates at, so even at the
+    #   well-conditioned MEGA_SEARCH_WINNER_Q pose (cond(J)=6.9) today's uniform
+    #   eps keeps only 49-70% of the ideal response in the three translational
+    #   directions and SCI commands 1.78x the task torque there. The tuned gains
+    #   were never validated against that undamped response. This repo has prior
+    #   evidence that reducing the wrench-shaping eps causes joint-velocity
+    #   blowup at cond(J)~1e3-1e4 (see wrench_lambda_adaptive_regularization's
+    #   docstring), and that failure mode reproduced here: see RISK 2.
+    #   RISK 2 -- MIXED at the -45 deg clearance pose (HEIGHT_ALPHA_0_5_CLEARANCE_Q,
+    #   this repo's open Y-drift problem). SCI cuts Y-drift substantially
+    #   (dx=+0.02 m: 0.0131 -> 0.0044 m) and one previously-failing cell now
+    #   passes (dx=-0.06 m: uniform trips |Y-Y0|>0.03 m, SCI completes at 87.8%
+    #   tracking) -- but at dx=+0.02 m it trips the axis-error-growth guard, and
+    #   at dx=+0.06 m it trips the orientation guard with max|qd| = 2.68 rad/s
+    #   against a 3.0 rad/s limit, which is exactly the documented blowup mode.
+    #   Strongly direction-asymmetric (AGENTS.md sec 7). Do NOT read the Y-drift
+    #   improvement as a fix for that problem; it is a lead requiring its own
+    #   gain-retuning pass.
+    #   NOT MEASURED AT ALL: this repo's 4-category rigor sweep at any
+    #   height_alpha; any real hardware. Treat enabling this flag as a
+    #   gain-retuning exercise, not a drop-in.
+    #
+    # TUNING NOTE. With the defaults, svd_lambda_max^2 / svd_sigma_threshold^2
+    # == 40, so the attenuation ramp is continuous but steep: most of it is
+    # squeezed into the last ~0.1% of sigma below the threshold. That is fine
+    # for the intended use (a direction whose sigma sits near the threshold is
+    # barely usable anyway, and sigma moves slowly compared to the control rate)
+    # but it means the two knobs are not independent in feel -- lowering
+    # svd_lambda_max toward svd_sigma_threshold widens the transition at the
+    # cost of less damping in a fully lost direction.
+    svd_singularity_filtering: bool = False
+    # Singular value below which a direction is treated as near-singular and
+    # damped. Default 0.05 sits inside the seven-decade gap measured at the
+    # real wrist-singularity pose above (lost direction 1.4e-8, smallest
+    # well-conditioned 0.1997), so at that pose it damps exactly the one
+    # genuinely lost direction and nothing else. Pose-dependent by nature --
+    # this is a measured default, not a universal constant.
+    svd_sigma_threshold: float = 0.05
+    # Peak damping factor, reached as sigma -> 0. Default 0.31622776601683794
+    # == sqrt(0.1), i.e. svd_lambda_max^2 == 0.1 == the tuned configs'
+    # lambda_regularization, so at the exact singularity the lost direction
+    # gets EXACTLY today's damping magnitude -- SCI relaxes damping elsewhere
+    # and is never more aggressive than today's uniform eps in the lost
+    # direction itself.
+    svd_lambda_max: float = 0.31622776601683794
+    # Manipulability Control Barrier Function (CBF). Default off = historical
+    # behavior, byte-for-byte (the entire block is skipped, not merely
+    # parameterized to a no-op).
+    #
+    # WHAT IT IS. A per-cycle QP safety filter on the FINAL commanded torque:
+    #
+    #     min_tau ||tau - tau_nominal||^2
+    #     s.t.    (CBF row)  and  torque-headroom box
+    #
+    # where tau_nominal is exactly the torque this controller would otherwise
+    # have commanded (post-backtracking, pre-clip), and the CBF row enforces a
+    # high-order control-barrier-function condition on the Yoshikawa
+    # manipulability mu(q) = prod_i sigma_i(J(q)):
+    #
+    #     h(q) = mu(q) - manipulability_cbf_epsilon
+    #     hddot + (a1 + a2) hdot + a1 a2 h >= 0
+    #
+    # with a1 = manipulability_cbf_alpha1, a2 = manipulability_cbf_alpha2. Full
+    # derivation (relative degree, the affine-in-tau expansion of hddot, the
+    # exact A/b row, and what is approximated) lives in
+    # ``controller_core/manipulability_cbf.py``'s module docstring -- it is
+    # long and belongs next to the code that implements it, not duplicated
+    # here. Method source: OSCBF, arXiv:2503.06736, Sec V-B1 + Eq. 5 +
+    # Eq. 11-15 (a 7-DOF Franka paper; only the method is borrowed, nothing
+    # robot-specific).
+    #
+    # WHY IT IS NOT A REPLACEMENT FOR ANYTHING ALREADY HERE. This repo's three
+    # existing singularity mechanisms are reactive or offline:
+    # jacobian_singular_cond_max scales the wrench down once cond(J) is
+    # already bad, svd_singularity_filtering damps per-direction once a
+    # singular value is already small, and pose pre-filtering just avoids the
+    # region. A CBF constrains the MOTION -- it bounds the rate at which the
+    # arm may approach the singular set, so the configuration is prevented
+    # from getting there in the first place. It does NOTHING about authority
+    # already lost in a direction that is already singular; that remains
+    # svd_singularity_filtering's job, and the two are deliberately not made
+    # mutually exclusive. Note mu (product of singular values) is a different
+    # quantity from cond(J) (ratio of the extremes), not a rescaling of it.
+    #
+    # WHEN IT ACTIVATES. Only when the constraint row is actually violated by
+    # tau_nominal; otherwise the filter short-circuits and returns tau_nominal
+    # untouched (exactly, not to solver tolerance). So far from any
+    # singularity this is an exact no-op with a fixed per-cycle cost of 14
+    # extra Jacobian evaluations (12 for the central-difference grad_mu, 2 for
+    # the directional curvature).
+    #
+    # REQUIRES A KINEMATIC MODEL. grad_mu needs J at PERTURBED q, and the
+    # per-cycle state contract carries J(q) at the current q only, so
+    # XAxisCartesianImpedanceController must be constructed with a
+    # ``jacobian_fn=`` callable (q -> 6x6 J). Enabling this flag without one
+    # RAISES rather than silently degrading -- same "be loud" call as every
+    # other guard in controller.py.
+    #
+    # MEASURED SCALE OF mu ON THIS ARM (assets/ur5e_torque/scene.xml, sweeping
+    # wrist_2 away from the transport singularity at HEIGHT_ALPHA_0_5_Q):
+    #     wrist_2  0.000     0.005     0.020     0.050     0.200    1.200
+    #     mu       1.2e-18   9.4e-05   3.8e-04   9.4e-04   3.7e-03  1.8e-02
+    # mu is very nearly linear in the distance from the singular set here, so
+    # epsilon reads directly as an approximate wrist_2 standoff. The default
+    # 1.0e-3 corresponds to wrist_2 ~ 0.053 rad at that pose (and ~0.014 rad at
+    # the better-conditioned MEGA_SEARCH_WINNER_Q, where mu grows ~4x faster) --
+    # a MEASURED default for this pose family, not a universal constant.
+    #
+    # KNOWN INTERACTIONS, none of them made mutually exclusive:
+    #   - split_base_wrist_task / reduced_task_dims / task_lock_*: mu is
+    #     always computed from the FULL 6x6 state Jacobian, never from
+    #     J_task. That is deliberate -- a column-zeroed or row-selected J_task
+    #     is singular BY CONSTRUCTION (mu == 0 identically), which would make
+    #     the barrier meaningless. The consequence is that the CBF may command
+    #     torque on a joint the reduced task deliberately excludes; that is
+    #     correct for a safety filter (it is not the task) but it does mean
+    #     the "structurally cannot route through it" property those flags
+    #     advertise applies to the TASK torque, not to the CBF's correction.
+    #   - Torque backtracking: the CBF runs AFTER it, on tau_preclip, and the
+    #     QP's box is the same torque-headroom box the backtracker targets, so
+    #     the headroom guarantee is preserved.
+    #   - The MuJoCo adapter's rate limiter (800/160 Nm/s) throttles how fast
+    #     the CBF's correction can actually reach the plant.
+    manipulability_cbf: bool = False
+    # Barrier threshold: the CBF keeps mu(q) >= this value. See the measured
+    # mu-vs-wrist_2 table above for how to read it as a physical standoff.
+    # Must be > 0 -- eps == 0 makes the barrier's own boundary the singular
+    # set itself, where mu is not differentiable and the finite-difference
+    # gradient is meaningless.
+    manipulability_cbf_epsilon: float = 1.0e-3
+    # The two linear class-K gains of the high-order CBF, in 1/s. The
+    # closed-loop barrier dynamics on the constraint boundary decay as
+    # exp(-a1 t) and exp(-a2 t), so these set how far ahead the filter starts
+    # to intervene: larger = earlier, gentler correction spread over more
+    # cycles; smaller = later, harder correction. Defaults 10.0/10.0 give a
+    # ~0.1 s reaction horizon, i.e. ~50 cycles at the 500 Hz direct_torque
+    # cadence and ~200 at the 2 kHz sim step -- comfortably inside the
+    # discretization, which is the practical constraint on how large these may
+    # be (a continuous-time CBF enforced on a discrete grid stops being valid
+    # once 1/alpha approaches the cycle period).
+    manipulability_cbf_alpha1: float = 10.0
+    manipulability_cbf_alpha2: float = 10.0
+    # Central-difference step for grad_mu, in rad. 1e-5 keeps the O(step^2)
+    # truncation error and the O(1e-16 * mu / step) round-off error both far
+    # below the ~1e-2/rad gradient magnitude measured on this arm.
+    manipulability_cbf_fd_step: float = 1.0e-5
+    # Step for the directional second difference qd^T H_mu qd, in rad. Larger
+    # than the gradient step on purpose: a second difference divides by
+    # step^2, so it needs the bigger step to stay out of the cancellation
+    # regime. Must stay far smaller than the distance to the singular set that
+    # epsilon enforces -- mu behaves like c*|wrist_2| there, so a second
+    # difference straddling the kink is meaningless.
+    manipulability_cbf_curvature_step: float = 1.0e-4
     # Posture re-anchoring (default off = historical behavior). In move+hold
     # trajectories ``_q_rest`` stays the reset pose, so during the hold the
     # posture anchor fights the task force; at a task singularity that force
@@ -592,6 +962,153 @@ class CartesianImpedanceConfig:
     # coincidentally equal output -- verified byte-identical in
     # tests/unit/test_split_base_wrist_task.py.
     split_base_wrist_task: bool = False
+    # Which 3 joints the split task above is actually allowed to drive
+    # (default None = the historical hardcoded base-joint set
+    # (0, 1, 2) = shoulder_pan/shoulder_lift/elbow, i.e. exactly the
+    # `J_task[:, 0:3] = J[0:3, 0:3]` the flag shipped with in 2026-08-01).
+    # Added 2026-08-12; only the INDICES are generalized, the mechanism is
+    # unchanged.
+    #
+    # Why the generalization: the base-joint set above was chosen from one
+    # specific piece of evidence -- at the wrist_2=0 transport pose, the
+    # position-rows x base-cols 3x3 block is well conditioned (cond ~7.8)
+    # while the full 6x6 J is numerically singular. That is a property of a
+    # POSE, not a law about which joints should do transport work. The
+    # motivating case for making it configurable is a setup that wants
+    # shoulder_pan held out of the task entirely (protecting the wall/base
+    # clearance the -45deg pose family exists for, AGENTS.md sec 3) -- which
+    # the hardcoded slice cannot express, and which task_lock_* cannot
+    # express either (locking shoulder_pan on top of the split leaves only 2
+    # free columns for the 3 position rows, i.e. an underdetermined
+    # translation task).
+    #
+    # CHOOSING A SET IS A KINEMATICS QUESTION, NOT A PREFERENCE. Measured
+    # 2026-08-12 over all 20 three-joint sets, 8 random poses plus
+    # HEIGHT_ALPHA_0_5_Q and the -45deg clearance pose
+    # (assets/ur5e_torque/scene.xml), as median cond(J[0:3, set]):
+    #   (0,1,2) pan+lift+elbow     7.1   (the historical default)
+    #   (2,3,4) elbow+wrist_1+w_2  8.4   (best set that excludes shoulder_pan)
+    #   (1,2,4) lift+elbow+w_2    11.8
+    #   (1,3,4) lift+wrist_1+w_2  18.1
+    #   ...every other set        >1e15  (singular at every pose tested)
+    # Two consequences worth stating explicitly, because both are easy to get
+    # wrong from intuition:
+    #   (a) (1, 2, 3) = shoulder_lift/elbow/wrist_1 -- the obvious "shift the
+    #       window one joint along" choice -- is STRUCTURALLY singular, not
+    #       merely badly conditioned at some poses: those three axes stay
+    #       mutually parallel through the arm's entire motion (the UR planar
+    #       sub-chain), so they span at most a 2D subspace of 3D linear
+    #       velocity at ANY configuration. No pose or gain fixes that.
+    #   (b) every usable set that excludes shoulder_pan INCLUDES wrist_2, and
+    #       all of those are exactly singular at wrist_2 = 0 -- which is
+    #       exactly where this repo's existing transport poses sit. (2,3,4)
+    #       measures cond 1e17 at wrist_2=0, 708 at 0.01 rad, 80 at 0.1 rad,
+    #       27 at 90deg. So dropping shoulder_pan from the task requires a
+    #       start pose that actively holds wrist_2 away from zero; it is not
+    #       a change that can be made against the current poses as they are.
+    # Nothing in this file checks any of that at runtime -- cond_task is
+    # computed and reported (jacobian_cond) from the selected block, and with
+    # jacobian_singular_cond_max at its usual 1e18 the singular_scale term
+    # will NOT quietly shrink the task wrench to compensate. Screen the
+    # selection against the intended start pose before trusting it.
+    #
+    # Shape contract: exactly 3 distinct indices into JOINT_NAME_ORDER, each
+    # in [0, 5] -- 3 because the split task is the 3 position rows, so 3
+    # active columns keeps the reduced task square (the historical case is
+    # then a strict special case, not a separate code path). A different
+    # SIZE of active set is NOT supported: the downstream math (A_task =
+    # J_task M^-1 J_task^T, its eps-regularized inverse Lambda, and the
+    # dynamically consistent nullspace projector) is written against a 3-row
+    # task and would still "run" with 2 or 4 active columns, but with a
+    # rank-deficient / differently-conditioned A_task that nothing here has
+    # ever evaluated -- so _parse_split_base_wrist_active_joints raises
+    # instead of quietly accepting it.
+    #
+    # The joints NOT in this set keep exactly the treatment the wrist joints
+    # already got under the hardcoded version: their J_task columns stay
+    # zero, so no translation-task torque can structurally reach them, and
+    # they are held by the existing joint-space posture spring
+    # (tau_posture = kp_posture*(q_rest - q) - kd_posture*qd, projected
+    # through the nullspace projector when nullspace_posture is on) anchored
+    # to wherever they were at reset_from_state()/re-anchor time. "Held" here
+    # therefore means "held by a finite-stiffness spring", not "kinematically
+    # locked" -- use posture_kp_by_joint above if a specific held joint needs
+    # a stiffer anchor than the scalar gain gives it.
+    #
+    # Setting this while split_base_wrist_task is False is a hard error, not
+    # a silent no-op: a config asking for a specific active-joint set while
+    # the mechanism that reads it is off is exactly the kind of "believed it
+    # was configured, actually got the default" mismatch this repo has been
+    # bitten by before.
+    split_base_wrist_active_joints: tuple[int, ...] | None = None
+    # Which TRANSLATION ROWS the split task above actually regulates (default
+    # None = all three, (0, 1, 2) = world X/Y/Z, i.e. exactly the 3-row task
+    # this mechanism has always had). Added 2026-08-12. Combined with
+    # split_base_wrist_active_joints (columns) this makes the split task's
+    # J_task a general len(rows) x len(cols) block instead of a fixed 3 x 3
+    # one -- row selection AND column selection at the same time, which until
+    # this date compute() explicitly refused (the split_base_wrist_task +
+    # reduced_task_dims mutual-exclusion error, still in force: that pairing
+    # is a DIFFERENT combination and remains untested).
+    #
+    # Why this exists, measured not assumed (2026-08-12, real UR5e pose
+    # q = [-2.3688, -2.1801, -1.8838, -0.7962, 0.004714693, 0.0206],
+    # assets/ur5e_torque/scene.xml): a real setup needs wrist_2 held away from
+    # a physical singularity limit AND shoulder_pan held fixed for clearance,
+    # leaving {shoulder_lift, elbow, wrist_1} = (1, 2, 3) to do the transport.
+    # That joint triple is the UR planar sub-chain -- three parallel axes, so
+    # cond(J[0:3, (1,2,3)]) = 2.9e16 with rank exactly 2 (singular values
+    # 0.695, 0.286, 2.4e-17) at that pose and at every other pose tested. As a
+    # 3-row task it is unusable, permanently. But the transport task there is
+    # ONE-dimensional (front/back = world X), and the X row alone over those
+    # same columns has norm 0.2353 -- essentially identical to the 0.2351 of a
+    # known-working combination -- i.e. world X lies comfortably inside the 2D
+    # subspace those joints CAN span. The missing third rank direction was
+    # never needed. Selecting rows (0,) turns an unusable 3x3 into a perfectly
+    # well-posed 1x3.
+    #
+    # The rows NOT selected get exactly the treatment the non-active joints
+    # and the rotational wrench already get under this mechanism: their force
+    # is still COMPUTED (kp_y/kd_y/kp_z/kd_z, reported in the `wrench` output
+    # and as y_error/z_error) but is not routed into the task-torque pipeline;
+    # those axes stay held by the joint-space posture spring, projected
+    # through the nullspace projector when nullspace_posture is on. That
+    # projector is recomputed against the SAME reduced J_task, so with a 1-row
+    # task it removes only a 1-dimensional constraint and posture keeps
+    # authority in the remaining 5 -- strictly MORE posture authority for the
+    # held axes than the 3-row case had, not less. Nothing is silently
+    # dropped, but "held" means "held by a finite-stiffness spring", exactly
+    # as it already does for held joints.
+    #
+    # Guarded combinations (compute() raises rather than running something
+    # unanalyzed -- every one of these fires only when this field is set, so
+    # none of them can affect any pre-existing config):
+    #   * set while split_base_wrist_task is False (nothing reads it);
+    #   * the transport axis (transport_axis_index) not among the selected
+    #     rows -- the transport force would be silently discarded and the arm
+    #     would simply never move toward its target;
+    #   * acceleration_feedforward -- accel_ff_vec's x/y/z indexing assumes
+    #     the natural 3-row order (the same reason the pre-existing
+    #     `acceleration_feedforward + reduced_task_dims` guard exists);
+    #   * y_integral_action when world Y is not a selected row -- the
+    #     integral would accumulate against an error whose force is never
+    #     applied (pure windup, no effect);
+    #   * lambda_adaptive_regularization / wrench_lambda_adaptive_regularization
+    #     with a SINGLE selected row -- both schedule eps by log(cond_task),
+    #     and a 1-row task has no meaningful condition number (cond of any
+    #     nonzero 1xN matrix is exactly 1.0), so cond_task falls back to the
+    #     block's NORM there (the convention reduced_task_dims already uses
+    #     for its own 1-row case) and feeding a norm into a log(cond)
+    #     schedule would pick an eps for reasons unrelated to conditioning.
+    # Consequence of that same norm fallback, NOT guarded because it is the
+    # established 1-row convention and its failure direction is "mechanism
+    # stays inactive": with a single selected row, `singular_scale`'s
+    # `cond_task > jacobian_singular_cond_max` test compares a norm (~0.24 at
+    # the pose above) against a condition-number ceiling, so that term never
+    # engages. Screen the selected block's authority at the intended start
+    # pose yourself -- as split_base_wrist_active_joints' docstring already
+    # says for the column selection.
+    split_base_wrist_task_dims: tuple[int, ...] | None = None
     # Reduced-task dimension selection (default off = historical behavior:
     # all 6 rows active, byte-identical to today). Added 2026-08-03 as the
     # general form of the row-selection idea split_base_wrist_task already
@@ -706,6 +1223,80 @@ class CartesianImpedanceConfig:
     # (or a run record) can tell a genuine no-op apart from a working
     # feedforward that happens to see zero commanded acceleration.
     acceleration_feedforward: bool = False
+    # Which world Cartesian axis the task (transport) axis is: 0=X (default,
+    # the historical behavior this whole file was written around), 1=Y, 2=Z.
+    # Added 2026-08-12. Before this, `compute()` read `p[0]`/`v[0]` and wrote
+    # the resulting task force into `wrench[0]` unconditionally, so the
+    # `transport_axis_index` that already existed on the state contract
+    # (controller_core/state_types.py) and in the sim adapter only redirected
+    # what CALLERS computed as a target and which axis the safety monitor
+    # treated as "orthogonal" -- selecting axis 1 or 2 produced a genuinely
+    # broken configuration (a target derived from Y compared against, and
+    # driving, X).
+    #
+    # PRECEDENCE (deliberate): the per-cycle state's `transport_axis_index`
+    # WINS over this field when the state supplies one; this field is only the
+    # default for callers whose state dict omits the key. Rationale: both the
+    # MuJoCo adapter (`MujocoUR5eState.as_robot_state()`) and the real-hardware
+    # path (`hardware/direct_torque_link.py::compose_robot_state`) always
+    # populate the state key, so state-wins keeps the axis under the control of
+    # the transport loop that owns the guards and the target generator, and
+    # makes a stray `transport_axis_index:` in a YAML controller section unable
+    # to silently redirect a real-hardware move away from the axis its guards
+    # and trajectory were built for.
+    #
+    # AXIS->GAIN MAPPING (a transposition, not a rotation): the task axis
+    # always uses kp_x/kd_x (plus ki_x/x_integral_action and the x_vel_des
+    # feedforward) -- i.e. those fields name the TASK-axis gains, not literally
+    # world X. World axis 0 then takes over the hold gains that used to hold
+    # the task axis, and the remaining axis keeps its own:
+    #   axis=0 (default): X<-kp_x/kd_x(task), Y<-kp_y/kd_y, Z<-kp_z/kd_z
+    #   axis=1:           Y<-kp_x/kd_x(task), X<-kp_y/kd_y, Z<-kp_z/kd_z
+    #   axis=2:           Z<-kp_x/kd_x(task), Y<-kp_y/kd_y, X<-kp_z/kd_z
+    # The "y-role" machinery (y_control_mode corridor, ki_y/y_integral_action,
+    # y_coupling_feedforward) follows the kp_y/kd_y gains, so it stays on
+    # physical Y whenever Y is not itself the task axis, and moves to X when it
+    # is (Y cannot simultaneously be driven and held). Chosen over a
+    # sorted-orthogonals ("first remaining axis always gets the y role")
+    # mapping precisely because it keeps the Y-specific mechanisms -- all of
+    # which were designed and validated against a real, physical Y-drift
+    # phenomenon (see AGENTS.md sec 3's -45 deg base-rotation finding) -- on
+    # physical Y for axis=2, and keeps kp_z/kd_z (the stiffest defaults,
+    # 120/20, sized to hold against gravity) on the vertical axis for axis=1.
+    #
+    # NOT generalized (raises rather than silently corrupting, matching this
+    # file's existing `acceleration_feedforward + reduced_task_dims` guard):
+    # `acceleration_feedforward` with a non-zero axis -- its
+    # target_x_accel/target_y_accel/target_z_accel keys are named for physical
+    # axes while target_x/target_x_vel are the task-axis reference, so the two
+    # conventions collide (for axis=1, target_x_accel-as-task-accel and
+    # target_y_accel-as-Y-accel would both want wrench row 1). No trajectory
+    # generator produces target_y_accel/target_z_accel today, so there is no
+    # evidence to pick a resolution from.
+    #
+    # `reduced_task_dims`' task_dim_x/y/z stay PHYSICAL row selectors (they
+    # select rows of the world-frame wrench, which is what they always were);
+    # a caller using them with a non-zero axis must enable the task axis' own
+    # row or the task force is dropped -- not guarded here, because
+    # task_dim_<task axis>=False is a legitimate (if unusual) existing choice.
+    transport_axis_index: int = 0
+
+    # Added 2026-08-14: the "y-role" axis (whichever world axis is NOT the
+    # task axis and not the z-role axis -- see _axis_roles()) has always been
+    # held at a FIXED reset-time value (p0[y_axis]), even though the task axis
+    # itself supports a genuinely moving target (target_x/target_x_vel). This
+    # meant no existing config could drive TWO translational axes
+    # simultaneously with independent moving targets -- needed for testing
+    # combined 2-axis (e.g. parametric-pumping) trajectories, where a caller
+    # wants the y-role axis to track its OWN target_y/target_y_vel instead of
+    # sitting still. Default False reproduces the exact previous behavior
+    # (y_des = p0[y_axis], no y_vel_des term in Fy) bit-for-bit -- this flag
+    # does not touch the hold_current_pose branch, y_coupling_feedforward,
+    # y_control_mode="corridor", or y_integral_action, and raises rather than
+    # silently combining with any of those (ambiguous which mechanism should
+    # own y_des) if more than one is set at once. See controller.py's
+    # compute() for the actual (small, single-branch) wiring.
+    second_task_axis_enabled: bool = False
 
     @classmethod
     def from_controller_yaml_section(cls, ctrl: dict) -> "CartesianImpedanceConfig":
@@ -741,6 +1332,11 @@ class CartesianImpedanceConfig:
                 else None
             ),
             kd_joint=float(gains.get("kd_joint", 0.8)),
+            kd_joint_by_joint=(
+                np.array([float(ctrl["kd_joint_by_joint"][name]) for name in JOINT_NAME_ORDER], dtype=np.float64)
+                if "kd_joint_by_joint" in ctrl
+                else None
+            ),
             tau_max_nm=tm,
             jacobian_singular_cond_max=float(
                 ctrl.get("jacobian_singular_cond_max", 1.0e5)
@@ -759,6 +1355,27 @@ class CartesianImpedanceConfig:
             lambda_cond_high=float(ctrl.get("lambda_cond_high", 1.0e8)),
             wrench_lambda_adaptive_regularization=bool(ctrl.get("wrench_lambda_adaptive_regularization", False)),
             wrench_lambda_regularization_far=float(ctrl.get("wrench_lambda_regularization_far", 0.01)),
+            nullspace_inertia_adaptive_regularization=bool(
+                ctrl.get("nullspace_inertia_adaptive_regularization", False)
+            ),
+            nullspace_inertia_eps_ratio=float(ctrl.get("nullspace_inertia_eps_ratio", 0.05)),
+            svd_singularity_filtering=bool(ctrl.get("svd_singularity_filtering", False)),
+            svd_sigma_threshold=float(ctrl.get("svd_sigma_threshold", 0.05)),
+            svd_lambda_max=float(ctrl.get("svd_lambda_max", 0.31622776601683794)),
+            manipulability_cbf=bool(ctrl.get("manipulability_cbf", False)),
+            manipulability_cbf_epsilon=_parse_manipulability_cbf_epsilon(
+                ctrl.get("manipulability_cbf_epsilon", 1.0e-3)
+            ),
+            manipulability_cbf_alpha1=_parse_manipulability_cbf_alpha(
+                ctrl.get("manipulability_cbf_alpha1", 10.0), "manipulability_cbf_alpha1"
+            ),
+            manipulability_cbf_alpha2=_parse_manipulability_cbf_alpha(
+                ctrl.get("manipulability_cbf_alpha2", 10.0), "manipulability_cbf_alpha2"
+            ),
+            manipulability_cbf_fd_step=float(ctrl.get("manipulability_cbf_fd_step", 1.0e-5)),
+            manipulability_cbf_curvature_step=float(
+                ctrl.get("manipulability_cbf_curvature_step", 1.0e-4)
+            ),
             posture_reanchor_on_settle=bool(ctrl.get("posture_reanchor_on_settle", False)),
             reanchor_x_tol_m=float(ctrl.get("reanchor_x_tol_m", 2.0e-3)),
             reanchor_qd_tol_radps=float(ctrl.get("reanchor_qd_tol_radps", 0.05)),
@@ -862,6 +1479,12 @@ class CartesianImpedanceConfig:
             y_coupling_feedforward=bool(ctrl.get("y_coupling_feedforward", False)),
             y_coupling_gain=float(ctrl.get("y_coupling_gain", 0.7)),
             split_base_wrist_task=bool(ctrl.get("split_base_wrist_task", False)),
+            split_base_wrist_active_joints=_parse_split_base_wrist_active_joints(
+                ctrl.get("split_base_wrist_active_joints", None)
+            ),
+            split_base_wrist_task_dims=_parse_split_base_wrist_task_dims(
+                ctrl.get("split_base_wrist_task_dims", None)
+            ),
             reduced_task_dims=bool(ctrl.get("reduced_task_dims", False)),
             task_dim_x=bool(ctrl.get("task_dim_x", True)),
             task_dim_y=bool(ctrl.get("task_dim_y", True)),
@@ -876,4 +1499,8 @@ class CartesianImpedanceConfig:
             task_lock_wrist_2=bool(ctrl.get("task_lock_wrist_2", False)),
             task_lock_wrist_3=bool(ctrl.get("task_lock_wrist_3", False)),
             acceleration_feedforward=bool(ctrl.get("acceleration_feedforward", False)),
+            transport_axis_index=_parse_transport_axis_index(
+                ctrl.get("transport_axis_index", 0)
+            ),
+            second_task_axis_enabled=bool(ctrl.get("second_task_axis_enabled", False)),
         )

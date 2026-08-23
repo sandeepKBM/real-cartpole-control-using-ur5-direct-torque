@@ -8,7 +8,13 @@
 # was NOT the cause (81.4 GB cgroup cap vs ~30 GB used), so worker count is the
 # remaining suspect. 32 leaves headroom on a shared teaching machine either way.
 #
-# LAUNCH NOTE: invoke over SSH WITH KEEPALIVES --
+# LAUNCH NOTE: run DETACHED (setsid nohup), then poll for the output JSON.
+# Keepalives are NOT sufficient: a run with
+# ServerAliveInterval=30/ServerAliveCountMax=10 still died to "client_loop: send
+# disconnect: Broken pipe" ~35 min in, losing the whole search. Processes DO
+# survive SSH death on these hosts (deadlocked jobs were found alive 37 h after
+# their session had gone), so detaching is both safe and necessary for
+# multi-hour work. Superseded note kept for context --
 #   ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o TCPKeepAlive=yes ...
 # A previous run of this exact script died to "client_loop: send disconnect:
 # Broken pipe" ~2 min in: the remote job is a FOREGROUND child of the ssh

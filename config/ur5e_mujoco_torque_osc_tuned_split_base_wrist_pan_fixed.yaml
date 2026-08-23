@@ -1,0 +1,158 @@
+# config/ur5e_mujoco_torque_osc_tuned_split_base_wrist.yaml with ONE field added:
+# `split_base_wrist_active_joints: [2, 3, 4]`.
+#
+# What that changes (added 2026-08-12, see
+# controller_core/x_axis_cartesian_impedance/config.py::split_base_wrist_active_joints):
+# `split_base_wrist_task` restricts the translation task (Fx, Fy, Fz) to a 3-joint
+# subset's Jacobian columns; every other joint's column is exactly zero, so no
+# translation-task torque can structurally route through it. Until this date that subset
+# was hardcoded to the base joints (shoulder_pan, shoulder_lift, elbow). This file instead
+# selects [elbow, wrist_1, wrist_2] (indices 2, 3, 4 in JOINT_NAME_ORDER):
+#   ACTIVE (carry the task): elbow, wrist_1, wrist_2
+#   HELD  (no task torque):  shoulder_pan, shoulder_lift, wrist_3
+# "Held" means held by the existing joint-space posture spring (kp_posture/kd_posture,
+# projected through the nullspace projector since nullspace_posture is on here) anchored at
+# the trial-start pose -- a finite-stiffness hold, NOT a kinematic lock. If shoulder_pan
+# specifically needs a stiffer anchor than the scalar kp_posture gives it, use
+# `posture_kp_by_joint` (already supported, not set here).
+#
+# Motivation: keep shoulder_pan out of the active set, so base rotation -- and therefore the
+# wall/base clearance the -45deg pose family exists for (AGENTS.md sec 3) -- cannot be
+# dragged around by the transport task. The obvious alternative (`split_base_wrist_task` +
+# `task_lock_shoulder_pan`) does NOT work: it leaves only 2 free columns for 3 task rows,
+# i.e. an underdetermined translation task.
+#
+# WHY THIS PARTICULAR SET, measured not assumed (2026-08-12 sweep of cond(position-rows x
+# selected-cols) over all 20 three-joint sets at 8 random poses plus HEIGHT_ALPHA_0_5_Q and
+# the -45deg clearance pose, using assets/ur5e_torque/scene.xml):
+#   * (2,3,4) elbow+wrist_1+wrist_2  median cond  8.4  <- best set excluding shoulder_pan
+#   * (1,2,4) lift+elbow+wrist_2     median cond 11.8
+#   * (1,3,4) lift+wrist_1+wrist_2   median cond 18.1
+#   * (0,1,2) base joints (default)  median cond  7.1
+#   Every three-joint set that excludes shoulder_pan and EXCLUDES wrist_2 is singular at
+#   every pose tested (cond 1e15-1e33) -- there is no usable pan-free set without wrist_2.
+#   In particular [shoulder_lift, elbow, wrist_1] = (1,2,3), the superficially obvious
+#   "next joint along" choice, is STRUCTURALLY singular (median cond 4e16, not
+#   pose-dependent): those three axes stay mutually parallel through the arm's whole motion
+#   (the UR planar sub-chain), so they span at most a 2D subspace of 3D linear velocity.
+#
+# HARD PRECONDITION -- READ BEFORE USING: (2,3,4) is exactly singular at wrist_2 == 0
+# (cond 1e17 measured at HEIGHT_ALPHA_0_5_Q and at the -45deg clearance pose, both of which
+# have wrist_2 = 0), and only recovers as wrist_2 moves away from zero:
+#   wrist_2 = 0.00 rad -> cond 1e17     wrist_2 = 0.10 rad -> cond 80
+#   wrist_2 = 0.01 rad -> cond 708      wrist_2 = 1.57 rad -> cond 27
+# So this config REQUIRES a start pose with wrist_2 genuinely away from 0 (~90deg is the
+# best-conditioned end of that range). None of the poses currently in hardware/poses.py
+# satisfy that -- a suitable start pose has to be chosen and checked first. At wrist_2=90deg
+# the default base-joint set degrades in the other direction (cond 7.8 -> 41.9), so this is
+# a real trade between joint sets, not a free improvement. Note the pre-existing
+# `jacobian_singular_cond_max: 1.0e18` below means singular_scale will NOT rescue a badly
+# conditioned selection by shrinking the task wrench; check cond(J[0:3, [2,3,4]]) at your
+# actual start pose yourself.
+#
+# NOT VALIDATED. Unlike the base file this copies, no sim sweep and no real-hardware run has
+# been done with this active-joint set -- only the conditioning sweep above. This is a
+# mechanism plus a kinematically-screened starting point, not an asserted-good configuration.
+#
+# Everything below this comment block is byte-identical to
+# config/ur5e_mujoco_torque_osc_tuned_split_base_wrist.yaml except the single added
+# `split_base_wrist_active_joints` line under `controller:`.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+    kp_rot_wrist: 0.0
+    kd_rot_wrist: 10.0
+  wrist_orientation_task: true
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  split_base_wrist_task: true
+  split_base_wrist_active_joints: [2, 3, 4]
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  friction_feedforward: true
+  friction_ff_qd_deadband: 0.05
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 5.0
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

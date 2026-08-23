@@ -16,6 +16,7 @@ from .direct_torque_transport import DirectTorqueTransportResult, run_x_transpor
 from .link import UR5eLink
 from .position_transport import PositionTransportResult, run_x_transport_position
 from .safety import UR5eSafetyLimits
+from .transport_common import validate_transport_axis_index
 from .urscript_transport import UrscriptTransportResult, run_urscript_x_transport
 from .velocity_transport import VelocityTransportResult, run_x_transport_velocity
 
@@ -67,6 +68,7 @@ def run_x_transport(
     duration_s: float,
     output_dir: Path | None,
     motion_opt_in: bool,
+    transport_axis_index: int = 0,
     dynamics_source: str = "local",
     shadow_osc: bool = True,
     skip_joint_move: bool = False,
@@ -94,6 +96,34 @@ def run_x_transport(
     telemetry_gap_bridge_max_cycles: int = 2,
 ) -> XTransportResult:
     mode = normalize_control_mode(control_mode)
+    transport_axis_index = validate_transport_axis_index(transport_axis_index)
+    if transport_axis_index != 0 and mode != "position":
+        # Deliberate fail-fast, added with the axis plumbing itself (see the
+        # three transport modules' `transport_axis_index` parameter). The
+        # guards, the commanded waypoint and the reported metrics are now all
+        # axis-generic, but the INNER CONTROL LAW of every mode except
+        # `position` still regulates world-X and nothing else:
+        #   * direct_torque -> controller_core/x_axis_cartesian_impedance/
+        #     controller.py::compute() reads `ee_pos[0]` / `target_x` literally
+        #     (`x_err = x_des - p[0]`); there is no axis field on
+        #     CartesianImpedanceConfig or on its RobotState contract.
+        #   * urscript      -> assets/urscript/x_axis_osc_inner.script.template
+        #     computes `x0 = tcp0[0]` / `x_err = x_des - tcp[0]` on-robot.
+        #   * velocity      -> hardware/velocity_transport.py is not plumbed
+        #     for a transport axis at all (still hardcoded index 0).
+        # Allowing a non-zero axis there would command motion along X while
+        # guarding (and scoring) along Y/Z -- i.e. the robot pushes off-axis
+        # until the 0.03 m orthogonal-drift guard trips. `position` mode is
+        # exempt because its commanded motion IS the waypoint this function
+        # writes (servoL), which is genuinely axis-generic; only its optional
+        # `shadow_osc` diagnostic remains X-only (never sent to the robot).
+        # Lifting this requires an axis-aware control law, not more plumbing.
+        raise ValueError(
+            f"transport_axis_index={transport_axis_index} is only supported for "
+            f"control_mode='position'; control_mode={mode!r}'s inner control law regulates "
+            "world-X only (see hardware/x_transport.py for the per-mode detail), so a "
+            "non-zero axis would command X while guarding the selected axis"
+        )
     if start_q_rad is not None:
         start_q_rad = _validate_start_q_rad(start_q_rad)
     if trajectory_profile != "min_jerk_move_hold" and mode != "direct_torque":
@@ -113,6 +143,7 @@ def run_x_transport(
             duration_s=duration_s,
             output_dir=output_dir,
             motion_opt_in=motion_opt_in,
+            transport_axis_index=transport_axis_index,
             skip_joint_move=skip_joint_move,
             joint_target_q=start_q_rad,
             max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
@@ -146,6 +177,7 @@ def run_x_transport(
             duration_s=duration_s,
             output_dir=output_dir,
             motion_opt_in=motion_opt_in,
+            transport_axis_index=transport_axis_index,
             shadow_osc=shadow_osc,
             max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
             max_tcp_speed_mps_override=max_tcp_speed_mps_override,
@@ -240,6 +272,7 @@ def run_x_transport(
         duration_s=duration_s,
         output_dir=output_dir,
         motion_opt_in=motion_opt_in,
+        transport_axis_index=transport_axis_index,
         record_latency=record_latency,
         dynamics_source=dynamics_source,
         coriolis_feedforward=coriolis_feedforward,

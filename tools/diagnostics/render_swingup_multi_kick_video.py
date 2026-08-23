@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Render an MP4 of the multi-kick pendulum swing-up attempt (the best
-result found this session: ~40deg of real swing from hanging before the
-orientation guard trips, torque-lane impedance controller, real joint +
-pendulum-hinge friction modeled). Not a successful full flip -- rendered
-honestly as what was actually achieved, guard trip included.
+"""Render an MP4 of the multi-kick pendulum swing-up attempt. Re-tuned
+2026-08-12 after the pendulum model correction (real 0.12m rod, real
+attachment geometry, real ~0.30kg wrist mass, down from a wrong 0.30m/
+~2.17kg placeholder model) -- this now reaches min_theta_dist=0.1785 rad
+(~10.2deg from fully inverted) with ZERO guard trips in 8 kicks, a real
+qualitative change from the pre-correction ~40deg-and-guard-trip result
+the old BEST params/module docstring described. Also reports peak
+end-effector Cartesian speed and peak pendulum tip speed alongside the
+video, not just the swing angle.
 """
 
 from __future__ import annotations
@@ -26,15 +30,16 @@ from pendulum_swingup_energy_shaping import load_config, ARM_Q0, CONTROL_DT, RAT
 from pendulum_swingup_multi_kick import find_nearby_equilibrium, MIN_KICK_GAP_S, THETADOT_DEADBAND, K_RECENTER  # noqa: E402
 
 BEST = {
-    "kick_amplitude_m": 0.14293471689118653,
-    "kick_duration_s": 0.34690317879949906,
-    "phi_trigger_rad": 0.2295238033135259,
+    "kick_amplitude_m": 0.0861,
+    "kick_duration_s": 0.1226,
+    "phi_trigger_rad": 0.4316,
 }
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--duration-s", type=float, default=13.0, help="Render up to and just past the guard trip.")
+    p.add_argument("--duration-s", type=float, default=15.0,
+                    help="Full validated trial duration (no guard trip expected with BEST).")
     p.add_argument("--output", type=Path, default=REPO_ROOT / "outputs" / "swingup_multi_kick_demo.mp4")
     p.add_argument("--fps", type=float, default=30.0)
     p.add_argument("--width", type=int, default=1280)
@@ -43,6 +48,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--elevation", type=float, default=-15.0)
     p.add_argument("--distance", type=float, default=1.9)
     p.add_argument("--lookat", type=float, nargs=3, default=[-0.3, -0.2, 0.5], metavar=("X", "Y", "Z"))
+    p.add_argument("--config", type=Path, default=None,
+                    help="Controller config override; default uses this script's own CONFIG_PATH.")
+    p.add_argument("--arm-q-rad", type=float, nargs=6, default=None,
+                    metavar=("Q1", "Q2", "Q3", "Q4", "Q5", "Q6"),
+                    help="Override the module's ARM_Q0 starting pose for both the arm and the "
+                         "hanging/inverted-angle computation (which now correctly depends on it "
+                         "per the 2026-08-13 find_inverted_angle fix -- default uses ARM_Q0.")
+    p.add_argument("--kick-amplitude-m", type=float, default=None, help="Override BEST['kick_amplitude_m'].")
+    p.add_argument("--kick-duration-s", type=float, default=None, help="Override BEST['kick_duration_s'].")
+    p.add_argument("--phi-trigger-rad", type=float, default=None, help="Override BEST['phi_trigger_rad'].")
+    p.add_argument("--continue-through-guard", action="store_true",
+                    help="Don't stop 0.4s after the first guard trip -- keep rendering the full "
+                         "--duration-s. For sim-only guard-disabled runs (run_multi_kick_trial's "
+                         "enforce_guard=False) where a trip is expected near the start and the "
+                         "point is to show the full multi-kick sequence anyway.")
     return p.parse_args()
 
 
@@ -59,10 +79,21 @@ def main() -> int:
     pend_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "/pendulum_hinge")
     pend_qpos_adr = model.jnt_qposadr[pend_jid]
     pend_dof_adr = model.jnt_dofadr[pend_jid]
+    tip_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "/pendulum_tip_site")
+    jacp_ee = np.zeros((3, model.nv))
+    jacr_ee = np.zeros((3, model.nv))
+    jacp_tip = np.zeros((3, model.nv))
+    jacr_tip = np.zeros((3, model.nv))
 
+    arm_q = ARM_Q0 if args.arm_q_rad is None else np.asarray(args.arm_q_rad, dtype=np.float64)
+    config = load_config() if args.config is None else load_config(args.config)
+    # Set the arm pose BEFORE computing hanging/inverted angles -- that
+    # computation now correctly depends on data.qpos[:6] (2026-08-13 fix),
+    # so it must see the real arm pose, not whatever MjData(model) defaults
+    # to (previously this was called with an unset, effectively-zero pose).
+    data.qpos[:6] = arm_q
     hanging_angle, inverted_angle = find_hanging_and_inverted_angle(model, data, pend_qpos_adr)
-    config = load_config()
-    data.qpos[:6] = ARM_Q0
+    data.qpos[:6] = arm_q
     data.qpos[pend_qpos_adr] = hanging_angle
     data.qvel[:] = 0.0
     mujoco.mj_forward(model, data)
@@ -103,11 +134,16 @@ def main() -> int:
     kick_hold_x, last_kick_end_t, num_kicks = x0, -1e9, 0
     current_hanging_angle = hanging_angle
     written, guard_trip_t = 0, None
-    kick_amp = BEST["kick_amplitude_m"]
-    kick_dur = BEST["kick_duration_s"]
-    phi_trig = BEST["phi_trigger_rad"]
+    kick_amp = args.kick_amplitude_m if args.kick_amplitude_m is not None else BEST["kick_amplitude_m"]
+    kick_dur = args.kick_duration_s if args.kick_duration_s is not None else BEST["kick_duration_s"]
+    phi_trig = args.phi_trigger_rad if args.phi_trigger_rad is not None else BEST["phi_trigger_rad"]
     min_theta_dist = np.pi
     peak_swing_t = 0.0
+    peak_ee_speed = 0.0
+    peak_ee_speed_t = 0.0
+    peak_tip_speed = 0.0
+    peak_tip_speed_t = 0.0
+    peak_thetadot = 0.0
 
     for step in range(n_steps):
         t = step * CONTROL_DT
@@ -161,6 +197,18 @@ def main() -> int:
             min_theta_dist = dist
             peak_swing_t = t
 
+        mujoco.mj_jacSite(model, data, jacp_ee, jacr_ee, site_id)
+        ee_speed = float(np.linalg.norm(jacp_ee @ data.qvel))
+        if ee_speed > peak_ee_speed:
+            peak_ee_speed, peak_ee_speed_t = ee_speed, t
+
+        mujoco.mj_jacSite(model, data, jacp_tip, jacr_tip, tip_site_id)
+        tip_speed = float(np.linalg.norm(jacp_tip @ data.qvel))
+        if tip_speed > peak_tip_speed:
+            peak_tip_speed, peak_tip_speed_t = tip_speed, t
+
+        peak_thetadot = max(peak_thetadot, abs(thetadot))
+
         if step % frame_stride == 0:
             renderer.update_scene(data, camera=cam)
             proc.stdin.write(renderer.render().tobytes())
@@ -170,7 +218,7 @@ def main() -> int:
         # happening, but continuing on lets the pendulum swing back down
         # near hanging again, which undersells the actual peak swing
         # reached (tracked separately above, not read off the final frame).
-        if guard_trip_t is not None and t > guard_trip_t + 0.4:
+        if not args.continue_through_guard and guard_trip_t is not None and t > guard_trip_t + 0.4:
             break
 
     proc.stdin.close()
@@ -179,7 +227,12 @@ def main() -> int:
         raise RuntimeError(f"ffmpeg exited with code {proc.returncode}")
 
     print(f"num_kicks={num_kicks} peak_swing_deg={np.degrees(np.pi - min_theta_dist):.1f} "
-          f"at t={peak_swing_t:.2f}s  guard_trip_t={guard_trip_t}")
+          f"(min_theta_dist_from_inverted={min_theta_dist:.4f} rad) at t={peak_swing_t:.2f}s  "
+          f"guard_trip_t={guard_trip_t}  flipped={min_theta_dist < 0.35}")
+    print(f"peak EE Cartesian speed: {peak_ee_speed:.3f} m/s at t={peak_ee_speed_t:.2f}s")
+    print(f"peak pendulum TIP speed: {peak_tip_speed:.3f} m/s at t={peak_tip_speed_t:.2f}s")
+    print(f"peak pendulum angular rate |thetadot|: {peak_thetadot:.3f} rad/s "
+          f"({np.degrees(peak_thetadot):.1f} deg/s)")
     print(f"Wrote {written} frames ({written / args.fps:.1f}s at {args.fps} fps) to {args.output}")
     return 0
 

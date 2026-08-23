@@ -25,7 +25,7 @@ from .safety import (
     UR5eSafetyLimits,
     is_robot_safety_normal,
 )
-from .transport_common import impedance_safety_config_from_section
+from .transport_common import impedance_safety_config_from_section, validate_transport_axis_index
 from .urscript_gen import (
     DEFAULT_CONFIG,
     UrscriptOscParams,
@@ -112,6 +112,7 @@ def run_urscript_x_transport(
     duration_s: float,
     output_dir: Path | None = None,
     motion_opt_in: bool,
+    transport_axis_index: int = 0,
     joint_target_q: np.ndarray | None = None,
     skip_joint_move: bool = False,
     monitor_hz: float = 125.0,
@@ -127,9 +128,19 @@ def run_urscript_x_transport(
     speed_max_consecutive_violations_override: int | None = None,
     speed_hard_multiple_override: float | None = None,
 ) -> UrscriptTransportResult:
-    """Generate URScript, run it on PolyScope, supervise from Python at monitor_hz."""
+    """Generate URScript, run it on PolyScope, supervise from Python at monitor_hz.
+
+    ``transport_axis_index`` selects the world Cartesian axis the Python-side
+    supervisor guards and reports along (0=X default — byte-identical to
+    before this parameter existed, 1=Y, 2=Z). **The generated on-robot script
+    is world-X only** (``assets/urscript/x_axis_osc_inner.script.template``
+    computes ``x0 = tcp0[0]`` / ``x_err = x_des - tcp[0]``), so a non-zero
+    value here would guard one axis while the robot drives another —
+    ``hardware/x_transport.py`` rejects that combination before dispatch.
+    """
     if not motion_opt_in:
         raise ValueError("motion_opt_in must be True for live URScript transport")
+    transport_axis_index = validate_transport_axis_index(transport_axis_index)
 
     params = load_params_from_yaml(
         config_path,
@@ -193,9 +204,11 @@ def run_urscript_x_transport(
                 )
 
         state0 = _read_state_from_receive(receive)
-        x0 = float(state0.tcp_pose[0])
+        x0 = float(state0.tcp_pose[transport_axis_index])
         safety.reset()
-        safety.set_initial_position(np.asarray(state0.tcp_pose[:3], dtype=np.float64), move_axis=0)
+        safety.set_initial_position(
+            np.asarray(state0.tcp_pose[:3], dtype=np.float64), move_axis=transport_axis_index
+        )
 
         # ImpedanceSafetyMonitor (above) has no TCP speed/acceleration/waypoint-jump
         # ceiling -- only drift/orientation/joint-velocity/axis-growth. Layer
@@ -236,9 +249,9 @@ def run_urscript_x_transport(
         if accel_overrides:
             move_limits = replace(move_limits, **accel_overrides)
         move_monitor = CartesianMoveMonitor(move_limits)
-        move_monitor.set_start(state0.tcp_pose, move_axis_index=0)
+        move_monitor.set_start(state0.tcp_pose, move_axis_index=transport_axis_index)
         target_tcp_pose = state0.tcp_pose.copy()
-        target_tcp_pose[0] = x0 + float(target_x_delta_m)
+        target_tcp_pose[transport_axis_index] = x0 + float(target_x_delta_m)
 
         stop_reg = int(params.stop_input_int_reg)
         _set_stop_register(control, stop_reg, 0)
@@ -277,7 +290,7 @@ def run_urscript_x_transport(
                         "q": st.q.tolist(),
                         "qd": st.qd.tolist(),
                         "tcp_pose": st.tcp_pose.tolist(),
-                        "achieved_x_delta_m": float(st.tcp_pose[0] - x0),
+                        "achieved_x_delta_m": float(st.tcp_pose[transport_axis_index] - x0),
                     }
                 )
                 robot_state = {
@@ -286,13 +299,13 @@ def run_urscript_x_transport(
                     "ee_pos": st.tcp_pose[:3],
                     "ee_quat": np.array([1.0, 0.0, 0.0, 0.0]),
                     "target_x": x0 + float(target_x_delta_m),
-                    "transport_axis_index": 0,
+                    "transport_axis_index": transport_axis_index,
                 }
                 orientation_error_rad = float(np.linalg.norm(st.tcp_pose[3:] - state0.tcp_pose[3:]))
                 axis_target_moving = elapsed <= float(move_duration_s)
                 decision = safety.check(
                     robot_state,
-                    x_error=float((x0 + float(target_x_delta_m)) - st.tcp_pose[0]),
+                    x_error=float((x0 + float(target_x_delta_m)) - st.tcp_pose[transport_axis_index]),
                     orientation_error_norm=orientation_error_rad,
                     axis_target_moving=axis_target_moving,
                 )
@@ -396,6 +409,7 @@ def run_urscript_x_transport(
         "backend": "urscript_inner_loop",
         "config_path": str(config_path),
         "target_x_delta_m": float(target_x_delta_m),
+        "transport_axis_index": transport_axis_index,
         "move_duration_s": float(move_duration_s),
         "duration_s": float(duration_s),
         "termination_reason": termination_reason,

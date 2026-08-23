@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Sequence
+from typing import Any, Callable, Literal, Sequence
 
 import mujoco
 import numpy as np
@@ -26,8 +26,10 @@ from controller_core import (
     TorqueTaskQPConfig,
     TorqueTaskQPController,
     XAxisCartesianImpedanceController,
+    validated_task_rotation,
 )
 from controller_core.kinematics_utils import orientation_error_vec_wxyz, rotmat_to_quat
+from controller_core.x_task_yz_corridor_qp import XTaskYZCorridorQPConfig, XTaskYZCorridorQPController
 
 from mujoco_ur5e_tools import (
     UR5E_JOINT_ORDER,
@@ -43,7 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCENE_XML = REPO_ROOT / "assets" / "ur5e_torque" / "scene.xml"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "ur5e_mujoco_torque"
 
-ControllerKind = Literal["torque_qp", "impedance", "zero_torque", "hard_constraint_qp"]
+ControllerKind = Literal["torque_qp", "impedance", "zero_torque", "hard_constraint_qp", "x_task_yz_corridor_qp"]
 
 # Default per-joint magnitudes for the asymmetric-Coulomb plant friction extra
 # term below, mirroring the size3/size1 joint-class split already used for the
@@ -280,7 +282,7 @@ class MujocoUR5eTorqueAdapterConfig:
     transport_axis_index: int = 0
 
     def validate(self) -> None:
-        if self.controller_kind not in ("torque_qp", "impedance", "zero_torque", "hard_constraint_qp"):
+        if self.controller_kind not in ("torque_qp", "impedance", "zero_torque", "hard_constraint_qp", "x_task_yz_corridor_qp"):
             raise ValueError(f"Unsupported controller_kind: {self.controller_kind!r}")
         self.torque_limit_nm = np.asarray(self.torque_limit_nm, dtype=np.float64).reshape(6)
         if not np.isfinite(float(self.torque_limit_scale)) or float(self.torque_limit_scale) <= 0.0:
@@ -342,14 +344,72 @@ def build_safety_config(ctrl_cfg: dict[str, Any]) -> ImpedanceSafetyConfig:
     )
 
 
-def build_controller(kind: ControllerKind, ctrl_cfg: dict[str, Any]) -> Any:
-    """Instantiate one of the reusable controller_core torque laws."""
+def make_mujoco_jacobian_fn(
+    model: mujoco.MjModel,
+    site_id: int,
+    joint_ids: Sequence[int],
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Return ``q -> J(q)`` (6x6, world frame) evaluated on the REAL model.
+
+    Needed by ``CartesianImpedanceConfig.manipulability_cbf``: the barrier's
+    gradient is a derivative of the Jacobian w.r.t. ``q``, so it needs ``J`` at
+    configurations OTHER than the live one, which the per-cycle state snapshot
+    by construction cannot supply.
+
+    Uses one persistent scratch ``MjData`` (never the live ``data``) so
+    perturbing ``qpos`` for a finite difference can never disturb the running
+    simulation -- the same "own scratch, never the live state" pattern
+    ``compute_gravity_torque``/``_coriolis_torque`` already use here. Only
+    ``mj_kinematics`` + ``mj_comPos`` are run rather than a full
+    ``mj_forward``: those are exactly the stages ``mj_jacSite`` reads, and the
+    CBF calls this 14 times per control cycle.
+    """
+    scratch = mujoco.MjData(model)
+    qadr = [int(model.jnt_qposadr[jid]) for jid in joint_ids]
+    jacp = np.zeros((3, model.nv), dtype=np.float64)
+    jacr = np.zeros((3, model.nv), dtype=np.float64)
+
+    def jacobian_fn(q: np.ndarray) -> np.ndarray:
+        q = np.asarray(q, dtype=np.float64).reshape(-1)
+        scratch.qpos[:] = 0.0
+        for idx, adr in enumerate(qadr):
+            scratch.qpos[adr] = float(q[idx])
+        scratch.qvel[:] = 0.0
+        mujoco.mj_kinematics(model, scratch)
+        mujoco.mj_comPos(model, scratch)
+        mujoco.mj_jacSite(model, scratch, jacp, jacr, int(site_id))
+        return np.vstack([jacp[:, :6], jacr[:, :6]]).astype(np.float64)
+
+    return jacobian_fn
+
+
+def build_controller(
+    kind: ControllerKind,
+    ctrl_cfg: dict[str, Any],
+    *,
+    jacobian_fn: Callable[[np.ndarray], np.ndarray] | None = None,
+) -> Any:
+    """Instantiate one of the reusable controller_core torque laws.
+
+    ``jacobian_fn`` is keyword-only and optional; it is forwarded only to the
+    impedance controller, which is the only family with a mechanism
+    (``manipulability_cbf``) that needs a kinematic model rather than a
+    per-cycle state snapshot. Every pre-existing call site is unaffected.
+    """
     if kind == "torque_qp":
         return TorqueTaskQPController(TorqueTaskQPConfig.from_controller_yaml_section(ctrl_cfg))
     if kind == "hard_constraint_qp":
         return HardYConstraintQPController(HardYConstraintQPConfig.from_controller_yaml_section(ctrl_cfg))
+    if kind == "x_task_yz_corridor_qp":
+        return XTaskYZCorridorQPController(
+            XTaskYZCorridorQPConfig.from_controller_yaml_section(ctrl_cfg),
+            jacobian_fn=jacobian_fn,
+        )
     if kind == "impedance":
-        return XAxisCartesianImpedanceController(CartesianImpedanceConfig.from_controller_yaml_section(ctrl_cfg))
+        return XAxisCartesianImpedanceController(
+            CartesianImpedanceConfig.from_controller_yaml_section(ctrl_cfg),
+            jacobian_fn=jacobian_fn,
+        )
     if kind == "zero_torque":
         return ZeroTorqueController()
     raise ValueError(f"Unsupported controller kind: {kind!r}")
@@ -494,6 +554,50 @@ class MujocoUR5eTorqueAdapter:
         self._initial_pos: np.ndarray | None = None
         self._initial_quat: np.ndarray | None = None
         self._prev_tau: np.ndarray | None = None
+        # Task-frame drift checking. All three default to None, which is the
+        # historical world-frame guard behavior, byte-for-byte.
+        self._task_rotation: np.ndarray | None = None
+        self._tracked_axes: Sequence[int] | None = None
+        self._task_rotation_fn: Callable[[MujocoUR5eState], np.ndarray] | None = None
+
+    def configure_task_frame(
+        self,
+        *,
+        task_rotation: np.ndarray | None = None,
+        tracked_axes: Sequence[int] | None = None,
+        task_rotation_fn: Callable[[MujocoUR5eState], np.ndarray] | None = None,
+    ) -> None:
+        """Resolve the drift guard in a task frame instead of world axes.
+
+        ``task_rotation`` is a fixed 3x3 whose columns are the task axes in
+        world; ``task_rotation_fn`` instead returns that matrix per cycle, for
+        a LIVE frame that follows the tool as it rotates. Supplying the live
+        form is sound because ``ImpedanceSafetyMonitor`` keeps its origin in
+        WORLD and rotates the displacement (``R.T @ (p - p0)``) rather than
+        storing a rotated origin -- so R may change between cycles without
+        ever comparing two different projections. Rotating the *state* before
+        handing it to the monitor does NOT have that property and manufactures
+        spurious drift as the frame turns.
+
+        ``tracked_axes`` names every axis the controller actively commands;
+        those are exempt from the drift check. It must contain the move axis
+        and cannot name all three (that would disable the guard outright) --
+        both rejected loudly by ``validated_tracked_axes``.
+
+        Call before ``reset()``. Must not be used to widen what the guard
+        checks: the threshold and the number of checked components are
+        unchanged, only the axes they resolve onto.
+        """
+        if task_rotation is not None and task_rotation_fn is not None:
+            raise ValueError(
+                "pass task_rotation OR task_rotation_fn, not both -- a fixed and "
+                "a live frame cannot both define the guard's axes"
+            )
+        self._task_rotation = (
+            None if task_rotation is None else validated_task_rotation(task_rotation)
+        )
+        self._tracked_axes = tracked_axes
+        self._task_rotation_fn = task_rotation_fn
 
     def reset(self, state: MujocoUR5eState) -> None:
         self.torque_filter.reset()
@@ -501,7 +605,17 @@ class MujocoUR5eTorqueAdapter:
         if hasattr(self.controller, "reset_from_state"):
             self.controller.reset_from_state(robot_state)
         self.safety_monitor.reset()
-        self.safety_monitor.set_initial_position(np.asarray(state.ee_pos, dtype=np.float64).reshape(3), self.cfg.transport_axis_index)
+        rot0 = (
+            self._task_rotation_fn(state)
+            if self._task_rotation_fn is not None
+            else self._task_rotation
+        )
+        self.safety_monitor.set_initial_position(
+            np.asarray(state.ee_pos, dtype=np.float64).reshape(3),
+            self.cfg.transport_axis_index,
+            task_rotation=rot0,
+            tracked_axes=self._tracked_axes,
+        )
         self._initial_pos = np.asarray(state.ee_pos, dtype=np.float64).reshape(3).copy()
         self._initial_quat = np.asarray(state.ee_quat, dtype=np.float64).reshape(4).copy()
         self._prev_tau = np.zeros(6, dtype=np.float64)
@@ -610,6 +724,13 @@ class MujocoUR5eTorqueAdapter:
             axis_error=axis_err,
             orientation_error_norm=float(np.linalg.norm(orient_err_vec)),
             axis_target_moving=bool(abs(axis_target_vel) > 1e-9),
+            # Live frame only when one was configured; None reuses whatever
+            # set_initial_position captured (a fixed frame, or world).
+            task_rotation=(
+                self._task_rotation_fn(state)
+                if self._task_rotation_fn is not None
+                else None
+            ),
         )
         diag = {
             **(controller_diag or {}),
@@ -991,8 +1112,15 @@ def build_initial_state_and_adapter(
     ee_pos = np.asarray(data.site_xpos[site_id], dtype=np.float64).copy()
     ee_rot = np.asarray(data.site_xmat[site_id], dtype=np.float64).reshape(3, 3).copy()
     reference_quat = rotmat_to_quat(ee_rot)
+    # target_x_delta is a displacement along the SELECTED transport axis, so it
+    # belongs in that component -- not unconditionally in component 0. For the
+    # default transport_axis_index=0 this is bit-identical to the previous
+    # `target_ee_pos[0] = ee_pos[0] + target_x_delta` / `target_x=target_ee_pos[0]`.
+    # For axis 1/2 the old form left the selected component at its start value,
+    # so `target_axis` below (which reads that component) reported "no move".
+    axis_index = int(transport_axis_index)
     target_ee_pos = ee_pos.copy()
-    target_ee_pos[0] = float(ee_pos[0] + target_x_delta)
+    target_ee_pos[axis_index] = float(ee_pos[axis_index] + target_x_delta)
     state = build_mujoco_state(
         model,
         data,
@@ -1000,7 +1128,7 @@ def build_initial_state_and_adapter(
         joint_ids=joint_ids,
         time_s=float(data.time),
         dt_s=float(model.opt.timestep),
-        target_x=float(target_ee_pos[0]),
+        target_x=float(target_ee_pos[axis_index]),
         target_x_vel=0.0,
         target_axis=float(target_ee_pos[transport_axis_index]),
         target_axis_vel=0.0,
@@ -1012,7 +1140,16 @@ def build_initial_state_and_adapter(
         gravity_compensation=bool(gravity_mode == "gravity_comp"),
         gravity_scratch_data=gravity_scratch_data,
     )
-    controller = build_controller(controller_kind, controller_cfg)
+    # jacobian_fn is built unconditionally (one scratch MjData; nothing is
+    # evaluated unless manipulability_cbf is actually on) so that enabling the
+    # flag in a YAML config is all a caller has to do -- the alternative,
+    # gating construction on the flag here, would mean reading and
+    # re-interpreting the controller section in two places.
+    controller = build_controller(
+        controller_kind,
+        controller_cfg,
+        jacobian_fn=make_mujoco_jacobian_fn(model, site_id, joint_ids),
+    )
     adapter = MujocoUR5eTorqueAdapter(
         model=model,
         site_id=site_id,
@@ -1031,5 +1168,37 @@ def build_initial_state_and_adapter(
             transport_axis_index=transport_axis_index,
         ),
     )
+    # DRIVE-AXIS BASIS. When a config carries controller.task_rotation, the
+    # safety monitor must resolve drift in THAT basis, not in world axes --
+    # otherwise the on-axis travel the run is supposed to make is counted as
+    # lateral drift and the guard caps the run for doing its job. Measured at
+    # ARM_Q0/wrist_2=-90: the in-plane drive axis is [0.702 0.713 0], so 0.713
+    # of every metre travelled lands in world Y; against the 0.06 m world-Y
+    # guard that caps useful travel at 0.084 m, and an LQR catch from the
+    # swing-up's own arrival needs more than that -- measured to fail at
+    # dX=0.070/dY=0.059 identically for a_max in {9.6, 14, 20, 30}, i.e. the
+    # guard, not the actuation, was the constraint.
+    #
+    # This lives HERE, in the shared builder, because all three pendulum tools
+    # (energy shaping, two-phase, LQR cascade) construct their adapter through
+    # it. Wiring it at one call site only is how the two-phase tool ended up
+    # able to drive world X and nothing else.
+    #
+    # Absent from a config => rotation is None => byte-identical behavior.
+    _task_rot = controller_cfg.get("task_rotation")
+    if _task_rot is not None:
+        adapter.configure_task_frame(
+            task_rotation=np.asarray(_task_rot, dtype=np.float64).reshape(3, 3),
+            tracked_axes=controller_cfg.get("safety_tracked_axes"),
+        )
     adapter.reset(state)
+    if _task_rot is not None and getattr(adapter.safety_monitor, "task_rotation", None) is None:
+        # configure_task_frame's contract is "call before reset()", and reset()
+        # is what hands the basis to set_initial_position. Assert the monitor
+        # actually took it: a silent no-op here reproduces the unrotated numbers
+        # exactly, which is indistinguishable from "the rotation did not help".
+        raise RuntimeError(
+            "controller.task_rotation is set but the safety monitor is still "
+            "resolving drift in WORLD axes."
+        )
     return state, adapter

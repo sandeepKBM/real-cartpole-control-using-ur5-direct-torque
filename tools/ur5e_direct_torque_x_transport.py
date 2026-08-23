@@ -111,6 +111,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--control-mode", choices=("position", "direct_torque", "urscript", "velocity"), default="position")
     p.add_argument("--target-x-delta", type=float, default=0.02)
     p.add_argument(
+        "--transport-axis-index",
+        type=int,
+        choices=(0, 1, 2),
+        default=0,
+        help=(
+            "World Cartesian axis the move+hold is commanded, guarded and scored along: "
+            "0=X (default, unchanged behavior), 1=Y, 2=Z. Added 2026-08-12 for a real pose "
+            "whose base joint is fixed at a non-zero angle, making world-Y the better-aligned "
+            "'away from base' direction. CURRENTLY SUPPORTED FOR --control-mode position ONLY: "
+            "the inner control law of every other mode regulates world-X unconditionally "
+            "(direct_torque's XAxisCartesianImpedanceController reads ee_pos[0]; urscript's "
+            "on-robot template reads tcp[0]; velocity mode is not plumbed at all), so a "
+            "non-zero axis there would command X while guarding the selected axis -- "
+            "hardware/x_transport.py raises rather than allow that."
+        ),
+    )
+    p.add_argument(
         "--trajectory-profile",
         choices=("min_jerk_move_hold", "accel_duration_triangular", "accel_duration_scurve"),
         default="min_jerk_move_hold",
@@ -529,6 +546,7 @@ def main() -> int:
             robot_ip=args.robot_ip,
             config_path=args.config,
             target_x_delta_m=float(args.target_x_delta),
+            transport_axis_index=int(args.transport_axis_index),
             move_duration_s=float(args.move_duration),
             duration_s=float(args.duration),
             output_dir=output_dir,

@@ -169,8 +169,19 @@ def summarize_transport_trace(
     return {
         "initial_ee_pos": start_pos.tolist(),
         "final_ee_pos": final_pos.tolist(),
-        "achieved_x_delta_m": float(final_pos[0] - float(start_pos[0])),
-        "final_x_displacement_m": float(final_pos[0] - float(start_pos[0])),
+        # Displacement achieved along the SELECTED transport axis -- the quantity
+        # the move/hold scoring compares against `target_x_delta`, and already
+        # what hardware/position_transport.py and direct_torque_transport.py put
+        # in this key (`tcp_pose[transport_axis_index] - x0`). Bit-identical to
+        # the previous `final_pos[0] - start_pos[0]` for the default axis 0; at
+        # axis 1/2 the old form reported the X-axis DRIFT here and scored it
+        # against a Y/Z target. The `max_abs_y_drift_m`/`max_abs_z_drift_m` keys
+        # below deliberately keep their physical-axis meaning (so at axis=1
+        # `max_abs_y_drift_m` is the intended motion, not drift), matching the
+        # documented choice on the hardware side -- see the comment in
+        # hardware/direct_torque_transport.py.
+        "achieved_x_delta_m": float(final_pos[transport_axis_index] - float(start_pos[transport_axis_index])),
+        "final_x_displacement_m": float(final_pos[transport_axis_index] - float(start_pos[transport_axis_index])),
         "final_x_error_m": float(final_target_axis - final_axis_value),
         "max_abs_x_error_m": float(np.max(np.abs(x_err_all))) if x_err_all.size else 0.0,
         "max_abs_y_drift_m": max_abs_y_drift_m,

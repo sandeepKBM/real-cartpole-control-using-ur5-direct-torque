@@ -28,6 +28,9 @@ gain-scheduling failures in this repo).
 
 from __future__ import annotations
 
+import argparse
+import functools
+import os
 import sys
 from pathlib import Path
 
@@ -38,14 +41,46 @@ from scipy.optimize import differential_evolution
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from simulation.ur5e_pendulum_compose import compose_ur5e_pendulum_model  # noqa: E402
+from simulation.ur5e_pendulum_compose import (  # noqa: E402
+    DEFAULT_PENDULUM_XML,
+    PendulumConstants,
+    compose_ur5e_pendulum_model,
+    derive_pendulum_constants,
+)
+
+
+def _de_workers() -> int:
+    """Bounded worker count for `differential_evolution(workers=...)`.
+
+    Never use ``workers=-1`` on a shared host: it claims every core. Default to
+    ~90% of the core count, overridable via ``DE_WORKERS``.
+
+    Also pins the multiprocessing start method to ``fork``. scipy >=1.17's
+    ``MapWrapper`` forces ``forkserver`` when no start method was explicitly set
+    (it backports Python 3.14's default). ``forkserver`` re-imports ``__main__``
+    in the server process, which turns any driver script lacking an
+    ``if __name__ == "__main__":`` guard into an exponential fork bomb, and it
+    also forces the MuJoCo model to be pickled to every worker. Fork inherits it
+    copy-on-write instead.
+    """
+    import multiprocessing as mp
+    try:
+        mp.set_start_method("fork")
+    except RuntimeError:
+        pass  # already set
+    env = os.environ.get("DE_WORKERS")
+    if env:
+        return max(1, int(env))
+    return max(1, int((os.cpu_count() or 2) * 0.9))
 from simulation.ur5e_mujoco_torque import (  # noqa: E402
     build_initial_state_and_adapter,
     build_mujoco_state,
 )
 from tools.diagnostics.pendulum_swingup_energy_shaping import (  # noqa: E402
-    load_config, find_hanging_and_inverted_angle, ARM_Q0, CONTROL_DT, RATE_HZ,
-    M_TOTAL_KG, R_COM_M, I_PIVOT_KGM2, G, E_TOP,
+    CONFIG_PATH, ARM_Q0, CONTROL_DT, RATE_HZ,
+    PendulumRunContext, add_common_pendulum_args, context_from_args,
+    describe_context, find_hanging_and_inverted_angle, load_config,
+    write_output_json,
 )
 
 MIN_KICK_GAP_S = 0.15   # debounce: minimum time between the end of one kick and the next trigger
@@ -68,10 +103,24 @@ def find_nearby_equilibrium(model, arm_qpos6, pend_qpos_adr, near_theta,
     settled at the new location -- not because kicks stopped helping, but
     because the trigger's reference point had gone stale.
 
-    Narrower/coarser than the original (a +-90deg window around the
-    pendulum's own current angle, not the full circle) since this runs
-    many times per trial (once per kick) and only needs the equilibrium
-    NEAREST where the pendulum already is, not a global search."""
+    Narrower/coarser than the original (a +-90deg window around
+    ``near_theta``, not the full circle) since this runs many times per
+    trial (once per kick) and only needs the equilibrium nearest a known
+    reference, not a global search.
+
+    IMPORTANT, and the reason every caller was changed 2026-08-12: pass the
+    PREVIOUS EQUILIBRIUM ESTIMATE as ``near_theta``, never the pendulum's
+    current angle. This pendulum's two equilibria are exactly pi apart and
+    ``search_half_range`` is pi/2, so anchoring on the pendulum's own angle
+    means that any time |phi| > pi/2 the INVERTED equilibrium is the nearer
+    zero and is returned as "hanging" -- silently flipping the sign of phi
+    and of every energy/trigger/phase decision computed from it, with no
+    error and no log line. In this file's own trial loop that call happens
+    at the END of a kick, i.e. at whatever angle the kick left the pendulum
+    at, which is exactly where |phi| > pi/2 is reachable. Anchoring on the
+    previous estimate cannot make that jump, because the true equilibrium
+    only moves slowly with the arm's posture -- which is the entire thing
+    this re-estimation exists to track."""
     scratch = mujoco.MjData(model)
 
     def qfrc_bias_pend(theta: float) -> float:
@@ -110,6 +159,10 @@ def run_multi_kick_trial(
     inverted_angle: float,
     enforce_guard: bool = True,
     track_history: bool = False,
+    config_path: Path | None = None,
+    controller_kind: str = "impedance",
+    arm_q=None,
+    constants: PendulumConstants | None = None,
 ) -> dict:
     """enforce_guard=False (added for sim-only investigation, per-user
     request): don't break the trial on a guard trip -- record the FIRST
@@ -119,8 +172,28 @@ def run_multi_kick_trial(
     track_history=True additionally records (t, phi, thetadot, E/E_top,
     orientation_error_norm, safety_ok) every step, to check directly
     whether orientation-guard violations correlate with the pendulum's own
-    energy stalling/dropping, or are basically decoupled from it."""
-    config = load_config()
+    energy stalling/dropping, or are basically decoupled from it.
+    config_path=None (default) preserves the original behavior -- reads the
+    module's own hardcoded CONFIG_PATH. Pass an explicit path to run this
+    trial against a different controller config entirely (e.g. a
+    split_base_wrist_task variant), added to let the swing-up benchmark be
+    tested against configs never previously combined with the pendulum
+    model.
+    controller_kind="impedance" (default) likewise preserves the original
+    behavior exactly -- it is the string this call site hardcoded before
+    2026-08-13. Made a parameter so the benchmark can be run against a
+    different controller FAMILY (e.g. "x_task_yz_corridor_qp") and not only a
+    different config of the same family; a config alone cannot select the
+    controller, since build_initial_state_and_adapter takes the kind
+    separately."""
+    config = load_config() if config_path is None else load_config(config_path)
+    # arm_q/constants default to the module's ARM_Q0 and the constants derived
+    # from `model` at it, reproducing the pre-2026-08-13 default-asset
+    # behavior. Both must be passed for a non-default pendulum asset: the
+    # constants are a property of the (asset, pose) PAIR, not of the asset.
+    arm_q = ARM_Q0 if arm_q is None else np.asarray(arm_q, dtype=np.float64).reshape(6)
+    if constants is None:
+        constants = derive_pendulum_constants(model, arm_q)
     data = mujoco.MjData(model)
     site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
     joint_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n) for n in [
@@ -131,7 +204,7 @@ def run_multi_kick_trial(
     pend_qpos_adr = model.jnt_qposadr[pend_jid]
     pend_dof_adr = model.jnt_dofadr[pend_jid]
 
-    data.qpos[:6] = ARM_Q0
+    data.qpos[:6] = arm_q
     data.qpos[pend_qpos_adr] = hanging_angle
     data.qvel[:] = 0.0
     mujoco.mj_forward(model, data)
@@ -141,7 +214,7 @@ def run_multi_kick_trial(
         controller_cfg=config["controller"],
         transport_axis_index=0,
         target_x_delta=0.0,
-        controller_kind="impedance",
+        controller_kind=str(controller_kind),
         force_hold_current_pose=False,
         gravity_mode=config["mujoco"].get("gravity_mode", "gravity_comp"),
         gravity_source=config["mujoco"].get("gravity_source", "pinocchio"),
@@ -183,8 +256,15 @@ def run_multi_kick_trial(
             # (possibly drifted) posture -- the fix for the trigger going
             # stale once the arm's own orientation has moved enough to
             # shift where the pendulum actually wants to rest.
+            # Anchor changed 2026-08-12 from `theta` to
+            # `current_hanging_angle`: this call fires at the END of a kick,
+            # at whatever angle the kick left the pendulum at, and anchoring
+            # on that angle lets the +-pi/2 search window return the INVERTED
+            # equilibrium instead of the hanging one whenever |phi| > pi/2.
+            # See find_nearby_equilibrium's own docstring for the full
+            # explanation.
             current_hanging_angle = find_nearby_equilibrium(
-                model, data.qpos[:6].copy(), pend_qpos_adr, theta
+                model, data.qpos[:6].copy(), pend_qpos_adr, current_hanging_angle
             )
 
         is_bootstrap_kick = (num_kicks == 0 and step == 0)
@@ -238,10 +318,11 @@ def run_multi_kick_trial(
         min_theta_dist = min(min_theta_dist, dist)
 
         if track_history:
-            E = 0.5 * I_PIVOT_KGM2 * thetadot * thetadot + M_TOTAL_KG * G * R_COM_M * (1.0 - np.cos(phi))
+            E = (0.5 * constants.i_pivot_kgm2 * thetadot * thetadot
+                 + constants.mgr_nm * (1.0 - np.cos(phi)))
             history.append({
                 "t": t, "phi_deg": float(np.degrees(phi)), "thetadot": thetadot,
-                "E_over_Etop": float(E / E_TOP),
+                "E_over_Etop": float(E / constants.e_top_j),
                 "orientation_error_norm": float(diag.get("orientation_error_norm", 0.0)),
                 "safety_ok": step_safety_ok,
             })
@@ -258,28 +339,48 @@ def run_multi_kick_trial(
     }
 
 
-def objective(x):
+def default_context() -> PendulumRunContext:
+    return PendulumRunContext(
+        pendulum_xml=str(DEFAULT_PENDULUM_XML),
+        arm_q=tuple(float(v) for v in ARM_Q0),
+        config_path=str(CONFIG_PATH),
+        controller_kind="impedance",
+    )
+
+
+def objective(x, ctx: PendulumRunContext | None = None, duration_s: float = 8.0):
     kick_amplitude_m, kick_duration_s, phi_trigger_rad = x
-    model = compose_ur5e_pendulum_model()
-    data = mujoco.MjData(model)
-    pend_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "/pendulum_hinge")
-    pend_qpos_adr = model.jnt_qposadr[pend_jid]
-    hanging_angle, inverted_angle = find_hanging_and_inverted_angle(model, data, pend_qpos_adr)
+    if ctx is None:
+        ctx = default_context()
+    if ctx.constants is None:
+        ctx = ctx.resolve()
+    model = ctx.build_model()
     result = run_multi_kick_trial(model, kick_amplitude_m, kick_duration_s, phi_trigger_rad,
-                                   duration_s=8.0, hanging_angle=hanging_angle, inverted_angle=inverted_angle)
+                                   duration_s=duration_s, **ctx.trial_kwargs())
     cost = result["min_theta_dist_from_inverted_rad"]
     if result["guard_fired"]:
         cost += 5.0  # strictly worse than any survived outcome (max survived cost = pi < 5.0)
     return cost
 
 
-def main() -> int:
-    model = compose_ur5e_pendulum_model()
-    data = mujoco.MjData(model)
-    pend_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "/pendulum_hinge")
-    pend_qpos_adr = model.jnt_qposadr[pend_jid]
-    hanging_angle, inverted_angle = find_hanging_and_inverted_angle(model, data, pend_qpos_adr)
-    print(f"hanging_angle={hanging_angle:.4f} rad  inverted_angle={inverted_angle:.4f} rad")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Event-triggered multi-kick swing-up search.")
+    add_common_pendulum_args(parser)
+    parser.add_argument("--maxiter", type=int, default=30)
+    parser.add_argument("--popsize", type=int, default=16)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--duration-s", type=float, default=8.0,
+                        help="Trial duration used inside the search objective.")
+    parser.add_argument("--final-duration-s", type=float, default=15.0,
+                        help="Duration of the final re-validation trial.")
+    return parser
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    ctx = context_from_args(args).resolve()
+    print(describe_context(ctx))
 
     # kick_amplitude_m upper bound widened 0.15->0.28 (2026-08-11): the
     # prior search converged to 0.143, pinned right at the old 0.15 bound --
@@ -288,15 +389,30 @@ def main() -> int:
     # mega pose-oscillation-stability search this pose came from).
     bounds = [(0.02, 0.28), (0.1, 0.5), (np.radians(3.0), np.radians(40.0))]
     print("=== searching (kick_amplitude_m, kick_duration_s, phi_trigger_rad) via differential_evolution ===")
-    res = differential_evolution(objective, bounds, maxiter=30, popsize=16, tol=1e-4,
-                                  seed=0, workers=-1, polish=False)
+    res = differential_evolution(
+        functools.partial(objective, ctx=ctx, duration_s=args.duration_s),
+        bounds, maxiter=args.maxiter, popsize=args.popsize, tol=1e-4,
+        seed=args.seed, workers=_de_workers(), polish=False)
     print(f"Best params: kick_amplitude_m={res.x[0]:.4f}, kick_duration_s={res.x[1]:.4f}, "
           f"phi_trigger_rad={res.x[2]:.4f} ({np.degrees(res.x[2]):.2f}deg)")
     print(f"Best cost: {res.fun:.4f}")
 
-    best = run_multi_kick_trial(model, res.x[0], res.x[1], res.x[2], duration_s=15.0,
-                                 hanging_angle=hanging_angle, inverted_angle=inverted_angle)
-    print("Best candidate, re-validated at 15s:", best)
+    model = ctx.build_model()
+    best = run_multi_kick_trial(model, res.x[0], res.x[1], res.x[2],
+                                 duration_s=args.final_duration_s, **ctx.trial_kwargs())
+    print(f"Best candidate, re-validated at {args.final_duration_s}s:", best)
+    if args.output_json:
+        write_output_json(args.output_json, {
+            "context": {"pendulum_xml": ctx.pendulum_xml, "arm_q": list(ctx.arm_q),
+                        "config_path": ctx.config_path, "controller_kind": ctx.controller_kind,
+                        "hanging_angle": ctx.hanging_angle, "inverted_angle": ctx.inverted_angle,
+                        "constants": ctx.constants},
+            "best_params": {"kick_amplitude_m": res.x[0], "kick_duration_s": res.x[1],
+                            "phi_trigger_rad": res.x[2]},
+            "best_cost": float(res.fun),
+            "best_trial": {k: v for k, v in best.items() if k != "history"},
+        })
+        print("wrote", args.output_json)
     return 0
 
 

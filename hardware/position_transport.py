@@ -32,7 +32,7 @@ from .safety import (
     UR5eSafetyLimits,
     is_robot_safety_normal,
 )
-from .transport_common import max_abs_qd_from_trace
+from .transport_common import max_abs_qd_from_trace, validate_transport_axis_index
 
 
 @dataclass
@@ -121,6 +121,7 @@ def run_x_transport_position(
     duration_s: float,
     output_dir: Path | None = None,
     motion_opt_in: bool,
+    transport_axis_index: int = 0,
     rate_hz: float = 125.0,
     shadow_osc: bool = True,
     servo_gain: float = 300.0,
@@ -142,11 +143,22 @@ def run_x_transport_position(
     in software using local MuJoCo J+M and logs ``tau_shadow`` — torques are
   **not** sent to the robot. Use this to validate trajectory + safety + logging
     before ``control_mode=direct_torque``.
+
+    ``transport_axis_index`` selects the world Cartesian axis the move+hold
+    profile is streamed along (0=X default — byte-identical to before this
+    parameter existed, 1=Y, 2=Z). It indexes the commanded ``servoL``
+    waypoint, ``CartesianMoveMonitor``'s move axis, the reported
+    ``achieved_x_delta_m``/``x_error``, and the ``transport_axis_index``
+    handed to ``summarize_move_hold_trace``. Note the optional ``shadow_osc``
+    diagnostic stays world-X only regardless (``XAxisCartesianImpedanceController``
+    has no axis field) — its ``tau_shadow``/``x_error_shadow`` columns are not
+    meaningful for a non-zero axis, and are never sent to the robot either way.
     """
     estop = EStopLatch()
     if not motion_opt_in:
         raise ValueError("motion_opt_in must be True for live position transport")
 
+    transport_axis_index = validate_transport_axis_index(transport_axis_index)
     move_duration_s = float(move_duration_s)
     duration_s = float(duration_s)
     if move_duration_s <= 0.0 or duration_s <= 0.0:
@@ -198,8 +210,8 @@ def run_x_transport_position(
         )
 
     start_pose = state0.tcp_pose.copy()
-    x0 = float(start_pose[0])
-    monitor.set_start(start_pose, move_axis_index=0)
+    x0 = float(start_pose[transport_axis_index])
+    monitor.set_start(start_pose, move_axis_index=transport_axis_index)
     if controller is not None:
         init_state = _robot_state_from_link(
             state0,
@@ -207,6 +219,7 @@ def run_x_transport_position(
             time_s=0.0,
             target_x=x0,
             target_x_vel=0.0,
+            transport_axis_index=transport_axis_index,
         )
         controller.reset_from_state(init_state)
 
@@ -244,7 +257,7 @@ def run_x_transport_position(
                 move_duration_s=move_duration_s,
             )
             waypoint = start_pose.copy()
-            waypoint[0] = float(target_x)
+            waypoint[transport_axis_index] = float(target_x)
 
             try:
                 link.servo_l(
@@ -301,7 +314,7 @@ def run_x_transport_position(
             tcp = np.asarray(link_state.tcp_pose, dtype=np.float64).reshape(6)
             row["ee_pos"] = tcp[:3].tolist()
             row["ee_quat"] = rotvec_to_quat_wxyz(tcp[3:6]).tolist()
-            row["x_error"] = float(target_x - tcp[0])
+            row["x_error"] = float(target_x - tcp[transport_axis_index])
             row["orientation_error_norm"] = float(np.linalg.norm(tcp[3:] - start_pose[3:]))
             if controller is not None and local_dyn is not None:
                 robot_state = _robot_state_from_link(
@@ -310,6 +323,7 @@ def run_x_transport_position(
                     time_s=t_s,
                     target_x=target_x,
                     target_x_vel=target_x_vel,
+                    transport_axis_index=transport_axis_index,
                 )
                 out = controller.compute(robot_state)
                 row["tau_shadow"] = np.asarray(out.tau, dtype=np.float64).tolist()
@@ -337,7 +351,7 @@ def run_x_transport_position(
         link.servo_stop()
         link.safe_stop("transport_exit")
 
-    achieved_x_delta_m = float(last_state.tcp_pose[0] - x0)
+    achieved_x_delta_m = float(last_state.tcp_pose[transport_axis_index] - x0)
     max_abs_qd = max_abs_qd_from_trace(trace_rows)
     summary = {
         "backend": "servoL_position",
@@ -345,7 +359,7 @@ def run_x_transport_position(
         "config_path": str(config_path),
         "target_x_delta": float(target_x_delta_m),
         "target_x_delta_m": float(target_x_delta_m),
-        "transport_axis_index": 0,
+        "transport_axis_index": transport_axis_index,
         "move_duration_s": move_duration_s,
         "hold_duration_s": max(duration_s - move_duration_s, 0.0),
         "duration_s": duration_s,
@@ -372,7 +386,7 @@ def run_x_transport_position(
             initial_ee_pos=state0.tcp_pose[:3],
             move_duration_s=move_duration_s,
             total_duration_s=duration_s,
-            transport_axis_index=0,
+            transport_axis_index=transport_axis_index,
         )
     )
     summary.update(compute_valid_move_hold_metrics(summary))
@@ -403,6 +417,7 @@ def _robot_state_from_link(
     time_s: float,
     target_x: float,
     target_x_vel: float,
+    transport_axis_index: int = 0,
 ) -> dict[str, Any]:
     tcp = np.asarray(link_state.tcp_pose, dtype=np.float64).reshape(6)
     q = np.asarray(link_state.q, dtype=np.float64).reshape(6)
@@ -416,6 +431,7 @@ def _robot_state_from_link(
             time_s=time_s,
             target_x=target_x,
             target_x_vel=target_x_vel,
+            transport_axis_index=transport_axis_index,
         )
     return {
         "time": float(time_s),
@@ -429,5 +445,5 @@ def _robot_state_from_link(
         "mass_matrix": np.eye(6),
         "target_x": float(target_x),
         "target_x_vel": float(target_x_vel),
-        "transport_axis_index": 0,
+        "transport_axis_index": int(transport_axis_index),
     }

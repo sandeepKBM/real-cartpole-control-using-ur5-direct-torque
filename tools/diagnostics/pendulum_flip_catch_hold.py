@@ -80,6 +80,9 @@ from simulation.ur5e_mujoco_torque import (  # noqa: E402
 from tools.diagnostics.pendulum_swingup_energy_shaping import (  # noqa: E402
     CONTROL_DT, RATE_HZ, load_config, resolve_equilibria, write_output_json,
 )
+from controller_core.config_provenance import (  # noqa: E402
+    check_config_pose, describe_provenance,
+)
 from tools.diagnostics.pendulum_lqr_cascade import V_MAX_MPS, wrap_pi  # noqa: E402
 
 ARM_Q_W2NEG90 = (-2.3688, -2.1801, -1.8838, -0.7962, -1.5707963, 0.0206)
@@ -377,6 +380,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Controller YAML. ONE config drives both phases -- this is a "
                         "single continuous rollout with a single adapter.")
     p.add_argument("--pendulum-xml", type=Path, default=REALROD_PENDULUM_XML)
+    p.add_argument(
+        "--allow-pose-mismatch", action="store_true",
+        help="Run --config at a pose/asset it was not derived for. Off by "
+             "default; see controller_core.config_provenance.")
     p.add_argument("--start-q-rad", type=float, nargs=6, default=list(ARM_Q_W2NEG90))
     p.add_argument("--controller-kind", default="impedance")
     p.add_argument("--duration-s", type=float, default=14.0)
@@ -406,8 +413,22 @@ def main(argv=None) -> int:
     hanging_angle, inverted_angle = resolve_equilibria(model, arm_q)
     constants = derive_pendulum_constants(model, arm_q)
 
+    # This entrypoint predates (and does not use) the shared context_from_args,
+    # so it must run the config <-> pose check itself -- otherwise the one tool
+    # that drives BOTH halves of Goal 1 would be the only pendulum entrypoint
+    # able to dispatch a config at a pose its gains were never fitted at. See
+    # controller_core.config_provenance.
+    provenance = check_config_pose(
+        load_config(Path(args.config)),
+        arm_q,
+        args.pendulum_xml,
+        config_name=Path(args.config).name,
+        allow_mismatch=bool(args.allow_pose_mismatch),
+    )
+
     print(f"pendulum={Path(args.pendulum_xml).name}  arm_q={list(np.round(arm_q, 6))}")
     print(f"config={Path(args.config).name}  kind={args.controller_kind}")
+    print(describe_provenance(provenance))
     print(f"hanging={hanging_angle:.4f}  inverted={inverted_angle:.4f}  "
           f"omega={constants.omega_natural_radps:.4f}")
     print(f"switch when |thetadot + omega*phi| <= {args.s_switch} and "

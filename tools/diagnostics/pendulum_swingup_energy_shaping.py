@@ -53,6 +53,11 @@ from scipy.optimize import differential_evolution
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from controller_core.config_provenance import (  # noqa: E402
+    ConfigProvenance,
+    check_config_pose,
+    describe_provenance,
+)
 from simulation.ur5e_pendulum_compose import (  # noqa: E402
     DEFAULT_ARM_Q,
     DEFAULT_PENDULUM_XML,
@@ -639,6 +644,11 @@ class PendulumRunContext:
     hanging_angle: float | None = None
     inverted_angle: float | None = None
     constants: PendulumConstants | None = None
+    # Result of the config <-> pose check performed in context_from_args. Kept
+    # on the context (rather than checked and discarded) so a run that was
+    # explicitly allowed off-provenance carries that fact into its own output
+    # JSON instead of looking indistinguishable from an on-provenance run.
+    provenance: ConfigProvenance | None = None
 
     @property
     def arm_q_array(self) -> np.ndarray:
@@ -691,19 +701,48 @@ def add_common_pendulum_args(parser: argparse.ArgumentParser, *,
                  "cannot select this.")
     parser.add_argument("--config", default=str(default_config),
                         help="Controller YAML config.")
+    parser.add_argument(
+        "--allow-pose-mismatch", action="store_true",
+        help="Run --config at a pose/asset it was NOT derived for. Off by "
+             "default: a config's gains are only valid at the case they were "
+             "fitted at (AGENTS.md sec.7), and dispatching one elsewhere is "
+             "silent -- the YAML still parses and the run still completes. Pass "
+             "this only when running off-provenance IS the measurement; the "
+             "mismatch is then recorded in the run's output JSON.")
     parser.add_argument("--output-json", default=None,
                         help="Write the run's results to this path as JSON.")
 
 
 def context_from_args(args) -> PendulumRunContext:
+    """Resolves (asset, pose, config, controller) for a pendulum run.
+
+    This is the single point every pendulum entrypoint funnels through, so the
+    config <-> pose check lives here for the same reason resolve_equilibria
+    exists: making it a shared helper is what makes the mistake impossible to
+    forget rather than a thing each script must remember. Enforced by
+    controller_core.config_provenance -- see its module docstring for the ~20 h
+    search this was written after.
+    """
     pendulum_xml = str(Path(args.pendulum_xml).resolve())
     arm_q = (tuple(float(v) for v in args.start_q_rad) if args.start_q_rad is not None
              else tuple(float(v) for v in arm_q_for_pendulum_xml(pendulum_xml)))
+    config_path = str(Path(args.config).resolve())
+
+    provenance = check_config_pose(
+        load_config(Path(config_path)),
+        arm_q,
+        pendulum_xml,
+        controller_kind=getattr(args, "controller_kind", "impedance"),
+        config_name=Path(config_path).name,
+        allow_mismatch=bool(getattr(args, "allow_pose_mismatch", False)),
+    )
+
     return PendulumRunContext(
         pendulum_xml=pendulum_xml,
         arm_q=arm_q,
-        config_path=str(Path(args.config).resolve()),
+        config_path=config_path,
         controller_kind=getattr(args, "controller_kind", "impedance"),
+        provenance=provenance,
     )
 
 
@@ -716,7 +755,8 @@ def describe_context(ctx: PendulumRunContext) -> str:
             f"derived: m*g*r={c.mgr_nm:.6f} Nm  I_pivot={c.i_pivot_kgm2:.6e} kg m^2  "
             f"m={c.m_total_kg:.6f} kg  r_eff={c.r_com_m:.6f} m\n"
             f"         omega={c.omega_natural_radps:.4f} rad/s  T_natural={c.t_natural_s:.4f} s  "
-            f"E_top={c.e_top_j:.4f} J")
+            f"E_top={c.e_top_j:.4f} J\n"
+            f"{describe_provenance(ctx.provenance) if ctx.provenance is not None else 'provenance: not checked'}")
 
 
 def write_output_json(path, payload) -> None:
@@ -729,6 +769,8 @@ def write_output_json(path, payload) -> None:
             return _plain(o.tolist())
         if isinstance(o, PendulumConstants):
             return dataclasses.asdict(o)
+        if isinstance(o, ConfigProvenance):
+            return o.as_dict()
         if isinstance(o, (np.floating, np.integer)):
             return o.item()
         if isinstance(o, Path):

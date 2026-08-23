@@ -48,18 +48,30 @@
   explicitly on every such value below, must be corrected against the
   real CAD/hardware before this model is used for anything beyond a
   first smoke test):
-    - Pendulum rod LENGTH (0.30 m assumed -- a common lab-scale choice,
-      no support from the archive's file list or metadata).
-    - Rod/housing MASS and material density (assumed mild steel,
-      7850 kg/m^3, since "Linear Motion Rod" + a ball-bearing pivot
-      reads as a hardened-steel linear/rotary shaft component, but
-      this is an inference, not a measurement).
-    - Pivot joint AXIS ORIENTATION relative to attachment_site -- chosen
-      here so the rod hangs down under gravity from a horizontal start
-      in this file's own smoke test (tools/diagnostics/
-      ur5e_pendulum_smoke_test.py), NOT derived from the CAD assembly's
-      actual mate definitions (which are unreadable). If the real
-      mechanism's swing plane differs, this needs correcting.
+    - Pendulum rod LENGTH: CORRECTED 2026-08-11 to 0.12 m, a real
+      measured value (was a 0.30 m PLACEHOLDER guess before this date --
+      see git history for the prior text). No longer a placeholder.
+    - Rod/housing MASS: PARTLY RESOLVED 2026-08-12. The apparatus TOTAL
+      (~0.300 kg) and the pole (~0.050 kg) are now real measured values,
+      supplied directly, and the model reproduces them -- see the MASS
+      BUDGET note on the tool-changer geoms below. What is still inferred
+      is (a) the split of the remaining 0.250 kg across the two plates
+      and the housing cluster, and (b) the mild-steel density
+      (7850 kg/m^3) used to derive the rod's mass from its dimensions,
+      since "Linear Motion Rod" + a ball-bearing pivot reads as a
+      hardened-steel linear/rotary shaft component. That density
+      inference is now independently corroborated for the rod: it
+      predicts 0.0474 kg, within 5% of the measured ~0.050 kg pole.
+    - Pivot joint AXIS ORIENTATION relative to attachment_site -- as of
+      2026-08-12 this is local Z, the mounting-face NORMAL, i.e. the
+      physically standard convention for a shaft/bearing housing bolted
+      to a flat plate, and it is measured to be operable (horizontal in
+      world, real X-pumping coupling) at the arm pose the pendulum
+      scripts actually use. It is still NOT derived from the CAD
+      assembly's actual mate definitions (which are unreadable), so it
+      remains an inference from convention rather than a confirmed fact.
+      If the real mechanism's swing plane differs, this needs correcting.
+      Full reasoning and measurements: the joint element's own comment.
     - No discrete "bob" end-mass is modeled -- the archive's part list
       has no separate weighted part beyond the rod/housings, so mass is
       modeled as distributed along a uniform rod plus a small lumped
@@ -73,7 +85,16 @@
 
   <default>
     <default class="pendulum">
-      <joint damping="0.02" frictionloss="0.01"/>
+      <!-- REAL measured hinge friction (user-supplied, 2026-08-14). Was
+           damping="0.02" frictionloss="0.01" -- unvalidated CAD placeholders
+           with no provenance. The error was ~200x in viscous damping and it
+           INVERTED a headline conclusion: with the placeholders this hinge is
+           OVERDAMPED (zeta 3.97, ~21 deg stiction dead-band, physically unable
+           to oscillate) and swing-up correctly measured as impossible; with the
+           real values zeta = 0.019, dead-band 2.06 deg, and a single guard-clean
+           kick carries ~1.9x the energy needed to invert. Same physical
+           bearing in every variant, so all assets carry the same numbers. -->
+      <joint damping="0.0001" frictionloss="0.001"/>
       <geom contype="0" conaffinity="0" density="7850"/>
     </default>
   </default>
@@ -98,7 +119,7 @@
   </asset>
 
   <worldbody>
-    <body name="pendulum_mount" pos="0 -0.11 0.08">
+    <body name="pendulum_mount" pos="0 0 0">
       <!-- OnRobot tool-changer stack: REAL bounding-box dimensions
            (see provenance note above). Modeled as a simple flanged
            cylinder pair, not the real tool-changer geometry (STEP
@@ -106,146 +127,379 @@
            extraction -- a real mesh import is a follow-up, not done
            here).
 
-           pos="0 -0.11 0.08" (2026-08-10, agent-derived, replacing an
-           earlier "0 0 0.30" pure-Z attempt that was WRONG -- see below).
-           PLACEHOLDER, not a CAD-verified standoff (only 2 of the ~15
-           custom parts have STEP files this environment can read; the
-           mount-to-pivot distance was already an unmeasured placeholder
-           before this fix). Every number quoted here was measured with
-           mujoco.mj_geomDistance and forward kinematics at ARM_Q0 =
-           [0, -pi/2, pi/2, -pi/2, -pi/2, 0], swept over the pendulum
-           hinge, NOT hand-derived.
+           pos="0 0 0" -- FLUSH ON THE FLANGE. Corrected 2026-08-11 after a
+           user-reported visual "the tool floats away from the wrist"; this
+           was a REAL BUG, not the camera artifact an earlier pass in this
+           session concluded. The value here was "0 -0.11 0.08" (2026-08-10),
+           which put the tool-changer's robot-side plate 13.6cm from
+           attachment_site with 8.1cm of clear AIR between the wrist_3_link
+           surface and the nearest tool-changer surface (measured:
+           mj_geomDistance wrist_3_link<->toolchanger_robot_side = 0.0807m;
+           nearest mesh vertex 0.105m from attachment_site). It rendered as a
+           tool-changer + pendulum hanging unsupported in space next to the
+           arm -- see the rendered evidence referenced in the git log for this
+           commit. A tool changer is BOLTED to the flange; any nonzero
+           flange->plate offset is physically impossible, so no clearance
+           argument can justify one.
 
-           FRAME SEMANTICS -- the reason this looks unintuitive. At
-           ARM_Q0 the mount frame is NOT axis-aligned with the world
-           (measured, do not assume): local +Z points world DOWN, local
-           +Y (= the hinge axis) points world +X, local +X points world
-           +Y. So this offset means "8cm further down, 11cm out along the
-           hinge axis away from the base."
+           WHY THE OLD OFFSET EXISTED, AND WHY ITS REASONING WAS STALE. The
+           2026-08-10 derivation (see git history for the full deleted text)
+           bought wrist/floor clearance by translating the WHOLE assembly,
+           flange joint included. Both of its premises expired the next day:
+             1. It sized everything for a 0.30m rod. The rod is 0.12m
+                (measured, 2026-08-11) -- the floor constraint that ruled out
+                a pure-axial standoff is simply gone (measured floor
+                clearance is now 0.27m, not the 0.037m it was fighting for).
+             2. It offset along "local Y (= the hinge axis)". The hinge axis
+                was changed to local X later on 2026-08-11 (see the joint
+                element below, re-derived for the hanging transport pose). So
+                that offset was no longer along the hinge axis at all; by the
+                old comment's OWN measured argument ("an offset within the
+                swing plane never escapes the wrist no matter how large") it
+                had stopped doing the job it was added for.
+           Clearance is now bought where it is physically realizable -- in the
+           shaft/sensor HOUSING between the tool-changer and the pivot (see
+           pendulum_hub below) -- not at the bolted flange joint.
 
-           WHY NOT A PURE local-Z OFFSET. With zero offset the assembly
-           genuinely intersects wrist_2_link/wrist_3_link (a real
-           geometric fact: ~8mm static tool-changer overlap plus 4.4cm of
-           rod penetration near the balance target). Pushing along local
-           +Z alone does fix that, but only at >=0.25m, because that is
-           what it takes to keep the inverted rod tip BELOW the wrist --
-           and local +Z is world DOWN here, while the flange sits at only
-           world Z~0.488m. At 0.30m the hub ends up 11.7cm off the floor
-           and the hanging rod tip reaches world Z ~ -0.18m, i.e. THROUGH
-           the ground plane. That was the state of this file earlier
-           today and it was wrong; the floor caps any pure-Z offset at
-           ~0.087m, far below the 0.25m the wrist needs. Clearance must
-           therefore be bought laterally, and only along local Y: the rod
-           sweeps a disc of its own 0.30m length, so an offset within the
-           swing plane (local X) never escapes the wrist no matter how
-           large (measured: rod clearance pinned at -4.4cm for every
-           local-X offset tried, 0.08-0.22m, with or without local Z),
-           whereas a local-Y offset translates the whole swing plane off
-           the arm.
+           MEASURED at this value, mj_geomDistance + forward kinematics over
+           the FULL +-180deg hinge sweep, at BOTH arm poses in use at the
+           time (pendulum_balance_torque_lqr.py's [0,-pi/2,pi/2,-pi/2,-pi/2,0]
+           and pendulum_swingup_energy_shaping.py's hanging pose): min distance
+           from any arm geom to the moving hub/rod = 1.6cm; lowest world Z
+           reached by any pendulum geom = 0.268m. (Both numbers are SUPERSEDED
+           by the 2026-08-12 hinge-axis/rod re-orientation and the new ARM_Q0
+           -- re-measured as 4.45cm and 0.063m respectively; see the housing
+           geom's comment below. The conclusion that pos must stay 0 0 0 is
+           unaffected: it rests on the tool changer being bolted to the flange,
+           not on any clearance number.) The tool-changer plates
+           themselves now read distance 0.0 to wrist_3_link -- that is the
+           intended flush bolted contact, not a collision (class="pendulum"
+           sets contype/conaffinity=0, so nothing here collides physically).
 
-           MEASURED MARGINS at this value (thresholds: >2cm clearance,
-           >3cm above the floor): minimum distance from every arm "link"
-           geom to the rod/hub/both tool-changer geoms is 6.25cm, and
-           that is the minimum over the FULL +-180deg swing, not just the
-           +-60deg window around the balance target (the binding pair,
-           wrist_3_link vs the rod, is theta-independent here). Lowest
-           world Z reached by the hub or the tip over the full swing is
-           3.70cm, at the hanging pose.
+           Still a PLACEHOLDER in one respect, unchanged by this fix: the
+           flange->pivot standoff is not CAD-verified (only 2 of the ~15
+           custom parts have STEP files this environment can read). What IS
+           now CAD-grounded is that the two tool-changer plates stack flush
+           on the flange with their real measured thicknesses. -->
+      <!-- MESH FRAME CONVENTION -- re-derived from the raw STL files
+           2026-08-11 (triangle-area-weighted face-normal histogram + slab
+           profiles, not assumed). MuJoCo recenters/reorients mesh vertices
+           to their own inertial frame at compile time (mesh_pos/mesh_quat)
+           but COMPOSES the inverse into geom_pos/geom_quat, so a geom pos
+           here is interpreted in each STL's OWN native file frame --
+           verified by pushing the compiled vertices back through
+           geom_xpos/geom_xmat and confirming the resulting bounding boxes
+           land exactly where these numbers say.
 
-           CAVEAT, measured and deliberately not hidden: the feasible box
-           is small -- local Y outside [-0.11, -0.09] or local Z off
-           0.08 fails one constraint or the other -- and although the
-           validated LQR gains do still stabilize this geometry (0
-           unstable closed-loop eigenvalues; 0.05-0.40 rad perturbations
-           all converge, |final theta error| <= 0.019 rad), they do so
-           while riding the torque limits: shoulder_pan and wrist_3 sit
-           at/over their clip values on ~90% of control cycles here,
-           versus ~3-5% for a pure-Z geometry. Root cause is structural,
-           not a tuning miss: a local-Y offset takes the hub off the
-           wrist_3 rotation axis, which hands wrist_3 direct control
-           authority over the pendulum's swing direction, and these
-           gains (q_arm_pos=2655 vs q_pend_angle=20.9, i.e. a very stiff
-           arm-hold) then chatter against it. The onset was mapped --
-           clean at |local Y| <= 0.05, chattering from ~0.06 -- and the
-           rod needs >=0.066 to clear, so the clean region and the
-           collision-free region genuinely do not overlap for a 0.30m
-           rod at this arm pose. Shortening the rod does not rescue it
-           (cleanliness degrades below ~0.26m; swept 0.12-0.45m). Fixing
-           that properly needs a gain redesign for this geometry, which
-           is a controller question, not a mount-placement one.
+           robot side: file bbox [-0.0355,-0.0355,-0.0025] .. [0.0355,0.0355,
+           0.0136], i.e. a 71.0 x 71.0mm disc 16.1mm thick along file +Z
+           (area-weighted flat-face area perpendicular to Z is 138cm^2 vs
+           48/59cm^2 for X/Y -- Z really is the plate normal, as the earlier
+           comment assumed). Mounted so its extreme -Z face lands exactly on
+           attachment_site: pos z = +0.0025, occupying mount z in [0, 0.0161].
 
-           This is a pure translation (no rotation), so it does not move
-           the pendulum's own equilibria: gravity torque about the hinge
-           is translation-invariant, and the unstable equilibrium is
-           exactly theta = -pi both before and after (verified with
-           find_inverted_angle, which must still be re-run after any
-           geometry change rather than assumed). -->
-      <!-- pos values below translate each mesh's OWN bounding-box center to
-           where the old placeholder cylinder's center used to sit (0,0,0)
-           and (0,0,0.0355) respectively -- i.e. same overall footprint/
-           position as before, real shape instead of a cylinder. Mesh
-           bbox centers (meters, in each STEP file's native frame): robot
-           side (0, 0, 0.00555), tool side (0.00225, 0.01420, 0). -->
+           tool side: FIXED 2026-08-11, it was mounted 90deg wrong. File bbox
+           [-0.0355, 0.0, -0.0355] .. [0.0400, 0.0284, 0.0355]: the plate
+           normal is file +Y (thickness 28.4mm; area-weighted flat-face area
+           perpendicular to Y is 183cm^2 vs 117/127cm^2 for X/Z), and the
+           file's y=0 plane IS the coupling face (a solid 63mm-dia disc at
+           y in [0,0.002], the part growing only in +y). The old code stacked
+           it along +Z with no quat, which stood the 71mm plate ON EDGE and
+           made the stack 71mm tall instead of 28.4mm. The earlier comment
+           had actually spotted this ("its shortest dimension (28.4mm) is Y,
+           not Z ... NOT a simple flat plate along Z") and mounted it that way
+           regardless. quat here is +90deg about X, mapping file +Y -> mount
+           +Z, so the coupling face sits on the robot-side plate's outer face
+           at mount z = 0.0161 and the stack ends at z = 0.0445.
+           Also dropped the old "-0.00225" X shift: that came from the bbox
+           CENTER, but the bbox is asymmetric only because of a mounting lug
+           at +x; the Ø71 plate itself is centered on file x=0 (slab profile
+           at y in [0.014,0.016] is x in [-0.0355,+0.0355]), so re-centering
+           on the bbox was pushing the plate 2.25mm off the tool axis.
+           The lug's azimuth about the tool axis is arbitrary here -- not
+           evidence-backed, and nothing depends on it.
+
+           MASS BUDGET -- explicit mass= added 2026-08-12, replacing
+           density-derived mass, which was badly wrong. The class="pendulum"
+           default density=7850 made MuJoCo compute 0.759 kg (robot side) +
+           1.307 kg (tool side) = 2.066 kg for the two plates, so the whole
+           apparatus weighed 2.17 kg -- 7x the real hardware. Two independent
+           checks caught it: (1) the user measured the real assembly at
+           ~0.300 kg total with a ~0.050 kg pole; (2) MuJoCo's density-based
+           mesh mass is a bounding-box-class approximation, not the true
+           volume -- its tool-side figure implies 166 cm^3, LARGER than that
+           part's own 152 cm^3 file-frame bounding box, i.e. physically
+           impossible. Integrating the STLs properly (divergence theorem over
+           the triangle soup) gives true volumes of 21.90 cm^3 (robot side)
+           and 50.38 cm^3 (tool side).
+
+           The 0.300 kg total is the real measurement and is what this file
+           now reproduces. It is allocated as:
+             pendulum_rod         0.0474 kg  density x volume, unchanged --
+                                             Ø8mm x 0.12m steel. Independent
+                                             cross-check: this falls out of
+                                             the archive-supported diameter
+                                             and the measured rod length,
+                                             and lands within 5% of the
+                                             separately-measured ~0.050 kg
+                                             pole. Two unrelated routes to
+                                             the same number.
+             toolchanger_robot_side 0.0606 kg }  0.200 kg split by the two
+             toolchanger_tool_side  0.1394 kg }  MEASURED true mesh volumes
+                                                 above (30.3% / 69.7%), the
+                                                 only evidence available for
+                                                 their relative mass.
+             pendulum_hub         0.0500 kg  remainder (housing + encoder).
+             ------------------------------  total 0.2974 kg.
+           Only the TOTAL is measured; the split between plates rests on the
+           volume ratio and the hub is the free remainder. If a real per-part
+           breakdown is ever measured, correct the split here -- but keep the
+           total at the measured value. Do NOT revert to density-derived mass
+           for these two meshes: coarsened tessellation plus MuJoCo's
+           bounding-box approximation makes that route unusable here. -->
+      <!-- NOTE: this 2.17 kg -> 0.30 kg correction is a large change to the
+           payload the arm carries. Every gain/equilibrium derived against the
+           old model (pendulum_balance_torque_lqr.py, the energy-shaping
+           constants, find_inverted_angle) must be re-derived, not assumed. -->
       <geom name="toolchanger_robot_side" type="mesh" mesh="toolchanger_robot_side_mesh"
-            pos="0 0 -0.00555" class="pendulum" rgba="0.35 0.35 0.38 1"/>
+            pos="0 0 0.0025" mass="0.0606" class="pendulum" rgba="0.35 0.35 0.38 1"/>
       <geom name="toolchanger_tool_side" type="mesh" mesh="toolchanger_tool_side_mesh"
-            pos="-0.00225 -0.01420 0.0355" class="pendulum" rgba="0.3 0.3 0.32 1"/>
+            pos="0 0 0.0161" quat="0.70710678 0.70710678 0 0"
+            mass="0.1394" class="pendulum" rgba="0.3 0.3 0.32 1"/>
 
       <!-- Encoder/sensor housing cluster (Shaft Housing + Sensor Housing
-           + AMT222 assembly), lumped as one small mass near the pivot.
-           PLACEHOLDER mass (0.06 kg) -- order-of-magnitude guess for a
-           small encoder + housing stack, not a measured value. -->
-      <body name="pendulum_hub" pos="0 0 0.071">
-        <geom name="pendulum_hub_geom" type="cylinder" size="0.020 0.015" class="pendulum" rgba="0.15 0.15 0.18 1" mass="0.06"/>
+           + MF128ZZ bearing + 8mm Bore Clamp + AMT222 assembly), lumped as
+           one small mass at the pivot.
+           mass 0.05 kg -- still the least-supported number in the mass
+           budget below (no separate measurement exists for the housing
+           cluster on its own); it is the remainder after the rod and the
+           two tool-changer plates, chosen to close the measured 0.300 kg
+           total. See the MASS BUDGET note on the tool-changer geoms above.
+
+           pos z = 0.0445 (CHANGED 2026-08-12): flush against the outer face
+           of the tool-changer stack, which ends at exactly that z. It was
+           0.0595 while this housing geom was a LATERAL cylinder of radius
+           0.020 -- centring it 1.5cm past the stack made the cylinder's
+           BARREL just touch the stack's end face, which is what "sits
+           immediately under the tool-changer stack" meant then. With the
+           geom re-oriented AXIALLY (see below) the same intent is expressed
+           by butting its END CAP against the stack, i.e. pos = 0.0445;
+           leaving 0.0595 would have opened a fresh 1.5cm visual gap -- the
+           exact "floating tool" complaint this assembly has already been
+           fixed for once. (Before 2026-08-11 it was 0.071, sized against the
+           old on-edge tool-side plate that wrongly made the stack 71mm
+           tall.) Moving this origin ALONG the hinge axis changes no pendulum
+           dynamics -- see the rod's own note below on why an along-axis
+           translation leaves both the gravity torque and the moment of
+           inertia about the hinge exactly unchanged.
+
+           SHAPE: a cylinder running ALONG THE HINGE AXIS from the mounting
+           face outward -- the physical shaft housing carrying the 8mm shaft,
+           the MF128ZZ bearing and the encoder. Introduced 2026-08-11 (then
+           along local X, when the hinge was local X); RE-ORIENTED 2026-08-12
+           to local Z together with the hinge axis (see the joint element's
+           comment for that decision). Its 0.06m length -- the load-bearing
+           dimension here -- is unchanged; only the DIRECTION changed, and
+           the new direction is the physically standard one: a shaft housing
+           bolted to a flat plate stands off along that plate's NORMAL, which
+           is local Z. It also still keeps the assembly visually CONTINUOUS
+           from flange -> plates -> housing -> rod, which was the point of
+           the 2026-08-11 fix.
+
+           The properties that made this shape worth having are preserved
+           exactly, because they are stated relative to the hinge and geom
+           and hinge were rotated together -- the geom is COAXIAL with the
+           hinge, so:
+             - it is visually static under rotation (a cylinder spinning
+               about its own axis), matching a real fixed housing even though
+               it is modeled on the rotating body;
+             - its centre of mass is ON the hinge axis, so it contributes
+               exactly zero gravity torque -- the pendulum's equilibria are
+               set by the rod alone;
+             - its inertia about the hinge is 0.5*m*r^2 = 1.0e-5 kg m^2 for a
+               coaxial cylinder whichever axis that is, i.e. unchanged by the
+               re-orientation and negligible against the rod's ~2.3e-4.
+
+           WRIST CLEARANCE -- the thing this piece exists to buy -- is now
+           bought differently, and was RE-MEASURED rather than assumed. Under
+           the old local-X hinge the rod's swing disc lay in a plane
+           CONTAINING the tool axis, so it swept straight through
+           wrist_3_link unless the housing first carried it 0.06m sideways
+           (measured then: 1.6cm min clearance with that offset, 4.3cm of
+           penetration without it). With the hinge on local Z the swing disc
+           is PERPENDICULAR to the tool axis and sits 0.1045m out along it,
+           past the end of the entire mounting stack -- it no longer
+           intersects the wrist at all, and the clearance no longer depends
+           on a lateral offset. Measured on the composed model over the full
+           +-180deg hinge sweep at the current ARM_Q0 (mj_geomDistance, all
+           29 arm geoms vs the two moving hub/rod geoms): min arm-to-pendulum
+           distance 4.45cm, vs 1.6cm before, and it is the STATIC housing-to-
+           wrist_2_link gap, i.e. theta-independent -- the swinging rod never
+           comes closest to the arm at all now. What the rod does come close
+           to at this pose is the FLOOR: min 6.34cm at theta = -3.04 rad
+           (tip-site world Z range over the sweep [0.063, 0.303] m). That is
+           clearance, not contact, but it is a real and much smaller margin
+           than the 0.268m the previous arm pose had -- almost entirely
+           because the new ARM_Q0 holds the flange at world z = 0.184m rather
+           than 0.328m, not because of this geometry change. Worth re-
+           measuring for any new arm pose. Still re-run
+           pendulum_balance_torque_lqr.py / find_inverted_angle after any
+           geometry change rather than assuming old gains carry over. -->
+      <body name="pendulum_hub" pos="0 0 0.0445">
+        <geom name="pendulum_hub_geom" type="cylinder" fromto="0 0 0  0 0 0.06" size="0.020" class="pendulum" rgba="0.15 0.15 0.18 1" mass="0.05"/>
 
         <!-- The single swing DOF -- represents the AMT222 absolute
-             encoder's measured axis. Axis choice is a PLACEHOLDER (see
-             provenance note); tuned only so the rod hangs under gravity
-             in this file's own smoke test, not derived from the real
-             assembly's mate geometry. Re-derived 2026-08-11 for the new
-             "hanging" transport pose family: at that pose,
-             attachment_site's local Y axis maps to world Z (vertical) --
-             a hinge about it gets zero gravity torque at any angle, so it
-             cannot function as a pendulum at all (found empirically: the
-             rod stayed frozen under X-oscillation forcing). local X maps
-             to world-horizontal there instead, so axis is now "1 0 0".
-             This choice is POSE-DEPENDENT -- re-verify (or re-derive) this
-             axis again if the arm's transport pose family changes. -->
-        <joint name="pendulum_hinge" type="hinge" axis="1 0 0" pos="0 0 0" class="pendulum" range="-3.14159 3.14159" limited="false"/>
+             encoder's measured axis.
+
+             ============================================================
+             2026-08-12 (later, superseding the same date's earlier note):
+             axis is now local Z = "0 0 1", the MOUNTING-FACE NORMAL.
+             ============================================================
+             HISTORY, kept because it is why this attribute churned twice.
+             The original value was local Y, rejected 2026-08-11 because at
+             the then-current transport pose local Y mapped to world Z
+             (vertical) -- a hinge about a vertical axis gets zero gravity
+             torque at every angle and cannot function as a pendulum
+             (confirmed empirically: the rod stayed frozen under
+             X-oscillation forcing). It was replaced with local X, which was
+             horizontal at that pose. Local Z was then evaluated at that
+             same pose earlier on 2026-08-12 and MEASURED to be unusable
+             THERE (peak gravity torque 0.008310 Nm vs this joint's own
+             0.01 Nm Coulomb frictionloss -> stiction-locked at every
+             angle; a full k_e / kick sweep reached 2.1-2.6 deg of arc vs
+             174 deg and a genuine flip for local X). That measurement was
+             correct and is not retracted -- but its conclusion ("keep
+             local X") was conditional on an arm pose that has since
+             changed, and it said so explicitly.
+
+             WHY LOCAL Z IS THE RIGHT AXIS, on physical grounds first.
+             A rotary shaft carried in a housing bolted flush to a flat
+             mounting plate protrudes along that plate's NORMAL. Local Z is
+             this apparatus's mounting-stack direction by construction --
+             the two tool-changer plates stack along +Z and the shaft
+             housing extends along +Z away from attachment_site -- so the
+             standard convention puts the hinge along local Z. Local X and
+             local Y both lie IN the plane of the mounting face, which is
+             where a shaft is NOT. That argument was already stated (and
+             conceded) in the rejected-2026-08-12 note above; what was
+             missing was an arm pose at which it is also operable.
+
+             WHY IT IS NOW ALSO OPERABLE -- measured, at the real pose.
+             The arm pose used by every pendulum script in tools/diagnostics/
+             (pendulum_swingup_energy_shaping.py::ARM_Q0) is now the user's
+             actual real-hardware UR5e configuration,
+               q = [-2.3688, -2.1801, -1.8838, -0.7962, 0.004714693, 0.0206]
+             (wrist_2 wrapped into the model's valid range from a real
+             6.2879 rad probe). Measured on the composed model, attachment_
+             site's axes land in world there as:
+               local X -> [-0.0941, -0.0851,  0.9919]   ( 7.29 deg from
+                                                          VERTICAL)
+               local Y -> [ 0.7103,  0.6924,  0.1268]
+               local Z -> [-0.6976,  0.7164, -0.0047]   (89.73 deg from
+                                                          VERTICAL,
+                                                          45.76 deg from
+                                                          world X)
+             A hinge driven by the arm's world-X transport motion must
+             satisfy two independent conditions (the same two the earlier
+             note derived):
+               1. HORIZONTAL in world, or gravity makes no torque about it.
+                  local Z is 89.73 deg from vertical here -- essentially
+                  perfect (sin = 0.99999).
+               2. NOT PARALLEL to world X, or the pivot's X acceleration
+                  makes no torque about it either. |Zhat x xhat| = 0.7165
+                  here -- real coupling, though weaker than the 1.000 the
+                  old pose gave the old axis. That weaker pumping authority
+                  is a genuine cost of this pose and is quantified in the
+                  swing-up validation, not hidden here.
+             The old axis (local X) is 7.29 deg from VERTICAL at this pose,
+             i.e. the two axes have swapped roles -- the axis change and the
+             pose change are one decision, not two, and neither is valid
+             without the other.
+
+             NOTE, as before: orthogonality guarantees nothing. Each
+             candidate axis must be measured at the pose actually in use;
+             "the other non-vertical axis" is not a substitute for a
+             measurement. Re-derive if the pose family changes again.
+
+             SEPARATE CONCERN, deliberately not conflated: this pose sits
+             essentially ON the classic UR wrist_2=0 kinematic singularity
+             (wrist_2 = 0.0047 rad, cond(J6) = 1396 at the pose itself).
+             That is an ARM-side Jacobian-conditioning problem affecting how
+             accurately the arm can execute the kicking motion; it has no
+             bearing on the pendulum's own gravity dynamics, which depend
+             only on the hinge axis's orientation in world. Keep the two
+             apart when reasoning about failures here.
+
+             STILL A PLACEHOLDER in one respect: this is an inference from
+             standard mounting convention plus a measurement of what works
+             at the real pose -- it is NOT CAD-verified against the real
+             assembly's actual mate geometry (the SolidWorks mates are
+             unreadable in this environment, see the provenance note at the
+             top of this file). If the physical apparatus's swing plane is
+             ever confirmed to differ, fix it here. -->
+        <joint name="pendulum_hinge" type="hinge" axis="0 0 1" pos="0 0 0" class="pendulum" range="-3.14159 3.14159" limited="false"/>
         <site name="pendulum_hinge_site" pos="0 0 0" size="0.004" rgba="1 0 0 1"/>
 
         <!-- Pendulum rod: 8mm diameter is a real, archive-supported
-             value; 0.30m length and steel density are PLACEHOLDERS
-             (see provenance note). Rod extends along local +Z from the
-             pivot -- the SAME direction the tool-changer stack above
-             extends away from attachment_site -- so theta=0 means
-             "hanging," matching this file's original documented intent
-             (was local -Z before 2026-08-10; see git history).
+             value; length corrected 2026-08-11 to the real measured
+             value, 0.12m (was a 0.30m PLACEHOLDER guess -- see provenance
+             note above, which still applies to the steel density
+             assumption). This is a real hardware measurement, supplied
+             directly, not another placeholder.
+
+             DIRECTION CHANGED 2026-08-12: the rod now extends along local
+             +X, PERPENDICULAR to the hinge axis. It previously extended
+             along local +Z (the same direction the mounting stack extends),
+             which was correct only while the hinge was local X. With the
+             hinge corrected to local Z (see the joint element's comment) a
+             +Z rod would be COLLINEAR WITH ITS OWN HINGE AXIS -- an offset
+             crank that spins about its own centreline and never visibly
+             swings, with exactly zero gravity torque, not a pendulum at all.
+             This is a required consequence of the axis fix, not an
+             independent modelling choice.
+             ONLY the direction changed: length 0.12m, diameter 8mm and the
+             density-derived mass are all untouched.
+             Local X vs local Y is a free choice here and is NOT physically
+             meaningful: the rod sweeps a full circle in the plane
+             perpendicular to the hinge, so the choice only sets which raw
+             theta value gets labelled "hanging" at a given arm pose (that
+             label is read off the model by find_inverted_angle, never
+             assumed). Local +X is kept because it is the direction the
+             housing used to extend, minimising churn in the surrounding
+             geometry.
 
              IMPORTANT, learned the hard way while fixing the wrist
-             collision above: this direction choice does NOT by itself
-             affect collision clearance. Gravity's "up" direction is
-             fixed in world space, so the "inverted"/balance
-             configuration always requires the rod to point the SAME
-             physical direction (back toward the wrist side, at this
-             apparatus's arm pose) no matter which raw theta value is
-             chosen to label it "0" -- flipping this direction only
-             relabels which number means "hanging" vs "inverted," it
-             does not change where the physical collision risk is. The
-             ACTUAL collision fix is the mount's "0 -0.11 0.08" offset
-             above (2026-08-10); re-verify against that comment before
-             assuming this direction choice matters for clearance. The
-             same symmetry is why the FLOOR constraint cannot be dodged
-             by flipping this either -- the rod points physically
-             downward at one end of the swing regardless of labelling,
-             which is exactly what caps the mount's local-Z component.
-             mass computed from
-             density x volume by the compiler (no explicit mass
-             override), consistent with the class="pendulum" default
-             density above. -->
-        <body name="pendulum_rod" pos="0 0 0">
-          <geom name="pendulum_rod_geom" type="cylinder" fromto="0 0 0  0 0 0.30" size="0.004" class="pendulum" rgba="0.6 0.6 0.65 1"/>
-          <site name="pendulum_tip_site" pos="0 0 0.30" size="0.006" rgba="0 1 0 1"/>
+             collision in 2026-08-10/11: the rod's direction WITHIN its
+             swing plane does not by itself buy collision clearance.
+             Gravity's "up" is fixed in world space, so the
+             "inverted"/balance configuration always requires the rod to
+             point the same physical direction at a given arm pose no
+             matter which raw theta value is chosen to label it "0" --
+             rotating this direction inside the swing plane only relabels
+             which number means "hanging" vs "inverted." The same symmetry
+             is why the FLOOR constraint cannot be dodged by flipping it:
+             the rod points physically downward at one end of the swing
+             regardless of labelling. (What DID buy clearance in 2026-08-11
+             was the along-axis offset below; what buys it now is that the
+             swing plane itself no longer contains the tool axis -- see the
+             housing comment above.)
+             Mass is computed from density x volume by the compiler (no
+             explicit mass override), consistent with the class="pendulum"
+             default density above; the re-orientation leaves it unchanged. -->
+        <!-- pos z = 0.06 (was pos x = 0.06 until 2026-08-12, re-oriented with
+             the hinge axis): the rod is clamped to the OUTBOARD END of the
+             shaft housing above, not at the mounting face -- physically, to
+             the exposed end of the shaft the housing carries. This is a
+             translation ALONG the hinge axis, which leaves both the gravity
+             torque about that axis and the rod's moment of inertia about it
+             exactly unchanged, so the pendulum's own dynamics and equilibria
+             do not depend on this number. It does place the whole swing disc
+             0.1045m out along the tool axis (0.0445 hub + 0.06 housing),
+             clear of the wrist -- see the measured sweep in the housing
+             comment above. -->
+        <body name="pendulum_rod" pos="0 0 0.06">
+          <geom name="pendulum_rod_geom" type="cylinder" fromto="0 0 0  0.12 0 0" size="0.004" class="pendulum" rgba="0.6 0.6 0.65 1"/>
+          <site name="pendulum_tip_site" pos="0.12 0 0" size="0.006" rgba="0 1 0 1"/>
         </body>
       </body>
     </body>

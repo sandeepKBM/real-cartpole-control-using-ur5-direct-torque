@@ -144,19 +144,20 @@ class _MockDTLinkNonzeroVelocity:
         self._tcp_x += float(tau_nm[0]) * 1e-6
 
     @staticmethod
-    def compose_robot_state(link_state, *, jacobian, mass_matrix, time_s, target_x, target_x_vel, dt_s=None, target_x_accel=None):
+    def compose_robot_state(link_state, *, jacobian, mass_matrix, time_s, target_x, target_x_vel, dt_s=None, target_x_accel=None, transport_axis_index=0):
         from hardware.direct_torque_link import UR5eDirectTorqueLink
 
         return UR5eDirectTorqueLink.compose_robot_state(
             link_state, jacobian=jacobian, mass_matrix=mass_matrix,
             time_s=time_s, target_x=target_x, target_x_vel=target_x_vel, dt_s=dt_s,
-            target_x_accel=target_x_accel,
+            target_x_accel=target_x_accel, transport_axis_index=transport_axis_index,
         )
 
-    def build_robot_state(self, link_state, *, time_s, target_x, target_x_vel, dt_s=None):
+    def build_robot_state(self, link_state, *, time_s, target_x, target_x_vel, dt_s=None, transport_axis_index=0):
         return self.compose_robot_state(
             link_state, jacobian=self.get_jacobian(), mass_matrix=self.get_mass_matrix(),
             time_s=time_s, target_x=target_x, target_x_vel=target_x_vel, dt_s=dt_s,
+            transport_axis_index=transport_axis_index,
         )
 
     def safe_stop(self, reason: str) -> None:

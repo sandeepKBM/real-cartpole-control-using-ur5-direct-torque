@@ -1,0 +1,190 @@
+<mujoco model="ur5e_pendulum_longrod">
+  <!--
+  ALTERNATE cartpole pendulum: the LONG-ROD variant.
+  ============================================================
+  Created 2026-08-13. This is a SECOND, deliberately different pendulum
+  design, NOT a replacement for and NOT a revert of
+  assets/ur5e_pendulum/pendulum_attachment.xml (which models the REAL
+  physical apparatus, 0.12 m rod, and stays the default everywhere).
+  Both are loadable: simulation/ur5e_pendulum_compose.py already takes a
+  `pendulum_xml=` argument, so no code change is needed to use this one.
+
+  WHY THIS EXISTS -- the swing-up bandwidth argument (measured, 2026-08-13)
+  ============================================================
+  The real 0.12 m apparatus has never been made to flip. The reason is NOT
+  that it needs too much energy -- it needs 6.24x LESS than this variant:
+
+                        E_top      omega      period   half-period
+    long rod (0.30 m)   0.3481 J   7.003      0.897 s    0.449 s
+    real     (0.12 m)   0.0557 J  10.833      0.580 s    0.290 s
+
+  Pumping a pendulum requires the cart (the UR5e wrist) to reverse
+  direction every half-period. This arm's documented closed-loop bandwidth
+  limit is ~0.5 s per move (AGENTS.md sec 3, "moves faster than ~0.5 s
+  undershoot ... closed-loop bandwidth limit at kp_x=400, not saturation").
+    * 0.449 s reversal (this variant)  -- just INSIDE what the arm can track.
+    * 0.290 s reversal (real 0.12 m)   -- OUTSIDE it, at any gain.
+  Since omega ~ 1/sqrt(L), a LONGER rod is slower and therefore easier to
+  pump, even though it stores more energy at the top. That is the opposite
+  of the "make it shorter/lighter" intuition and it is why the only flip
+  ever achieved in this repo (outputs/pendulum_renders/annotated_swingup_flip.mp4)
+  used a 0.30 m rod.
+
+  A 0.30 m rod is also trivially BUILDABLE on the real apparatus: the rod
+  is held by an "8mm Bore Clamp", so it is a swap of one length of Ø8 mm
+  steel shaft, not a redesign.
+
+  WHAT IS COPIED FROM THE OLD (FLIPPING) DESIGN
+  ============================================================
+    * hinge axis = local X ("1 0 0"), NOT the current file's local Z.
+    * rod extends along local +Z, perpendicular to that hinge, 0.30 m.
+    * a 0.06 m shaft housing along the hinge axis, which is what buys wrist
+      clearance for this axis choice: with the hinge on local X the rod's
+      swing disc lies in a plane CONTAINING the tool axis, so it sweeps
+      through wrist_3_link unless the housing first carries it sideways
+      (measured historically: 1.6 cm min clearance with the offset, 4.3 cm
+      of PENETRATION without it).
+
+  WHAT IS DELIBERATELY *NOT* COPIED -- two real bugs the old file had
+  ============================================================
+  The old committed version of pendulum_attachment.xml contained two
+  defects that were found and fixed later. Neither is reproduced here:
+    1. `pendulum_mount pos="0 -0.11 0.08"` -- the "floating tool" bug. It
+       put the tool-changer 13.6 cm from attachment_site with 8.1 cm of
+       clear AIR between the wrist and the nearest tool surface, rendering
+       as an unsupported assembly hanging in space. A tool changer is
+       BOLTED to the flange; any nonzero flange->plate offset is physically
+       impossible. This file uses pos="0 0 0", flush.
+    2. hub at `pos="0 0 0.071"` -- sized against a tool-side plate that was
+       mounted 90 deg wrong (standing the 71 mm plate on edge, making the
+       stack 71 mm tall instead of 28.4 mm). With the plate correctly
+       oriented the stack ends at z = 0.0445, which is what this file uses.
+
+  MASS -- uses the CORRECTED budget, not the old density-derived numbers
+  ============================================================
+  The old file let MuJoCo derive mesh mass from density=7850, which gave
+  2.066 kg for the two tool-changer plates alone (~7x the real hardware,
+  and physically impossible -- it implied a volume larger than the part's
+  own bounding box). Explicit masses below come from the corrected budget
+  in the main attachment file: robot-side 0.0606 kg and tool-side 0.1394 kg
+  (the measured 0.200 kg pair, split by true integrated mesh volumes
+  30.3%/69.7%), hub 0.0500 kg.
+
+  Only the ROD's mass is density-derived, exactly as the main file does it:
+  Ø8 mm x 0.30 m steel at 7850 kg/m^3 = 0.1184 kg. Total ~0.368 kg -- more
+  than the real 0.300 kg apparatus, which is correct and expected: this rod
+  is 2.5x longer.
+
+  PROVENANCE / STATUS
+  ============================================================
+  The 0.30 m length is NOT a measurement of any existing hardware -- it is
+  a DESIGN PROPOSAL, chosen because it reproduces the one configuration
+  that ever flipped and because the bandwidth argument above says longer is
+  better. Everything else (Ø8 mm rod, tool-changer dimensions and masses,
+  steel density) carries over from the main file's own provenance.
+  Not validated on real hardware. See the main attachment file for the full
+  CAD-provenance discussion, which is not duplicated here.
+  -->
+
+  <default>
+    <default class="pendulum">
+      <!-- REAL measured hinge friction (user-supplied, 2026-08-14). Was
+           damping="0.02" frictionloss="0.01" -- unvalidated CAD placeholders
+           with no provenance. The error was ~200x in viscous damping and it
+           INVERTED a headline conclusion: with the placeholders this hinge is
+           OVERDAMPED (zeta 3.97, ~21 deg stiction dead-band, physically unable
+           to oscillate) and swing-up correctly measured as impossible; with the
+           real values zeta = 0.019, dead-band 2.06 deg, and a single guard-clean
+           kick carries ~1.9x the energy needed to invert. Same physical
+           bearing in every variant, so all assets carry the same numbers. -->
+      <joint damping="0.0001" frictionloss="0.001"/>
+      <geom contype="0" conaffinity="0" density="7850"/>
+    </default>
+  </default>
+
+  <asset>
+    <!-- Same real OnRobot tool-changer meshes as the main file. -->
+    <mesh name="toolchanger_robot_side_mesh" file="meshes/toolchanger_robot_side.stl"/>
+    <mesh name="toolchanger_tool_side_mesh" file="meshes/toolchanger_tool_side.stl"/>
+  </asset>
+
+  <worldbody>
+    <!-- FLUSH ON THE FLANGE (see "deliberately NOT copied", item 1). -->
+    <body name="pendulum_mount" pos="0 0 0">
+      <geom name="toolchanger_robot_side" type="mesh" mesh="toolchanger_robot_side_mesh"
+            pos="0 0 0.0025" mass="0.0606" class="pendulum" rgba="0.35 0.35 0.38 1"/>
+      <!-- quat = +90 deg about X, mapping the STL's own +Y plate normal to
+           mount +Z, so the coupling face seats on the robot-side plate's
+           outer face at z = 0.0161 and the stack ends at z = 0.0445. -->
+      <geom name="toolchanger_tool_side" type="mesh" mesh="toolchanger_tool_side_mesh"
+            pos="0 0 0.0161" quat="0.70710678 0.70710678 0 0"
+            mass="0.1394" class="pendulum" rgba="0.3 0.3 0.32 1"/>
+
+      <!-- Shaft/sensor housing cluster, lumped. Seated on the corrected top
+           of the tool-changer stack (z = 0.0445, see item 2 above).
+           Runs ALONG the hinge axis (local X here) so it is coaxial with
+           the hinge: its centre of mass sits ON the axis and therefore
+           contributes exactly zero gravity torque, and it is visually
+           static under rotation, matching a real fixed housing. Its 0.06 m
+           length is what carries the swing disc clear of the wrist for a
+           local-X hinge. -->
+      <body name="pendulum_hub" pos="0 0 0.0445">
+        <!-- HOUSING LENGTH 0.12 m, NOT the old design's 0.06 m. MEASURED,
+             not guessed: with the tool changer correctly mounted flush (see
+             item 1 above), a 0.06 m standoff leaves the 0.30 m rod PASSING
+             THROUGH the arm -- rod-only sweep min distance -1.56 cm at
+             theta = -57 deg. The old file hid this by floating the whole
+             assembly 13.6 cm off the flange, which is not physically
+             possible. Buying the clearance where it IS realizable -- a
+             longer shaft housing -- is the correct fix. Measured rod-only
+             clearance over the full +-180 deg sweep at the intended pose:
+                 0.06 m -> -1.56 cm  (COLLIDES)
+                 0.10 m ->  2.41 cm  (clear)
+                 0.12 m ->  4.4  cm  (clear, chosen)
+                 0.15 m ->  7.40 cm  (clear)
+             Floor clearance is ~7.0 cm at every offset tested, so the floor
+             is not the binding constraint here; the arm is.
+             Moving this length changes NO pendulum dynamics: it is a
+             translation ALONG the hinge axis, which leaves both the gravity
+             torque about that axis and the moment of inertia about it
+             exactly unchanged. -->
+        <geom name="pendulum_hub_geom" type="cylinder" fromto="0 0 0  0.12 0 0" size="0.020"
+              class="pendulum" rgba="0.15 0.15 0.18 1" mass="0.05"/>
+
+        <!-- Hinge on local X -- the axis the only successful flip used.
+             It must be HORIZONTAL in world at the arm pose in use (or
+             gravity makes no torque about it) and NOT parallel to world X
+             (or the cart's own acceleration makes no torque about it).
+             At the pose this variant is intended for -- the "old" flip pose
+             q = [0, -1.091985784398452, 2.0935362786892546,
+                  -2.7685637962327356, 1.5620693866337145, 0] --
+             that held, and that pose is also well-conditioned
+             (cond(J) = 6.93, wrist_2 = +89.5 deg, i.e. NOT at the wrist
+             singularity, unlike the current real-hardware ARM_Q0's 1395.76).
+             RE-MEASURE both conditions before using this file at any other
+             pose; axis choice and pose are one decision, not two. -->
+        <joint name="pendulum_hinge" type="hinge" axis="1 0 0" pos="0 0 0"
+               class="pendulum" range="-3.14159 3.14159" limited="false"/>
+        <site name="pendulum_hinge_site" pos="0 0 0" size="0.004" rgba="1 0 0 1"/>
+
+        <!-- Rod: 0.30 m along local +Z, perpendicular to the local-X hinge
+             (a rod COLLINEAR with its own hinge would be an offset crank
+             that spins about its centreline with zero gravity torque, not a
+             pendulum). Clamped at the OUTBOARD end of the housing, which is
+             a translation ALONG the hinge axis and therefore leaves both the
+             gravity torque about that axis and the moment of inertia about
+             it exactly unchanged. Mass is density-derived (Ø8 mm x 0.30 m
+             steel = 0.1184 kg), same convention as the main file's rod. -->
+        <body name="pendulum_rod" pos="0.12 0 0">
+          <geom name="pendulum_rod_geom" type="cylinder" fromto="0 0 0  0 0 0.30" size="0.004"
+                class="pendulum" rgba="0.6 0.6 0.65 1"/>
+          <site name="pendulum_tip_site" pos="0 0 0.30" size="0.006" rgba="0 1 0 1"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <sensor>
+    <jointpos name="pendulum_angle_sensor" joint="pendulum_hinge"/>
+  </sensor>
+</mujoco>

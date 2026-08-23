@@ -52,6 +52,8 @@ could fight each other). R penalizes the 6 actuator torques.
 
 from __future__ import annotations
 
+import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -62,9 +64,35 @@ from scipy.linalg import solve_discrete_are
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from simulation.ur5e_pendulum_compose import compose_ur5e_pendulum_model  # noqa: E402
+from simulation.ur5e_pendulum_compose import (  # noqa: E402
+    DEFAULT_ARM_Q,
+    DEFAULT_PENDULUM_XML,
+    arm_q_for_pendulum_xml,
+    compose_ur5e_pendulum_model,
+    derive_pendulum_constants,
+)
 
-ARM_Q0 = np.array([0, -np.pi / 2, np.pi / 2, -np.pi / 2, -np.pi / 2, 0])
+# Fixed 2026-08-12: this used to be a generic, unrelated arm pose ([0, -pi/2,
+# pi/2, -pi/2, -pi/2, 0]) with no connection to where the swing-up scripts
+# (pendulum_swingup_*.py) actually leave the pendulum. That meant the LQR
+# gains computed here were tuned for a completely different arm
+# configuration than swing-up's own -- balance and swing-up were two
+# disconnected problems, not a real handoff pipeline. Must therefore stay
+# identical to pendulum_swingup_energy_shaping.py::ARM_Q0.
+#
+# Updated again later 2026-08-12, together with the hinge-axis correction to
+# local Z: this is now the user's ACTUAL real-hardware UR5e configuration
+# (wrist_2 wrapped into the model's valid range from a real 6.2879 rad
+# probe). See pendulum_swingup_energy_shaping.py's ARM_Q0 comment for the
+# measured geometry that justifies it, including the separate, explicitly
+# NOT-conflated caveat that this pose sits on the wrist_2=0 arm singularity
+# (cond(J6) = 1396) -- which matters for the LQR designed below, since it
+# linearizes the full arm+pendulum system AT this pose.
+# Single source of truth is simulation/ur5e_pendulum_compose.py's asset<->pose
+# table; value unchanged. Must stay identical to
+# pendulum_swingup_energy_shaping.py::ARM_Q0 so balance and swing-up remain a
+# real handoff rather than two disconnected problems.
+ARM_Q0 = DEFAULT_ARM_Q
 TORQUE_LIMIT_NM = np.array([150.0, 150.0, 150.0, 28.0, 28.0, 28.0])
 RATE_HZ = 500.0
 CONTROL_DT = 1.0 / RATE_HZ
@@ -92,11 +120,28 @@ def find_inverted_angle(model, data, pend_qpos_adr: int) -> float:
     LOCAL SLOPE -- confirmed empirically against a real, long (16 s),
     large-perturbation (0.15 rad) simulation: the candidate whose distance
     from a perturbed start GREW over time is unstable (slope > 0, pushes
-    away); the one whose distance SHRANK is stable (slope < 0, restores)."""
+    away); the one whose distance SHRANK is stable (slope < 0, restores).
+
+    BUG FIXED 2026-08-13: this function's ``data`` parameter was silently
+    unused -- every internal computation (the qfrc_bias scan, the
+    stability-classification stepping, and the gravity-compensation torque
+    inside it) hardcoded the module's own ``ARM_Q0`` constant instead of
+    reading the arm pose the caller actually set up in ``data.qpos[:6]``.
+    That meant this function ALWAYS analyzed pendulum equilibria at the old
+    singular ARM_Q0 pose, silently ignoring any other pose a caller passed
+    in via ``data`` -- confirmed as the root cause of a real, wrong
+    hanging/inverted-angle result at a newly-found, differently-conditioned
+    pose (direct check: the label this bug called "hanging" was measurably
+    HIGHER in world Z, i.e. higher gravitational PE, than the one it called
+    "inverted" -- backwards for a passive pendulum, whose true hanging
+    point is always the lower-PE one). Fixed by capturing the caller's
+    actual arm pose once at entry and using it everywhere below, instead of
+    the hardcoded constant."""
+    arm_q = np.asarray(data.qpos[:6], dtype=np.float64).copy()
 
     def qfrc_bias_pend(theta: float) -> float:
         d = mujoco.MjData(model)
-        d.qpos[:6] = ARM_Q0
+        d.qpos[:6] = arm_q
         d.qpos[pend_qpos_adr] = theta
         d.qvel[:] = 0.0
         mujoco.mj_forward(model, d)
@@ -115,6 +160,37 @@ def find_inverted_angle(model, data, pend_qpos_adr: int) -> float:
                 else:
                     hi = mid
             crossings.append((lo + hi) / 2)
+
+    # Deduplicate crossings that are the SAME physical equilibrium detected
+    # twice near the +-pi periodic boundary (thetas' scan endpoints -pi and
+    # +pi are the same point; a spurious extra detection there was found
+    # 2026-08-11 after the pendulum rod-length correction shrank peak
+    # qfrc_bias by ~6x, 0.174 -> 0.028 Nm -- the same absolute floating-
+    # point evaluation noise near the wrap boundary that was negligible at
+    # the old torque scale is no longer negligible at the new one. Merge
+    # any two raw crossings within 0.05 rad of each other (wraparound-
+    # aware) into one, averaged in the wrapped sense, before requiring
+    # exactly 2 real equilibria.
+    def _wrapped_dist(a: float, b: float) -> float:
+        d = abs(a - b)
+        return min(d, 2 * np.pi - d)
+
+    deduped: list[float] = []
+    for c in crossings:
+        merged = False
+        for i, existing in enumerate(deduped):
+            if _wrapped_dist(c, existing) < 0.05:
+                # Average in the wrapped sense: shift c into existing's local
+                # branch before averaging, then re-wrap to (-pi, pi].
+                c_local = existing + (np.mod(c - existing + np.pi, 2 * np.pi) - np.pi)
+                avg = np.mod((existing + c_local) / 2.0 + np.pi, 2 * np.pi) - np.pi
+                deduped[i] = float(avg)
+                merged = True
+                break
+        if not merged:
+            deduped.append(c)
+    crossings = deduped
+
     if len(crossings) != 2:
         raise RuntimeError(f"expected exactly 2 equilibria, found {len(crossings)}: {crossings}")
 
@@ -149,26 +225,50 @@ def find_inverted_angle(model, data, pend_qpos_adr: int) -> float:
     model.dof_damping[pend_dof_adr] = 0.0
     model.dof_frictionloss[pend_dof_adr] = 0.0
     classified = []
-    for c in crossings:
-        d = mujoco.MjData(model)
-        d.qpos[:6] = ARM_Q0
-        d.qpos[pend_qpos_adr] = c + 1e-3
-        d.qvel[:] = 0.0
-        mujoco.mj_forward(model, d)
-        max_dev = 0.0
-        for step in range(2000):
-            theta = float(d.qpos[pend_qpos_adr])
-            dev = abs(float(np.mod(theta - c + np.pi, 2 * np.pi) - np.pi))
-            max_dev = max(max_dev, dev)
-            d.qpos[:6] = ARM_Q0
-            d.qvel[:6] = 0.0
-            mujoco.mj_step(model, d)
-        # Bounded (stable) oscillation stays within a small multiple of the
-        # 1e-3 rad initial perturbation; genuine instability grows well
-        # beyond it within 4 s (2000 steps at 2 ms).
-        classified.append((c, "unstable" if max_dev > 0.02 else "stable"))
-    model.dof_damping[pend_dof_adr] = saved_damping
-    model.dof_frictionloss[pend_dof_adr] = saved_frictionloss
+    # try/finally added 2026-08-12 (audit): this block mutates the CALLER'S
+    # model in place. Every swing-up script calls this on the same model object
+    # it then simulates with, so any exception escaping the classification loop
+    # (or a KeyboardInterrupt during it -- these loops run 2000 steps per
+    # candidate) would leave the pendulum hinge permanently frictionless and
+    # undamped for the rest of the process, silently changing the physics of
+    # every subsequent trial with no error to connect it to.
+    try:
+        for c in crossings:
+            d = mujoco.MjData(model)
+            d.qpos[:6] = arm_q
+            d.qpos[pend_qpos_adr] = c + 1e-3
+            d.qvel[:] = 0.0
+            mujoco.mj_forward(model, d)
+            max_dev = 0.0
+            for step in range(2000):
+                theta = float(d.qpos[pend_qpos_adr])
+                dev = abs(float(np.mod(theta - c + np.pi, 2 * np.pi) - np.pi))
+                max_dev = max(max_dev, dev)
+                # Hold the arm via real gravity-compensating torque (same
+                # technique as static_gravity_torque/run_torque_balance_trial
+                # elsewhere in this file), NOT a hard qpos/qvel reset every step.
+                # Fixed 2026-08-11 after the pendulum rod-length correction
+                # shrank the pendulum's own inertia ~15x: the discontinuous
+                # per-step reset this loop used to do injects a real momentum
+                # artifact through the arm/pendulum mass-matrix coupling on
+                # every step (confirmed directly: traced max_dev over time and
+                # found large, non-monotonic, non-exponential jumps -- e.g.
+                # 0.001->0.66 rad by t=0.2s -- for BOTH candidate equilibria,
+                # not the clean bounded-vs-exponential signature this
+                # classification depends on). That artifact was negligible
+                # relative to the old, ~15x-heavier pendulum's own inertia;
+                # it no longer is. A smooth holding torque has no discontinuity
+                # to inject.
+                tau_gravity = static_gravity_torque(model, np.concatenate([arm_q, [theta]]))
+                d.ctrl[:6] = tau_gravity[:6]
+                mujoco.mj_step(model, d)
+            # Bounded (stable) oscillation stays within a small multiple of the
+            # 1e-3 rad initial perturbation; genuine instability grows well
+            # beyond it within 4 s (2000 steps at 2 ms).
+            classified.append((c, "unstable" if max_dev > 0.02 else "stable"))
+    finally:
+        model.dof_damping[pend_dof_adr] = saved_damping
+        model.dof_frictionloss[pend_dof_adr] = saved_frictionloss
 
     unstable = [c for c, kind in classified if kind == "unstable"]
     if len(unstable) != 1:
@@ -192,15 +292,46 @@ def static_gravity_torque(model, q_full: np.ndarray) -> np.ndarray:
 def linearize_and_design_lqr(
     model,
     inverted_angle: float,
+    arm_q=None,
     q_pend_angle: float = 200.0,
     q_pend_vel: float = 5.0,
     q_arm_pos: float = 0.05,
     q_arm_vel: float = 0.05,
     r_weight: float = 0.0005,
+    zero_hinge_frictionloss_for_linearization: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
+    """``zero_hinge_frictionloss_for_linearization`` (added 2026-08-14, default
+    False = historical behavior) temporarily zeroes the PENDULUM HINGE's
+    ``frictionloss`` for the ``mjd_transitionFD`` call only, restoring it
+    immediately afterwards. The simulated plant is never changed.
+
+    Why it exists: Coulomb ``frictionloss`` (0.001 Nm) completely dominates at
+    the microscopic velocities a finite-difference perturbation produces, so the
+    linearizer sees a nearly-STUCK hinge and the inverted equilibrium's unstable
+    mode is hidden. Measured at ARM_Q0/wrist_2=-90 with
+    ``pendulum_attachment_realrod.xml`` (dt=0.002, omega=10.8334 rad/s):
+
+        quantity      as-modelled   frictionloss zeroed   analytic
+        A[thd,thd]      0.810829         0.999157         0.99916
+        A[thd,th]       0.023741         0.234904         w^2*dt = 0.234725
+        max |eig|       1.000252         1.021474         exp(w*dt) = 1.021903
+
+    i.e. the as-modelled linearization reports the pendulum losing 19% of its
+    velocity per 2 ms step and being essentially non-divergent. An LQR designed
+    against that plant is far too slow: it produced closed-loop time constants of
+    ~1-2 s against a pendulum that actually falls with a 0.092 s time constant,
+    and FELL at every perturbation from 0.05 rad up. Sweeping ``r_weight`` over
+    2e9 barely moved the eigenvalues, which is the signature of a wrong MODEL
+    rather than wrong weights.
+
+    Default stays False so previously-derived gains remain reproducible; pass
+    True for any new design. Friction is still fully present in the simulated
+    rollout either way -- this only corrects the model used for gain synthesis.
+    """
     nv = model.nv
+    arm_q = ARM_Q0 if arm_q is None else np.asarray(arm_q, dtype=np.float64).reshape(6)
     data = mujoco.MjData(model)
-    q_eq = np.concatenate([ARM_Q0, [inverted_angle]])
+    q_eq = np.concatenate([arm_q, [inverted_angle]])
     data.qpos[:] = q_eq
     data.qvel[:] = 0.0
     tau_eq = static_gravity_torque(model, q_eq)[:6]
@@ -209,7 +340,16 @@ def linearize_and_design_lqr(
 
     A = np.zeros((2 * nv, 2 * nv))
     B = np.zeros((2 * nv, model.nu))
-    mujoco.mjd_transitionFD(model, data, 1e-6, 1, A, B, None, None)
+    _pend_dof = int(model.jnt_dofadr[
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "/pendulum_hinge")
+    ])
+    _saved_friction = float(model.dof_frictionloss[_pend_dof])
+    if zero_hinge_frictionloss_for_linearization:
+        model.dof_frictionloss[_pend_dof] = 0.0
+    try:
+        mujoco.mjd_transitionFD(model, data, 1e-6, 1, A, B, None, None)
+    finally:
+        model.dof_frictionloss[_pend_dof] = _saved_friction
 
     Q = np.zeros(2 * nv)
     Q[:6] = q_arm_pos
@@ -241,7 +381,9 @@ def run_torque_balance_trial(
     perturbation_rad: float,
     duration_s: float,
     theta_dot_perturbation: float = 0.0,
+    arm_q=None,
 ) -> dict:
+    arm_q = ARM_Q0 if arm_q is None else np.asarray(arm_q, dtype=np.float64).reshape(6)
     model = model_template
     data = mujoco.MjData(model)
     pend_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "/pendulum_hinge")
@@ -249,7 +391,7 @@ def run_torque_balance_trial(
     pend_dof_adr = model.jnt_dofadr[pend_joint_id]
     inverted_angle = float(q_eq[6])
 
-    data.qpos[:6] = ARM_Q0
+    data.qpos[:6] = arm_q
     data.qpos[pend_qpos_adr] = inverted_angle + perturbation_rad
     data.qvel[:] = 0.0
     data.qvel[pend_dof_adr] = theta_dot_perturbation
@@ -316,11 +458,67 @@ def run_torque_balance_trial(
     }
 
 
-def main() -> int:
-    model = compose_ur5e_pendulum_model()
-    data = mujoco.MjData(model)
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Full-order LQR balance controller for the pendulum apparatus.")
+    parser.add_argument(
+        "--pendulum-xml", default=str(DEFAULT_PENDULUM_XML),
+        help="Pendulum attachment MJCF to compose onto the arm "
+             "(default: the real 0.12 m apparatus).")
+    parser.add_argument(
+        "--start-q-rad", nargs=6, type=float, default=None,
+        metavar=("Q1", "Q2", "Q3", "Q4", "Q5", "Q6"),
+        help="Arm pose to linearize/balance at, 6 joint angles in radians. "
+             "Default: the pose registered for --pendulum-xml in "
+             "simulation.ur5e_pendulum_compose.PENDULUM_ASSET_ARM_Q.")
+    parser.add_argument("--output-json", default=None,
+                        help="Write results to this path as JSON.")
+    parser.add_argument("--duration-s", type=float, default=8.0,
+                        help="Duration of each balance trial.")
+    parser.add_argument("--zero-frictionloss-for-linearization", action="store_true",
+                        help="Zero the hinge frictionloss for the mjd_transitionFD call "
+                             "ONLY (the simulated plant keeps its friction). Without this, "
+                             "Coulomb friction dominates at finite-difference scale and the "
+                             "linearizer reports the inverted equilibrium as nearly "
+                             "non-divergent (max|eig| 1.000252 vs the analytic 1.021903), "
+                             "so the designed LQR is ~10-20x too slow and falls. Default "
+                             "off preserves previously-derived gains.")
+    parser.add_argument("--r-weight", type=float, default=1e6,
+                        help="LQR control-effort weight. MUST stay well above "
+                             "linearize_and_design_lqr's own 0.0005 default, "
+                             "which predates the per-actuator R scaling fix.")
+    parser.add_argument("--perturbations-rad", nargs="+", type=float,
+                        default=[0.02, 0.5, 1.0, 1.5, 2.0, 2.3, 2.5, 2.7])
+    # NOTE: --controller-kind / --config deliberately absent. This script does
+    # not run the Cartesian impedance controller at all -- it designs and
+    # applies its own full-order LQR directly on the linearized MuJoCo system,
+    # so neither flag has anything to select here.
+    return parser
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    pendulum_xml = str(Path(args.pendulum_xml).resolve())
+    arm_q = (np.asarray(args.start_q_rad, dtype=np.float64) if args.start_q_rad is not None
+             else arm_q_for_pendulum_xml(pendulum_xml))
+
+    model = compose_ur5e_pendulum_model(pendulum_xml=pendulum_xml)
     pend_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "/pendulum_hinge")
     pend_qpos_adr = model.jnt_qposadr[pend_joint_id]
+
+    constants = derive_pendulum_constants(model, arm_q)
+    print(f"pendulum_xml={Path(pendulum_xml).name}  arm_q={np.round(arm_q, 6).tolist()}")
+    print(f"derived: m*g*r={constants.mgr_nm:.6f} Nm  I_pivot={constants.i_pivot_kgm2:.6e} kg m^2  "
+          f"T_natural={constants.t_natural_s:.4f} s")
+
+    # find_inverted_angle reads the arm pose out of `data` (see its own
+    # 2026-08-13 note). Posing it here is REQUIRED, not cosmetic: with a bare
+    # MjData the arm sits at all-zeros and the equilibria come back for a
+    # completely different configuration.
+    data = mujoco.MjData(model)
+    data.qpos[:6] = arm_q
+    data.qvel[:] = 0.0
+    mujoco.mj_forward(model, data)
 
     inverted_angle = find_inverted_angle(model, data, pend_qpos_adr)
     print(f"inverted_angle (composed frame) = {inverted_angle:.4f} rad")
@@ -328,13 +526,12 @@ def main() -> int:
     # r_weight MUST be passed explicitly -- the function's own default
     # (0.0005) is the PRE-FIX value from before the per-actuator R-scaling
     # fix (see this module's docstring, bug #4): at that r_weight, demanded
-    # torques saturate every cycle and the closed loop is unreliable (a
-    # fresh run without this override showed pert=1.0/1.5 rad FALLING,
-    # contradicting the validated 0.02-3.0 rad clean-convergence result --
-    # caught by re-running this exact script standalone and finding it did
-    # NOT reproduce the validation performed via inline snippets during
-    # development, which always passed r_weight=1e6 explicitly).
-    K, q_eq, diag = linearize_and_design_lqr(model, inverted_angle, r_weight=1e6)
+    # torques saturate every cycle and the closed loop is unreliable.
+    K, q_eq, diag = linearize_and_design_lqr(
+        model, inverted_angle, arm_q=arm_q, r_weight=args.r_weight,
+        zero_hinge_frictionloss_for_linearization=bool(
+            args.zero_frictionloss_for_linearization),
+    )
     print(f"tau_eq (static gravity torque at equilibrium) = {diag['tau_eq']}")
     n_unstable = int(np.sum(np.abs(diag["eigvals_discrete"]) >= 1.0))
     print(f"discrete closed-loop eigenvalue magnitudes (all must be < 1.0): "
@@ -343,12 +540,35 @@ def main() -> int:
         print(f"WARNING: {n_unstable} closed-loop eigenvalues have magnitude >= 1.0 -- unstable per the linear model.")
         return 1
 
+    rows = []
     print(f"\n{'pert (rad)':>10} {'fell_at_s':>10} {'peak_err':>10} {'final_err':>10} {'result':>10}")
-    for pert in [0.02, 0.5, 1.0, 1.5, 2.0, 2.3, 2.5, 2.7]:
-        r = run_torque_balance_trial(model, K, q_eq, pert, duration_s=8.0)
+    for pert in args.perturbations_rad:
+        r = run_torque_balance_trial(model, K, q_eq, pert, duration_s=args.duration_s,
+                                     arm_q=arm_q)
+        rows.append(r)
         result = "SURVIVED" if r["survived_full_duration"] else "FELL"
         print(f"{pert:10.2f} {str(r['fell_at_s']):>10} {r['peak_theta_err']:10.4f} "
               f"{r['final_theta_err']:10.4f} {result:>10}")
+
+    if args.output_json:
+        payload = {
+            "pendulum_xml": pendulum_xml,
+            "arm_q": [float(v) for v in arm_q],
+            "inverted_angle_rad": float(inverted_angle),
+            "r_weight": float(args.r_weight),
+            "constants": {
+                "mgr_nm": constants.mgr_nm, "i_pivot_kgm2": constants.i_pivot_kgm2,
+                "m_total_kg": constants.m_total_kg, "r_com_m": constants.r_com_m,
+                "omega_natural_radps": constants.omega_natural_radps,
+                "t_natural_s": constants.t_natural_s, "e_top_j": constants.e_top_j,
+            },
+            "max_abs_closed_loop_eig": float(np.max(np.abs(diag["eigvals_discrete"]))),
+            "trials": rows,
+        }
+        out = Path(args.output_json)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2, sort_keys=True, default=float))
+        print("wrote", out)
     return 0
 
 

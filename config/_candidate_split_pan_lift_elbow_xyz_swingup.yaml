@@ -1,0 +1,155 @@
+# config/ur5e_mujoco_torque_osc_tuned_split_base_wrist_lift_elbow_wrist1_x_only.yaml
+# with TWO fields changed and one flag added:
+#   split_base_wrist_task_dims: [0, 1, 2]              (was [0] -- world X AND world Z)
+#   nullspace_inertia_adaptive_regularization: true (new field, added 2026-08-12)
+#   nullspace_inertia_eps_ratio: 0.05
+# GAINS ARE UNCHANGED from that file, and no safety threshold is touched.
+#
+# SIM-ONLY. Validated on assets/ur5e_torque/scene.xml at the real robot start pose
+# q = [-2.3688, -2.1801, -1.8838, -0.7962, 0.004714693, 0.0206]. NO real-hardware run has
+# been done with this configuration.
+#
+# WHY THIS EXISTS. The 1-row (`[0]`) parent config's measured safe range at that pose is
+# ~+-0.02m, capped by the `|Z-Z0| > 0.03 m` guard. A gain search over
+# kp_posture/kd_posture/kd_joint/kp_x/kd_x plus the new eps schedule
+# (tools/diagnostics/split_x_only_range_gain_search.py) did NOT extend that meaningfully --
+# see docs and the search JSON under outputs/split_x_only_search/. The reason turned out to
+# be structural, not a gain deficit: with `[0]` selected, world Z is regulated by NOTHING but
+# the joint-space posture spring, and that spring is a finite-stiffness anchor which
+# monotonically loses the argument as the move grows. Selecting Z as a TASK row instead --
+# which the `{shoulder_lift, elbow, wrist_1}` sub-chain can genuinely do, see below -- puts
+# it under kp_z/kd_z closed-loop control and the Z problem disappears outright
+# (max |Z-drift| 0.0300 -> 0.0123 at dx=0.03m).
+#
+# WHY [0, 2] IS WELL-POSED HERE AND [0, 1, 2] IS NOT, measured at the pose above:
+#   * J[0:3, [1,2,3]] : rank 2 of 3, singular values 0.6855 / 0.2077 / 2.4e-17. Three
+#     mutually parallel revolute axes (the UR planar sub-chain) span at most a 2D subspace
+#     of 3D linear velocity at ANY configuration -- so all three translation rows is
+#     permanently unusable, at every pose, for this joint set.
+#   * J[[0,2], [1,2,3]] : rank 2 of 2, singular values 0.6853 / 0.2077, cond = 3.299.
+#     Well-conditioned. World X and world Z both lie inside the 2D subspace these joints
+#     do span, so a 2-row (X, Z) task is exactly the largest well-posed task available.
+#
+# THE REMAINING CEILING IS KINEMATIC, NOT TUNABLE. The unreachable direction of that
+# sub-chain at this pose is horizontal, n = (-0.6981, +0.7160, 0) -- essentially the world
+# X/Y diagonal, because shoulder_pan sits at -135.7 deg. Every reachable motion is
+# perpendicular to n, so any world-X displacement dx DRAGS a world-Y displacement
+# dy = dx * 0.6981/0.7160 = 0.975 * dx along with it. With `max_abs_y_drift_m: 0.03`
+# unchanged below, that alone caps |dx| at 0.03/0.975 = 0.0308 m no matter what any gain
+# does. Measured envelope (move 1.5s, hold 10s, both directions, guards unchanged):
+#
+#   dx        tracking   max|Y|    max|Z|    ori[rad]  max|qd|  guard
+#   +-0.010m  92.0/91.6  0.0090    0.0061    0.018     0.018    -
+#   +-0.020m  88.9/87.6  0.0173    0.0136    0.032     0.162    -
+#   +-0.030m  95.8/92.0  0.0280    0.0123    0.046     0.202    -
+#   +-0.031m  94.3/92.0  0.0285    0.0120    0.047     0.208    -
+#   +-0.035m  87.9/87.9  0.0300    0.0111    0.048     0.229    |Y-Y0| > 0.03 m @2.0/3.3s
+#
+# i.e. +-0.031 m clean both directions, and the first failure lands exactly on the predicted
+# kinematic wall via the Y guard -- not via Z, and not via any controller deficiency. Going
+# past it needs a different joint selection (one including wrist_2, which this robot cannot
+# currently use) or a different base rotation, NOT retuning and NOT a wider drift guard.
+#
+# VALIDATED RANGE: +-0.031 m, sim only. Do not assume anything beyond it.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 400.0
+    kd_x: 40.0
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+    kp_rot_wrist: 10.0
+    kd_rot_wrist: 10.0
+  wrist_orientation_task: true
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  split_base_wrist_task: true
+  split_base_wrist_active_joints: [0, 1, 2]
+  split_base_wrist_task_dims: [0, 1, 2]
+  nullspace_inertia_adaptive_regularization: false
+  nullspace_inertia_eps_ratio: 0.05
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  friction_feedforward: true
+  friction_ff_qd_deadband: 0.05
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 5.0
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

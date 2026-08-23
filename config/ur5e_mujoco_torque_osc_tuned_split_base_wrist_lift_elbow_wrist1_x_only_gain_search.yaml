@@ -1,0 +1,150 @@
+# config/ur5e_mujoco_torque_osc_tuned_split_base_wrist_lift_elbow_wrist1_x_only.yaml with
+# the gain block replaced by the winner of a differential-evolution search, plus the new
+# 1-row-aware nullspace-projector eps schedule. Task rows/columns, every flag other than the
+# eps schedule, and the ENTIRE safety block are unchanged from that file.
+#
+# SIM-ONLY, never run on real hardware. assets/ur5e_torque/scene.xml at the real robot start
+# pose q = [-2.3688, -2.1801, -1.8838, -0.7962, 0.004714693, 0.0206].
+#
+# READ THIS BEFORE USING IT: THE SEARCH DID NOT EXTEND THE RANGE.
+# scipy.optimize.differential_evolution, 2460 real closed-loop rollout evaluations
+# (tools/diagnostics/split_x_only_range_gain_search.py, seed 0, maxiter 40, popsize 10),
+# 6-dimensional GAINS-ONLY space -- kp_posture [10,600], kd_posture [2,60], kd_joint
+# [0.5,15], kp_x [100,900], kd_x [10,90], nullspace_inertia_eps_ratio [0.005,1.0]. Objective:
+# maximise the largest displacement reached CLEANLY (no guard trip, tracking >= 80%) in BOTH
+# +X and -X over the ladder 0.02/0.03/0.04/0.05 m, not performance at any single
+# displacement. Best score 2.0421 vs. the baseline gains' 2.0361 -- the integer part of that
+# score IS the reached displacement (0.02 m), so the entire improvement is in the
+# tie-breaker. No safety threshold was in the search space; a guard trip is scored as a
+# failed rung, never tuned away.
+#
+# What it actually bought, rigor pass (move 1.5s, hold 5s, both directions):
+#
+#   dx        this config          baseline gains        note
+#   +-0.010m  97.8 / 97.0 %        97.6 / 96.9 %         -
+#   +-0.020m  98.8 / 97.1 %        98.4 / 88.3 %         real -X tracking gain (+8.8 pts)
+#   +-0.025m  |Z| guard, both      |Z| guard, both       unchanged failure
+#   +-0.030m  |Z| guard, both      |Z| guard, both       unchanged failure
+#   +-0.040m  |Z| guard, both      |Z| guard, both       unchanged failure
+#   +-0.050m  |Z| guard, both      |Z| guard, both       unchanged failure
+#
+# VALIDATED RANGE: +-0.020 m -- IDENTICAL to the baseline this was searched from. Use this
+# config only if the -X tracking improvement at 0.02 m is worth a gain set nobody has run on
+# hardware; it is NOT a range extension.
+#
+# WHY THE SEARCH FAILED, root-caused rather than left as a shrug. With `task_dims: [0]` world
+# Z is regulated by nothing but the joint-space posture spring, and no posture gain can hold
+# a finite-stiffness anchor against a growing displacement -- raising kp_posture 25 -> 500
+# moves the Z drift at dx=0.03m by under 20%, and costs tracking. The fix is structural, not
+# a gain: put Z under closed-loop task control by selecting it as a task ROW. See
+# config/ur5e_mujoco_torque_osc_tuned_split_base_wrist_lift_elbow_wrist1_xz_kinematic_max.yaml,
+# which does exactly that (same gains as the ORIGINAL config, no search needed) and reaches
+# +-0.031 m -- the kinematic ceiling of this joint selection at this pose.
+#
+# Note on nullspace_inertia_eps_ratio below: the search settled on 0.948, which at this pose
+# resolves to eps = 0.0924, i.e. it effectively chose to keep nearly the static eps = 0.1.
+# That is a real result, not a stuck parameter -- the projector-leak fix improves X TRACKING
+# a lot (86 -> 95% at dx=0.02m measured separately) but does nothing for the Z drift that
+# sets the ceiling, so a range objective has no reason to prefer a small ratio.
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "impedance"
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    kp_x: 427.424945
+    kd_x: 12.798802
+    kp_y: 80.0
+    kd_y: 15.0
+    kp_z: 120.0
+    kd_z: 20.0
+    kp_rot: 0.0
+    kd_rot: 10.0
+    kp_posture: 15.599319
+    kd_posture: 58.886445
+    kd_joint: 14.540937
+    kp_rot_wrist: 0.0
+    kd_rot_wrist: 10.0
+  wrist_orientation_task: true
+  task_space_inertia_shaping: true
+  posture_reanchor_on_settle: true
+  nullspace_posture: true
+  lambda_regularization: 0.1
+  jacobian_singular_cond_max: 1.0e18
+  split_base_wrist_task: true
+  split_base_wrist_active_joints: [1, 2, 3]
+  split_base_wrist_task_dims: [0]
+  nullspace_inertia_adaptive_regularization: true
+  nullspace_inertia_eps_ratio: 0.947804
+  torque_headroom: 0.9
+  task_resample_factor: 0.5
+  task_resample_min_scale: 0.0001
+  task_resample_max_iters: 14
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+  friction_feedforward: true
+  friction_ff_qd_deadband: 0.05
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 5.0
+    shoulder_lift_joint: 5.0
+    elbow_joint: 5.0
+    wrist_1_joint: 1.0
+    wrist_2_joint: 1.0
+    wrist_3_joint: 1.0
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.4
+    shoulder_lift_joint: 0.4
+    elbow_joint: 0.4
+    wrist_1_joint: 0.15
+    wrist_2_joint: 0.15
+    wrist_3_joint: 0.15
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.03
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001

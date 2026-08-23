@@ -187,6 +187,13 @@ class XTaskYZCorridorQPController:
         self._initialized = False
         self._hold_reference_initialized = False
         self._p0 = np.zeros(3, dtype=np.float64)
+        # Runtime view of cfg.task_velocity_rows. Mutable so a phase-switched
+        # run flips the drive row between velocity tracking (swing-up) and
+        # position tracking (catch) on ONE controller instance -- the switch
+        # stays a source switch, not a controller swap, which is the property
+        # that made the end-to-end Goal-1 result checkable.
+        self.task_velocity_rows: tuple[int, ...] = tuple(
+            int(r) for r in (config.task_velocity_rows or ()))
         self._quat0 = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         self._q_rest = np.zeros(6, dtype=np.float64)
         #: R_tool snapshotted at reset; identity until then. Only read when
@@ -533,9 +540,17 @@ class XTaskYZCorridorQPController:
         kp_axis = (float(self.cfg.kp_x), float(self.cfg.kp_y), float(self.cfg.kp_z))
         kd_axis = (float(self.cfg.kd_x), float(self.cfg.kd_y), float(self.cfg.kd_z))
 
+        # VELOCITY ROWS: drop the position term, leaving kd*(vel_des - v).
+        # self.task_velocity_rows is a RUNTIME view of cfg.task_velocity_rows so
+        # a phase-switched run can turn it on for the swing-up and off for the
+        # catch without rebuilding the controller (cfg is frozen). See the
+        # config field's docstring for why this is a row mode rather than a
+        # separate velocity controller.
+        vel_rows = frozenset(int(r) for r in (self.task_velocity_rows or ()))
         f_task = np.array(
             [
-                kp_axis[a] * float(pos_des[i] - p_task[a])
+                (0.0 if a in vel_rows
+                 else kp_axis[a] * float(pos_des[i] - p_task[a]))
                 + kd_axis[a] * float(vel_des[i] - v_task[a])
                 for i, a in enumerate(task_axes)
             ],
@@ -604,7 +619,12 @@ class XTaskYZCorridorQPController:
             singular_scale = float(self.cfg.jacobian_singular_cond_max / cond)
         wrench_scaled = wrench_reduced * singular_scale
 
-        _w_diag = [max(kp_axis[a], 1.0e-6) for a in task_axes] + [
+        # W = diag(gain) encodes each row's PRIORITY when a CBF binds. For a
+        # velocity row kp is not applied at all, so kp would read as ~0 priority
+        # and the QP would sacrifice the drive axis to any competing row. Use
+        # that row's kd, which is the gain it is actually being driven by.
+        _w_diag = [max(kd_axis[a] if a in vel_rows else kp_axis[a], 1.0e-6)
+                   for a in task_axes] + [
             max(self.cfg.kp_rot, 1.0e-6)
         ] * 3
         if lambda_reduced is not None:
@@ -660,6 +680,15 @@ class XTaskYZCorridorQPController:
 
         tau_damping = -self.cfg.kd_joint * qd
         tau_posture = self.cfg.kp_posture * (self._q_rest - q) - self.cfg.kd_posture * qd
+        if self.cfg.posture_joint_weights is not None:
+            # Per-joint scaling of the posture spring AND damper together, so a
+            # weighted joint stays critically-damped relative to its own
+            # stiffness rather than becoming springy. Weight 1.0 reproduces the
+            # unweighted term exactly; the branch is skipped entirely when the
+            # field is None, so existing configs are bit-for-bit unchanged.
+            tau_posture = tau_posture * np.asarray(
+                self.cfg.posture_joint_weights, dtype=np.float64
+            ).reshape(6)
         gravity = np.zeros(6, dtype=np.float64)
         if st.get("gravity_torque") is not None:
             gravity = np.asarray(st["gravity_torque"], dtype=np.float64).reshape(6)
@@ -671,8 +700,22 @@ class XTaskYZCorridorQPController:
         # (Written as its own sum rather than by subtracting from tau_des, so
         # tau_des's summation order -- and therefore its exact floating-point
         # value -- is unchanged from before this mechanism existed.)
-        tau_hold = tau_damping + tau_posture + gravity
-        tau_des = tau_task_nominal + tau_damping + tau_posture + tau_yz_soft + gravity
+        # FRICTION FEEDFORWARD. Friction opposes motion (tau_f = -c*sign(qd)), so
+        # cancelling it means ADDING +c*sign(qd); tanh is the smooth surrogate for
+        # sign, with the deadband setting how sharply it switches. Summed into the
+        # same joint-space bias as gravity/posture, i.e. INSIDE tau_des, so it is
+        # bounded by the QP's own torque box and traded off against the corridor
+        # rows exactly like every other bias term -- there is no bypass path.
+        tau_friction_ff = np.zeros(6, dtype=np.float64)
+        if bool(self.cfg.friction_feedforward):
+            coulomb = np.asarray(self.cfg.friction_ff_coulomb_nm, dtype=np.float64).reshape(6)
+            viscous = np.asarray(self.cfg.friction_ff_viscous, dtype=np.float64).reshape(6)
+            deadband = max(float(self.cfg.friction_ff_qd_deadband), 1e-9)
+            tau_friction_ff = coulomb * np.tanh(qd / deadband) + viscous * qd
+
+        tau_hold = tau_damping + tau_posture + gravity + tau_friction_ff
+        tau_des = (tau_task_nominal + tau_damping + tau_posture + tau_yz_soft
+                   + gravity + tau_friction_ff)
         linear = -hessian @ tau_des
 
         # --- torque box -------------------------------------------------- #
@@ -735,7 +778,8 @@ class XTaskYZCorridorQPController:
         z_max = float(p0_corr[2]) + float(self.cfg.z_corridor_half_width_m)
         n_corridor_rows = 0
         m_inv: np.ndarray | None = None
-        if use_corridor or use_manip_cbf or use_orientation_cbf:
+        use_joint_corridor = bool(self.cfg.joint_corridor_enabled) and bool(self.cfg.joint_corridor_joints)
+        if use_corridor or use_manip_cbf or use_orientation_cbf or use_joint_corridor:
             m_inv = np.linalg.inv(
                 np.asarray(st["mass_matrix"], dtype=np.float64).reshape(6, 6)
             )
@@ -761,6 +805,26 @@ class XTaskYZCorridorQPController:
                 rows_a += [a_max, a_min]
                 rows_b += [b_max, b_min]
             n_corridor_rows = 2 * len(corridor_axes)
+
+        # JOINT CORRIDOR: a hard bound on |q_j - q_j(0)| for each listed joint.
+        # j_row = e_j because qdot_j = e_j . qdot exactly, so `_corridor_rows`
+        # applies verbatim -- same HOCBF algebra, same sign convention, already
+        # unit-tested for the Cartesian case.
+        if use_joint_corridor:
+            assert m_inv is not None
+            hw = float(self.cfg.joint_corridor_half_width_rad)
+            for j in self.cfg.joint_corridor_joints:
+                e_j = np.zeros(6, dtype=np.float64)
+                e_j[j] = 1.0
+                q0_j = float(self._q_rest[j])
+                a_max, b_max, a_min, b_min = self._corridor_rows(
+                    j_row=e_j, m_inv=m_inv, bias=gravity, qd=qd,
+                    value=float(q[j]), lower=q0_j - hw, upper=q0_j + hw,
+                    alpha1=float(self.cfg.joint_corridor_alpha1),
+                    alpha2=float(self.cfg.joint_corridor_alpha2),
+                )
+                rows_a += [a_max, a_min]
+                rows_b += [b_max, b_min]
 
         mu_val: float | None = None
         cbf_h: float | None = None

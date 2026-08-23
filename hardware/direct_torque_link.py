@@ -177,6 +177,7 @@ class UR5eDirectTorqueLink:
         target_x_vel: float,
         dt_s: float | None = None,
         target_x_accel: float | None = None,
+        transport_axis_index: int = 0,
     ) -> dict[str, np.ndarray | float | bool | None]:
         """Map RTDE telemetry + pre-fetched dynamics into controller_core RobotState.
 
@@ -190,6 +191,14 @@ class UR5eDirectTorqueLink:
         acceleration (see ``simulation/ur5e_mujoco_torque.py::x_profile_accel``
         and ``CartesianImpedanceConfig.acceleration_feedforward``) -- same
         None-by-default, byte-identical-dict-when-omitted contract as ``dt_s``.
+
+        ``transport_axis_index`` is the world Cartesian axis ``target_x``/
+        ``target_x_vel`` refer to (0=X default, 1=Y, 2=Z) -- see
+        ``controller_core/state_types.py``'s ``RobotState.transport_axis_index``.
+        It was previously hardcoded to 0 here; omitting it reproduces that
+        exactly. Note ``XAxisCartesianImpedanceController`` itself does not
+        read this field (it regulates world-X unconditionally), so a non-zero
+        value only reaches axis-aware consumers of the state contract.
         """
         tcp = np.asarray(link_state.tcp_pose, dtype=np.float64).reshape(6)
         ee_pos = tcp[:3].copy()
@@ -210,7 +219,7 @@ class UR5eDirectTorqueLink:
             "target_x": float(target_x),
             "target_x_vel": float(target_x_vel),
             "target_x_accel": float(target_x_accel) if target_x_accel is not None else None,
-            "transport_axis_index": 0,
+            "transport_axis_index": int(transport_axis_index),
             "dt_s": float(dt_s) if dt_s is not None else None,
         }
 
@@ -223,6 +232,7 @@ class UR5eDirectTorqueLink:
         target_x_vel: float,
         dt_s: float | None = None,
         target_x_accel: float | None = None,
+        transport_axis_index: int = 0,
     ) -> dict[str, np.ndarray | float | bool | None]:
         """Map RTDE telemetry into the controller_core RobotState contract."""
         return self.compose_robot_state(
@@ -234,6 +244,7 @@ class UR5eDirectTorqueLink:
             target_x_vel=target_x_vel,
             dt_s=dt_s,
             target_x_accel=target_x_accel,
+            transport_axis_index=transport_axis_index,
         )
 
     def move_j(

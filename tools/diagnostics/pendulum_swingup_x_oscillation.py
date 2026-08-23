@@ -179,8 +179,13 @@ def main() -> int:
 
     bounds = [(0.02, 0.15), (0.3, 3.0)]  # amplitude_m, frequency_hz
     print("=== searching (amplitude_m, frequency_hz) via differential_evolution ===")
+    # workers=_de_workers() (2026-08-12): third and last site in this family
+    # still on workers=-1 after the bounded-worker fix landed elsewhere. Same
+    # hazard as the others -- claims every core on a shared host and leaves
+    # scipy>=1.17's forkserver start-method behaviour unpinned.
+    from tools.diagnostics.pendulum_swingup_multi_kick import _de_workers
     res = differential_evolution(objective, bounds, maxiter=20, popsize=10, tol=1e-4,
-                                  seed=0, workers=-1, polish=False)
+                                  seed=0, workers=_de_workers(), polish=False)
     print(f"Best params: amplitude_m={res.x[0]:.4f}, frequency_hz={res.x[1]:.4f}")
     print(f"Best cost: {res.fun:.4f}")
 

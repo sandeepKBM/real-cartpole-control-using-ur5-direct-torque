@@ -244,6 +244,16 @@ def as_impedance_robot_state(raw: dict[str, Any], num_joints: int = 6) -> RobotS
         state["target_ee_pos"] = _asarray_1d(raw["target_ee_pos"], "target_ee_pos", 3)
     if "target_ee_vel" in raw and raw["target_ee_vel"] is not None:
         state["target_ee_vel"] = _asarray_1d(raw["target_ee_vel"], "target_ee_vel", 3)
+    # target_y/target_y_vel: only consumed when
+    # CartesianImpedanceConfig.second_task_axis_enabled is set (default
+    # False); whitelisted here so compute()'s st.get("target_y", ...) is not
+    # silently dropped before the controller ever sees it -- the same class
+    # of bug this contract exists to prevent (see the dt_s plumbing fix in
+    # AGENTS.md sec 3 for a prior instance of exactly this).
+    if "target_y" in raw and raw["target_y"] is not None:
+        state["target_y"] = float(raw["target_y"])
+    if "target_y_vel" in raw and raw["target_y_vel"] is not None:
+        state["target_y_vel"] = float(raw["target_y_vel"])
     if "gravity_torque" in raw and raw["gravity_torque"] is not None:
         state["gravity_torque"] = _asarray_1d(raw["gravity_torque"], "gravity_torque", num_joints)
     if "mass_matrix" in raw and raw["mass_matrix"] is not None:

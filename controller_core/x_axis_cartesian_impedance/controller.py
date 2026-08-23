@@ -19,10 +19,28 @@ from typing import Any
 import numpy as np
 
 from ..kinematics_utils import orientation_error_vec_wxyz
+from ..manipulability_cbf import JacobianFn, manipulability_cbf_filter
 from ..state_types import as_impedance_robot_state
 from .config import CartesianImpedanceConfig
 from .constants import WRIST_ORIENTATION_MASK
 from .output import CartesianImpedanceOutput
+from .parsing import (
+    _parse_split_base_wrist_active_joints,
+    _parse_split_base_wrist_task_dims,
+)
+
+#: The joint columns ``split_base_wrist_task`` drove before
+#: ``split_base_wrist_active_joints`` made the set configurable (2026-08-12):
+#: shoulder_pan/shoulder_lift/elbow, i.e. ``JOINT_NAME_ORDER[0:3]``. Kept as the
+#: substituted default so an unset config is provably the historical path.
+SPLIT_BASE_WRIST_DEFAULT_ACTIVE_JOINTS: tuple[int, ...] = (0, 1, 2)
+
+#: The task rows ``split_base_wrist_task`` regulated before
+#: ``split_base_wrist_task_dims`` made the row set configurable (2026-08-12):
+#: all three translation rows, i.e. ``J[0:3, :]``. Same "substituted default"
+#: contract as the active-joint set above -- an unset config is provably the
+#: historical path.
+SPLIT_BASE_WRIST_DEFAULT_TASK_DIMS: tuple[int, ...] = (0, 1, 2)
 
 
 class XAxisCartesianImpedanceController:
@@ -31,6 +49,17 @@ class XAxisCartesianImpedanceController:
     The task-space wrench is mapped through ``J.T`` and then backtracked if the
     resulting joint torques exceed the configured headroom around the per-joint
     torque limits.
+
+    The class name is historical: since 2026-08-12 the driven (transport) axis
+    is selectable via ``transport_axis_index`` (state key first, then
+    ``CartesianImpedanceConfig.transport_axis_index``), and the error, velocity
+    and wrench row all follow it. Axis 0 (world X) remains the default and is
+    bit-for-bit the behavior that predates the change. ``kp_x``/``kd_x``/
+    ``ki_x`` therefore name the TASK-axis gains, not literally world X -- see
+    ``CartesianImpedanceConfig.transport_axis_index`` for the full axis->gain
+    mapping and for the two things deliberately NOT generalized
+    (``acceleration_feedforward``, which raises off-X, and
+    ``reduced_task_dims``' physical row selectors).
     """
 
     #: Gain fields a gain-scheduling policy (or any other caller) may update
@@ -41,8 +70,21 @@ class XAxisCartesianImpedanceController:
         "kp_rot", "kd_rot", "kp_posture", "kd_posture", "kd_joint",
     )
 
-    def __init__(self, config: CartesianImpedanceConfig) -> None:
+    def __init__(
+        self,
+        config: CartesianImpedanceConfig,
+        *,
+        jacobian_fn: JacobianFn | None = None,
+    ) -> None:
         self.cfg = config
+        # Optional kinematic model, used ONLY by the manipulability CBF
+        # (config.manipulability_cbf). Keyword-only and defaulted to None so
+        # every existing construction site is untouched. It cannot travel on
+        # the per-cycle state dict: state_types.as_impedance_robot_state
+        # normalizes the state to plain arrays and would drop a callable, and
+        # grad_mu genuinely needs J at PERTURBED q, which no snapshot of J(q)
+        # can supply. See CartesianImpedanceConfig.manipulability_cbf.
+        self._jacobian_fn: JacobianFn | None = jacobian_fn
         self._initialized = False
         self._hold_reference_initialized = False
         self._x0 = 0.0
@@ -70,6 +112,48 @@ class XAxisCartesianImpedanceController:
         # or two regardless of the initial guess.
         self._karnopp_stuck = np.ones(6, dtype=bool)
 
+    def _resolve_transport_axis(self, st: dict[str, Any]) -> int:
+        """Which world Cartesian axis is the task (transport) axis this cycle.
+
+        The per-cycle state wins when it carries ``transport_axis_index``;
+        ``CartesianImpedanceConfig.transport_axis_index`` is only the default
+        for callers whose state dict omits the key. See that field's docstring
+        for why the precedence is that way round (both the MuJoCo adapter and
+        the real-hardware state builder always populate the state key, so the
+        transport loop that owns the guards and the target generator stays in
+        control of the axis).
+        """
+        axis = st.get("transport_axis_index", None)
+        if axis is None:
+            axis = self.cfg.transport_axis_index
+        axis = int(axis)
+        if axis not in (0, 1, 2):
+            raise ValueError(f"transport_axis_index must be 0, 1, or 2; got {axis}")
+        return axis
+
+    @staticmethod
+    def _axis_roles(task_axis: int) -> tuple[int, int, int]:
+        """Map the task axis to ``(task, kp_y/kd_y-role, kp_z/kd_z-role)`` axes.
+
+        A transposition of the task axis with world X in the gain vector
+        ``(kp_x, kp_y, kp_z)``: the task axis always takes the kp_x/kd_x
+        (task) gains, world X takes over whatever hold gains used to hold the
+        task axis, and the third axis keeps its own.
+
+            axis=0 -> (0, 1, 2)   X task,  Y y-role,  Z z-role  [historical]
+            axis=1 -> (1, 0, 2)   Y task,  X y-role,  Z z-role
+            axis=2 -> (2, 1, 0)   Z task,  Y y-role,  X z-role
+
+        The y-role axis is the one that carries the Y-specific machinery
+        (corridor mode, ki_y integral, y_coupling_feedforward); the z-role
+        axis is a plain PD hold. See
+        ``CartesianImpedanceConfig.transport_axis_index`` for why this mapping
+        rather than a sorted-orthogonals one.
+        """
+        y_role = 1 if task_axis != 1 else 0
+        z_role = 2 if task_axis != 2 else 0
+        return task_axis, y_role, z_role
+
     def reset_from_state(self, state: dict[str, Any]) -> None:
         st = as_impedance_robot_state(state)
         ee = np.asarray(st["ee_pos"], dtype=np.float64).reshape(3)
@@ -80,7 +164,11 @@ class XAxisCartesianImpedanceController:
         self._q_rest = np.asarray(st["q"], dtype=np.float64).reshape(6).copy()
         self._hold_reference_initialized = False
         self._posture_reanchored = False
-        self._x_des_at_anchor = float(np.asarray(st["ee_pos"], dtype=np.float64).reshape(3)[0])
+        # Task-axis start value (world X unless transport_axis_index selects
+        # another axis) -- this anchor is compared against the task-axis
+        # target in compute()'s posture-reanchor block, so it has to be the
+        # same axis that block regulates.
+        self._x_des_at_anchor = float(ee[self._resolve_transport_axis(st)])
         self._y_integral = 0.0
         self._x_integral = 0.0
         self._friction_z = np.zeros(6, dtype=np.float64)
@@ -144,6 +232,93 @@ class XAxisCartesianImpedanceController:
         log_frac = (np.log(cond) - np.log(cond_low)) / (np.log(cond_high) - np.log(cond_low))
         log_frac = float(np.clip(log_frac, 0.0, 1.0))
         return eps_far + log_frac * (eps_near - eps_far)
+
+    def _inertia_scheduled_lambda_regularization(self, a_mat: np.ndarray) -> float:
+        """Nullspace-projector eps scaled to the task's OWN inverse-inertia scale.
+
+        For the case ``lambda_adaptive_regularization`` is refused in (a
+        split_base_wrist task with fewer than 3 rows, where ``cond_task`` is a
+        norm rather than a condition number). See
+        ``CartesianImpedanceConfig.nullspace_inertia_adaptive_regularization``
+        for the derivation; the short version is that the projector's residual
+        leak operator is exactly ``eps (A + eps I)^-1``, so the quantity that
+        governs the leak is ``lambda_min(A)`` -- not ``||J_task||``, which
+        drops ``M`` entirely.
+
+            lmin   = max(lambda_min(A), 0)
+            eps_ns = min(max(ratio * lmin, eps_static - lmin), eps_static)
+
+        with ``eps_static == lambda_regularization``. The two clamps give the
+        two properties the flag's docstring states and the unit tests assert:
+        ``eps_ns <= eps_static`` (never more damping than today) and
+        ``lmin + eps_ns >= eps_static`` (so ``||Lambda_ns|| <= 1/eps_static``,
+        i.e. the projector's Lambda is never larger-gain than today's worst
+        case, which is the failure mode naive eps-shrinking is known to hit).
+        """
+        a_mat = np.asarray(a_mat, dtype=np.float64)
+        eps_static = max(float(self.cfg.lambda_regularization), 0.0)
+        ratio = float(self.cfg.nullspace_inertia_eps_ratio)
+        if not np.isfinite(ratio) or ratio < 0.0:
+            raise ValueError(
+                "nullspace_inertia_adaptive_regularization requires a finite, non-negative "
+                f"nullspace_inertia_eps_ratio; got {self.cfg.nullspace_inertia_eps_ratio!r}"
+            )
+        # a_mat = J_task M^-1 J_task^T is symmetric PSD by construction, so
+        # eigvalsh is the right tool (and cannot return a complex eigenvalue);
+        # the max(., 0) only removes round-off-negative eigenvalues.
+        lmin = float(np.min(np.linalg.eigvalsh(a_mat))) if a_mat.size else 0.0
+        lmin = max(lmin, 0.0)
+        return float(min(max(ratio * lmin, eps_static - lmin), eps_static))
+
+    def _sci_direction_damping(
+        self, sigma: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Per-singular-direction damping for singularity-consistent inversion.
+
+        Chiaverini, Siciliano & Egeland's numerical-filtering scheme (IEEE
+        T-RA 10(2), 1994), applied per task-space singular direction:
+
+            lambda_i^2 = 0                                       sigma_i >= eps
+                       = (1 - (sigma_i/eps)^2) * lambda_max^2    sigma_i <  eps
+
+        with ``eps == svd_sigma_threshold`` and ``lambda_max == svd_lambda_max``.
+        Continuous at ``sigma_i == eps`` (the bracket vanishes there), so no
+        torque discontinuity as a direction enters or leaves the damped set.
+
+        Returns ``(lambda_i, lambda_i^2, a_i)`` where
+        ``a_i = sigma_i^2 / (sigma_i^2 + lambda_i^2)`` in [0, 1] is the
+        surviving fraction of the ideal undamped response in direction i --
+        exactly 1 for every undamped direction, and going to 0 as sigma_i does.
+        See ``CartesianImpedanceConfig.svd_singularity_filtering`` for the full
+        derivation and why this is the correct force-domain adaptation of a
+        scheme usually written for velocity-domain differential IK.
+        """
+        sigma = np.asarray(sigma, dtype=np.float64)
+        threshold = float(self.cfg.svd_sigma_threshold)
+        lambda_max = float(self.cfg.svd_lambda_max)
+        if not np.isfinite(threshold) or threshold <= 0.0:
+            raise ValueError(
+                "svd_singularity_filtering requires svd_sigma_threshold > 0; "
+                f"got {self.cfg.svd_sigma_threshold!r}"
+            )
+        if not np.isfinite(lambda_max) or lambda_max <= 0.0:
+            # lambda_max == 0 would leave a genuinely lost direction with an
+            # exactly-zero denominator (1/sigma_i^2 -> inf). Raise rather than
+            # silently emitting inf/NaN torque.
+            raise ValueError(
+                "svd_singularity_filtering requires svd_lambda_max > 0; "
+                f"got {self.cfg.svd_lambda_max!r}"
+            )
+        sigma_sq = sigma * sigma
+        ratio_sq = np.clip(sigma_sq / (threshold * threshold), 0.0, 1.0)
+        lambda_sq = np.where(sigma >= threshold, 0.0, (1.0 - ratio_sq) * lambda_max * lambda_max)
+        denom = sigma_sq + lambda_sq
+        # denom is only ever 0 if sigma_i == 0 AND lambda_max == 0, which the
+        # guard above already rejects; the floor is belt-and-braces so this can
+        # never emit inf into the torque path.
+        denom_safe = np.maximum(denom, np.finfo(np.float64).tiny)
+        attenuation = sigma_sq / denom_safe
+        return np.sqrt(lambda_sq), lambda_sq, attenuation
 
     def _lugre_step(self, qd: np.ndarray, dt: float) -> np.ndarray:
         """One explicit-Euler update of the LuGre bristle-deflection state.
@@ -296,6 +471,14 @@ class XAxisCartesianImpedanceController:
         omega = np.asarray(st["ee_ang_vel"], dtype=np.float64).reshape(3)
         J = np.asarray(st["jacobian"], dtype=np.float64).reshape(6, 6)
 
+        # Axis selection. `task_axis` is the driven (transport) axis; `y_axis`
+        # and `z_axis` are the two held axes, named for the gain role they
+        # carry (kp_y/kd_y and kp_z/kd_z respectively), NOT for world Y/Z --
+        # see _axis_roles() and CartesianImpedanceConfig.transport_axis_index.
+        # For the default axis 0 this is (0, 1, 2), i.e. every `x_`/`y_`/`z_`
+        # local below is exactly the world-X/Y/Z quantity it always was.
+        task_axis, y_axis, z_axis = self._axis_roles(self._resolve_transport_axis(st))
+
         hold_current_pose = bool(st.get("hold_current_pose", False))
         if hold_current_pose:
             # Capture the settle reference once, then keep that reference
@@ -308,24 +491,61 @@ class XAxisCartesianImpedanceController:
                 self._quat0 = quat.copy()
                 self._q_rest = q.copy()
                 self._hold_reference_initialized = True
-            x_des = self._x0
+            # _x0/_y0/_z0 stay WORLD X/Y/Z start values (physical, as
+            # captured); only which of them plays which control role varies.
+            p0 = (self._x0, self._y0, self._z0)
+            x_des = p0[task_axis]
             x_vel_des = 0.0
-            y_des = self._y0
-            z_des = self._z0
+            y_des = p0[y_axis]
+            y_vel_des = 0.0
+            z_des = p0[z_axis]
             quat_ref = self._quat0
         else:
-            x_des = float(st["target_x"])
-            x_vel_des = float(st.get("target_x_vel", 0.0))
-            y_des = self._y0
-            z_des = self._z0
+            p0 = (self._x0, self._y0, self._z0)
+            if task_axis == 0:
+                x_des = float(st["target_x"])
+                x_vel_des = float(st.get("target_x_vel", 0.0))
+            else:
+                # Off-X transport: prefer the state contract's explicit
+                # transport-axis target when the caller supplies one, exactly
+                # as the MuJoCo adapter's own axis-error computation and the
+                # experiment runner already do (see
+                # simulation/ur5e_mujoco_torque.py's `axis_err`), falling back
+                # to target_x -- which the real-hardware state builder
+                # populates with the selected axis' target rather than a
+                # separate key. Deliberately NOT "target_x always": a caller
+                # that fills target_x with an X-frame value while selecting
+                # axis 1 would otherwise generate a huge bogus Y error (the
+                # X-vs-Y coordinate difference) and command a large force
+                # from it; falling back to the axis' own held start value is
+                # the safe failure direction.
+                x_des = float(st["target_axis"]) if "target_axis" in st else float(st["target_x"])
+                if "target_axis_vel" in st:
+                    x_vel_des = float(st["target_axis_vel"])
+                else:
+                    x_vel_des = float(st.get("target_x_vel", 0.0))
+            y_des = p0[y_axis]
+            y_vel_des = 0.0
+            z_des = p0[z_axis]
             quat_ref = self._quat0
 
-        if self.cfg.y_coupling_feedforward:
-            y_des = y_des - self.cfg.y_coupling_gain * (x_des - self._x0)
+        if self.cfg.second_task_axis_enabled:
+            if self.cfg.y_coupling_feedforward or self.cfg.y_control_mode == "corridor" or self.cfg.y_integral_action:
+                raise ValueError(
+                    "second_task_axis_enabled is mutually exclusive with y_coupling_feedforward, "
+                    "y_control_mode='corridor', and y_integral_action -- all four define y_des/Fy "
+                    "differently and combining them is ambiguous, not silently resolved."
+                )
+            if not hold_current_pose and "target_y" in st:
+                y_des = float(st["target_y"])
+                y_vel_des = float(st.get("target_y_vel", 0.0))
 
-        x_err = x_des - float(p[0])
-        y_err = y_des - float(p[1])
-        z_err = z_des - float(p[2])
+        if self.cfg.y_coupling_feedforward:
+            y_des = y_des - self.cfg.y_coupling_gain * (x_des - p0[task_axis])
+
+        x_err = x_des - float(p[task_axis])
+        y_err = y_des - float(p[y_axis])
+        z_err = z_des - float(p[z_axis])
 
         if self.cfg.posture_reanchor_on_settle:
             x_tol = float(self.cfg.reanchor_x_tol_m)
@@ -396,7 +616,7 @@ class XAxisCartesianImpedanceController:
                     self._x_integral = 0.0
         Fx_integral = self.cfg.ki_x * self._x_integral if use_x_integral else 0.0
 
-        Fx = self.cfg.kp_x * x_err + self.cfg.kd_x * (x_vel_des - float(v[0])) + Fx_integral
+        Fx = self.cfg.kp_x * x_err + self.cfg.kd_x * (x_vel_des - float(v[task_axis])) + Fx_integral
         if use_y_corridor:
             y_soft = max(float(self.cfg.y_soft_limit_m), 0.0)
             y_hard = max(float(self.cfg.y_hard_limit_m), y_soft + 1e-9)
@@ -408,17 +628,33 @@ class XAxisCartesianImpedanceController:
             else:
                 t = (abs_y_err - y_soft) / (y_hard - y_soft)
                 corridor_scale = float(3.0 * t**2 - 2.0 * t**3)  # smoothstep: C1 at both ends
-            Fy = corridor_scale * (self.cfg.y_corridor_kp * y_err - self.cfg.y_corridor_kd * float(v[1]))
+            Fy = corridor_scale * (self.cfg.y_corridor_kp * y_err - self.cfg.y_corridor_kd * float(v[y_axis]))
         else:
             corridor_scale = 1.0
-            Fy = self.cfg.kp_y * y_err - self.cfg.kd_y * float(v[1]) + Fy_integral
-        Fz = self.cfg.kp_z * z_err - self.cfg.kd_z * float(v[2])
+            # y_vel_des is exactly 0.0 unless second_task_axis_enabled supplied
+            # a target_y_vel above, so this term is a no-op (bit-identical) for
+            # every existing config/caller.
+            Fy = (
+                self.cfg.kp_y * y_err
+                + self.cfg.kd_y * (y_vel_des - float(v[y_axis]))
+                + Fy_integral
+            )
+        Fz = self.cfg.kp_z * z_err - self.cfg.kd_z * float(v[z_axis])
 
         e_rot = orientation_error_vec_wxyz(quat_ref, quat)
         ori_norm = float(np.linalg.norm(e_rot))
         M = self.cfg.kp_rot * e_rot - self.cfg.kd_rot * omega
 
-        wrench = np.array([Fx, Fy, Fz, M[0], M[1], M[2]], dtype=np.float64)
+        # Each scalar force goes into ITS OWN world-axis row of the wrench --
+        # this is the second half of the axis fix (computing the error against
+        # the right axis is useless if the force lands in the X row anyway).
+        # For task_axis=0 this writes rows 0/1/2 with Fx/Fy/Fz, i.e. the exact
+        # array the previous literal np.array([Fx, Fy, Fz, ...]) built.
+        wrench = np.zeros(6, dtype=np.float64)
+        wrench[task_axis] = Fx
+        wrench[y_axis] = Fy
+        wrench[z_axis] = Fz
+        wrench[3:6] = M
 
         # Jacobian conditioning: needed both for singular_scale below and,
         # when lambda_adaptive_regularization is on, to schedule eps.
@@ -432,26 +668,103 @@ class XAxisCartesianImpedanceController:
         # coincidentally-equal output.
         use_split_base_wrist = bool(self.cfg.split_base_wrist_task)
         use_reduced_task_dims = bool(self.cfg.reduced_task_dims)
+        split_active_joints_cfg = _parse_split_base_wrist_active_joints(
+            self.cfg.split_base_wrist_active_joints
+        )
+        split_task_dims_cfg = _parse_split_base_wrist_task_dims(
+            self.cfg.split_base_wrist_task_dims
+        )
+        if split_active_joints_cfg is not None and not use_split_base_wrist:
+            # Loud rather than a silent no-op -- see
+            # split_base_wrist_active_joints' docstring for why.
+            raise ValueError(
+                "split_base_wrist_active_joints is set but split_base_wrist_task is False -- "
+                "the active-joint set is only read by that mechanism, so this config would "
+                "silently run the full-Jacobian task instead of the joint set it asks for."
+            )
+        if split_task_dims_cfg is not None and not use_split_base_wrist:
+            # Same call as the active-joint set just above, same reason.
+            raise ValueError(
+                "split_base_wrist_task_dims is set but split_base_wrist_task is False -- "
+                "the task-row set is only read by that mechanism, so this config would "
+                "silently run the full 3-row translation task instead of the rows it asks for."
+            )
+        if split_task_dims_cfg is not None and task_axis not in split_task_dims_cfg:
+            # The transport force lands in wrench[task_axis]; if that row is not
+            # selected it is dropped from wrench_task entirely and the arm never
+            # gets a force toward its target -- it would simply sit still while
+            # the target ramps away, with no error anywhere except the tracking
+            # numbers. Exactly the class of silent mismatch this repo's other
+            # "be loud" parsers exist to prevent.
+            raise ValueError(
+                f"split_base_wrist_task_dims={split_task_dims_cfg} does not include the "
+                f"transport axis {task_axis} -- the transport force would be dropped from "
+                "the task pipeline and the arm would never move toward its target."
+            )
         if use_split_base_wrist and use_reduced_task_dims:
             raise ValueError(
                 "split_base_wrist_task and reduced_task_dims are mutually exclusive -- "
                 "their interaction (column selection AND row selection at once) is untested."
             )
         if use_split_base_wrist:
-            # Position rows only, base-joint columns only (shoulder_pan,
-            # shoulder_lift, elbow -- JOINT_NAME_ORDER[0:3]); wrist columns
-            # stay exactly zero so translation-task torque structurally
-            # cannot route through them. The rotational wrench (M) is
+            # Position rows only, active-joint columns only; every other
+            # joint's column stays exactly zero so translation-task torque
+            # structurally cannot route through it. The active set defaults
+            # to the base joints (shoulder_pan, shoulder_lift, elbow --
+            # JOINT_NAME_ORDER[0:3], the historical hardcoded slice this
+            # mechanism shipped with) and is overridable per-config via
+            # split_base_wrist_active_joints (exactly 3 distinct indices;
+            # see that field's docstring). The rotational wrench (M) is
             # dropped from this pipeline -- the wrist-only rotation
             # sub-Jacobian is exactly singular at the motivating pose (step-1
             # evidence above), so routing M through it would just relocate
             # the same problem, not fix it. Orientation stays with
             # nullspace_posture (recomputed below against this same reduced
             # J_task) and, if enabled, wrist_orientation_task.
-            J_task = np.zeros((3, 6), dtype=np.float64)
-            J_task[:, 0:3] = J[0:3, 0:3]
-            wrench_task = wrench[0:3].copy()
-            cond_task = float(np.linalg.cond(J[0:3, 0:3]))
+            #
+            # Since 2026-08-12 the TASK ROWS are selectable too
+            # (split_base_wrist_task_dims, default None = all three
+            # translation rows = the historical behavior), so J_task is a
+            # general len(rows) x len(active columns) block scattered back
+            # into a len(rows) x 6 matrix -- e.g. 1x3 for a pure world-X
+            # transport driven by shoulder_lift/elbow/wrist_1, the case that
+            # motivated it. Every downstream consumer (a_mat/Lambda, the
+            # nullspace projector, the SCI filter, J_task.T) is written in
+            # terms of J_task's own shape and generalizes to a smaller row
+            # count; the ones that do NOT are guarded above/below rather than
+            # left to produce wrong output. Unselected rows are treated
+            # exactly like unselected joint columns and like the dropped
+            # rotational wrench: their force is still computed and reported
+            # (`wrench`, y_error/z_error) but not routed into the task
+            # pipeline, and those axes stay held by the posture spring.
+            split_active_joints = (
+                SPLIT_BASE_WRIST_DEFAULT_ACTIVE_JOINTS
+                if split_active_joints_cfg is None
+                else split_active_joints_cfg
+            )
+            split_task_dims = (
+                SPLIT_BASE_WRIST_DEFAULT_TASK_DIMS
+                if split_task_dims_cfg is None
+                else split_task_dims_cfg
+            )
+            active_cols = list(split_active_joints)
+            task_rows = list(split_task_dims)
+            J_task_block = J[np.ix_(task_rows, active_cols)]
+            J_task = np.zeros((len(task_rows), 6), dtype=np.float64)
+            J_task[:, active_cols] = J_task_block
+            wrench_task = wrench[task_rows].copy()
+            # cond() of a single-row block is identically 1.0 and says nothing
+            # about that row's authority, so a 1-row task reports the block's
+            # NORM instead -- the same convention reduced_task_dims already
+            # uses for its own single-row case. See
+            # split_base_wrist_task_dims' docstring for what that implies for
+            # singular_scale (it stops engaging) and which eps schedulers are
+            # therefore refused outright below.
+            cond_task = (
+                float(np.linalg.cond(J_task_block))
+                if len(task_rows) > 1
+                else float(np.linalg.norm(J_task_block))
+            )
         elif use_reduced_task_dims:
             # True row selection (S @ J), not a zeroed/masked 6x6 -- see
             # reduced_task_dims' docstring for why a mask would break the
@@ -500,6 +813,30 @@ class XAxisCartesianImpedanceController:
         use_nullspace = bool(self.cfg.nullspace_posture)
         use_adaptive_eps = bool(self.cfg.lambda_adaptive_regularization)
         use_accel_ff = bool(self.cfg.acceleration_feedforward)
+        use_svd_filtering = bool(self.cfg.svd_singularity_filtering)
+        if use_svd_filtering and bool(self.cfg.lambda_diagonal_shaping):
+            # lambda_diagonal_shaping keeps only diag(Lambda) in the WORLD/task
+            # row basis. The SCI-filtered Lambda is built in its own singular
+            # basis U, which is not axis-aligned, so diagonalizing it afterwards
+            # would discard exactly the per-direction structure this flag exists
+            # to create -- and the result is neither mechanism's validated
+            # behavior. Raise rather than silently run something unanalyzed
+            # (same call as split_base_wrist_task + reduced_task_dims above).
+            raise ValueError(
+                "svd_singularity_filtering and lambda_diagonal_shaping are mutually exclusive -- "
+                "diagonalizing the SVD-filtered Lambda in the world basis destroys the "
+                "per-singular-direction structure the filter just built."
+            )
+        if use_svd_filtering and bool(self.cfg.wrench_lambda_adaptive_regularization):
+            # That flag schedules the single scalar eps in the wrench-shaping
+            # Lambda by cond(J); svd_singularity_filtering REPLACES that scalar
+            # with a per-direction lambda_i. Enabling both leaves "which eps"
+            # genuinely undefined.
+            raise ValueError(
+                "svd_singularity_filtering and wrench_lambda_adaptive_regularization are "
+                "mutually exclusive -- the former replaces the single scalar wrench-shaping "
+                "eps that the latter schedules."
+            )
         if use_accel_ff and use_reduced_task_dims:
             # acceleration_feedforward's accel_ff_vec[0]/[1]/[2] indexing
             # below hardcodes x/y/z as the first 3 wrench_task rows, which
@@ -511,10 +848,136 @@ class XAxisCartesianImpedanceController:
                 "acceleration_feedforward + reduced_task_dims is not yet supported: "
                 "accel_ff_vec's x/y/z indexing assumes the natural row order."
             )
+        if use_accel_ff and split_task_dims_cfg is not None:
+            # Identical reasoning to the reduced_task_dims guard just above:
+            # accel_ff_vec[0]/[1]/[2] hardcode x/y/z as the first three
+            # wrench_task rows, and the diagnostic wrench_accel_ff field is
+            # shaped (3,) on that assumption. A row-selected split task
+            # (e.g. X only) breaks both silently. The pre-existing
+            # split_base_wrist_task + acceleration_feedforward combination
+            # (config/ur5e_mujoco_torque_osc_tuned_split_base_wrist_accel_ff.yaml)
+            # keeps all three rows and is unaffected.
+            raise ValueError(
+                "acceleration_feedforward + split_base_wrist_task_dims is not yet supported: "
+                "accel_ff_vec's x/y/z indexing assumes all three translation rows are present."
+            )
+        if use_y_integral and split_task_dims_cfg is not None and y_axis not in split_task_dims_cfg:
+            # Fy is dropped from wrench_task when world Y is not a selected
+            # row, so ki_y * _y_integral would never reach the arm -- but the
+            # integral itself keeps accumulating cycle after cycle (bounded
+            # only by y_integral_limit_m_s). Pure windup with zero effect:
+            # raise instead of running a stateful term that provably cannot
+            # do anything.
+            raise ValueError(
+                f"y_integral_action is on but split_base_wrist_task_dims={split_task_dims_cfg} "
+                f"excludes the kp_y/kd_y-role axis {y_axis} -- the integral would accumulate "
+                "against an error whose force is never applied to the task."
+            )
+        if (
+            split_task_dims_cfg is not None
+            and len(split_task_dims_cfg) < 2
+            and (
+                bool(self.cfg.lambda_adaptive_regularization)
+                or bool(self.cfg.wrench_lambda_adaptive_regularization)
+            )
+        ):
+            # Both schedulers interpolate eps in log(cond_task) space, and a
+            # single-row task has no meaningful condition number (cond of any
+            # nonzero 1xN matrix is exactly 1.0), so cond_task carries the
+            # block's NORM instead -- a different physical quantity on a
+            # different scale. Feeding it into a log(cond) schedule would pick
+            # an eps for reasons unrelated to conditioning, silently. With 2+
+            # selected rows cond_task IS a real condition number and both
+            # schedulers are left alone.
+            raise ValueError(
+                "lambda_adaptive_regularization / wrench_lambda_adaptive_regularization "
+                "are not supported with a single-row split_base_wrist_task_dims: cond_task "
+                "reports the task block's norm there (a 1-row cond() is identically 1.0), "
+                "so the log(cond) eps schedule would be driven by the wrong quantity."
+            )
+        use_inertia_eps = bool(self.cfg.nullspace_inertia_adaptive_regularization)
+        if use_inertia_eps:
+            # Deliberately narrow activation: this scheduler exists for exactly
+            # the configuration the two log(cond) schedulers above refuse, and
+            # its blast-radius argument (see the flag's docstring) is written
+            # for that configuration. Anywhere else, raise rather than quietly
+            # apply an eps schedule to a task whose behavior under it was never
+            # measured -- the same "be loud" call as every guard above.
+            if not use_split_base_wrist or split_task_dims_cfg is None:
+                raise ValueError(
+                    "nullspace_inertia_adaptive_regularization is only supported with "
+                    "split_base_wrist_task + an explicit split_base_wrist_task_dims selecting "
+                    "fewer than 3 task rows -- the case lambda_adaptive_regularization is "
+                    "refused in. It is not a general replacement for that scheduler."
+                )
+            if len(split_task_dims_cfg) >= 3:
+                raise ValueError(
+                    f"nullspace_inertia_adaptive_regularization with "
+                    f"split_base_wrist_task_dims={split_task_dims_cfg} (3 task rows): cond_task "
+                    "is a real condition number there, so use lambda_adaptive_regularization, "
+                    "which is validated for that case."
+                )
+            if bool(self.cfg.lambda_adaptive_regularization):
+                # Both write lambda_mat_nullspace / eps_effective; "which eps"
+                # would be decided by branch order rather than by the config.
+                raise ValueError(
+                    "nullspace_inertia_adaptive_regularization and "
+                    "lambda_adaptive_regularization are mutually exclusive -- both schedule the "
+                    "nullspace projector's eps, from different quantities."
+                )
+            if not use_nullspace:
+                # The only Lambda this flag touches is the projector's; with
+                # nullspace_posture off it is a provable no-op, which is
+                # exactly the silent-mismatch class this file raises on.
+                raise ValueError(
+                    "nullspace_inertia_adaptive_regularization is on but nullspace_posture is "
+                    "False -- this flag only schedules the nullspace projector's eps, so it "
+                    "would have no effect at all."
+                )
+        if use_accel_ff and task_axis != 0:
+            # Same "raise rather than corrupt" call as the reduced_task_dims
+            # case just above. The feedforward block reads target_x_accel /
+            # target_y_accel / target_z_accel, which are named for PHYSICAL
+            # axes, while target_x / target_x_vel are the TASK-axis reference
+            # -- for task_axis=1 both target_x_accel (as the task-axis
+            # reference accel) and target_y_accel (as world Y's) would want
+            # wrench row 1, and nothing in this repo produces
+            # target_y_accel/target_z_accel today to disambiguate from. Left
+            # for whoever wires up a real off-X reference acceleration.
+            raise ValueError(
+                "acceleration_feedforward + transport_axis_index != 0 is not yet supported: "
+                "target_x_accel/target_y_accel/target_z_accel are named for physical axes "
+                "while target_x is the task-axis reference, so the two conventions collide."
+            )
         mass_matrix_provided = "mass_matrix" in st and st["mass_matrix"] is not None
+        use_manipulability_cbf = bool(self.cfg.manipulability_cbf)
+        if use_manipulability_cbf:
+            # Both of these are "the mechanism would look enabled in the
+            # config and provably do nothing" failures -- the same class every
+            # other guard in this method raises on, and worse here because the
+            # mechanism in question is a safety filter.
+            if self._jacobian_fn is None:
+                raise ValueError(
+                    "manipulability_cbf is on but this controller was constructed without "
+                    "jacobian_fn -- grad_mu needs J at perturbed q, and the per-cycle state "
+                    "carries J(q) at the current q only. Pass "
+                    "XAxisCartesianImpedanceController(cfg, jacobian_fn=...) (the MuJoCo "
+                    "adapter's build_controller() does this for you)."
+                )
+            if not mass_matrix_provided:
+                raise ValueError(
+                    "manipulability_cbf is on but the per-cycle state has no mass_matrix -- "
+                    "the CBF row is built from grad_mu^T M^-1, so without M there is no "
+                    "constraint to enforce. Substituting identity would silently enforce a "
+                    "barrier for a robot this is not."
+                )
         lambda_mat: np.ndarray | None = None
         lambda_mat_nullspace: np.ndarray | None = None
         m_inv: np.ndarray | None = None
+        # SCI diagnostics; stay None unless svd_singularity_filtering is on.
+        svd_sigma: np.ndarray | None = None
+        svd_lambda: np.ndarray | None = None
+        svd_attenuation: np.ndarray | None = None
         use_wrench_adaptive_eps = bool(self.cfg.wrench_lambda_adaptive_regularization)
         eps_wrench = (
             self._scheduled_wrench_lambda_regularization(cond_task)
@@ -545,10 +1008,59 @@ class XAxisCartesianImpedanceController:
             # in split mode and 6x6 otherwise.
             a_mat = J_task @ m_inv @ J_task.T
             eye_task = np.eye(a_mat.shape[0], dtype=np.float64)
-            lambda_mat = np.linalg.inv(a_mat + eps_wrench * eye_task)
-            if use_adaptive_eps:
+            if use_svd_filtering and use_shaping:
+                # Singularity-consistent inversion of the WRENCH-shaping Lambda
+                # only -- and only when shaping is actually ON, i.e. when this
+                # Lambda is the operator that maps the commanded task quantity
+                # to a force. With shaping off, Lambda is built here solely for
+                # acceleration_feedforward's mass weighting and for the nullspace
+                # projector, neither of which is a singularity-back-off
+                # mechanism; leaving both on the historical uniform-eps Lambda
+                # keeps this flag's blast radius to the wrench path it targets
+                # (the shaping-off wrench is filtered separately below, in the
+                # kinematic basis that path actually needs).
+                # eigh (not svd): a_mat = J_task M^-1 J_task^T is
+                # symmetric PSD by construction, so its eigenvectors ARE the
+                # task-space singular directions of the mass-weighted Jacobian
+                # and its eigenvalues are sigma_i^2 -- eigh is the numerically
+                # right tool for a symmetric matrix and gives one orthonormal
+                # basis U used on both sides (svd could split a tiny negative
+                # round-off eigenvalue into a sign flip between U and V).
+                # Filtering a_mat rather than J_task is required here: U_J does
+                # not diagonalize J M^-1 J^T unless M is proportional to I, so a
+                # J_task-based reconstruction would not reduce to the exact
+                # inverse in the undamped directions. See the flag's docstring.
+                eigvals, eigvecs = np.linalg.eigh(a_mat)
+                svd_sigma = np.sqrt(np.maximum(eigvals, 0.0))
+                svd_lambda, svd_lambda_sq, svd_attenuation = self._sci_direction_damping(svd_sigma)
+                # Lambda_SCI = U diag(1/(sigma_i^2 + lambda_i^2)) U^T. For every
+                # direction at or above the threshold lambda_i is exactly 0, so
+                # that direction is inverted exactly -- no damping at all.
+                inv_diag = 1.0 / np.maximum(
+                    svd_sigma * svd_sigma + svd_lambda_sq, np.finfo(np.float64).tiny
+                )
+                lambda_mat = (eigvecs * inv_diag) @ eigvecs.T
+            else:
+                lambda_mat = np.linalg.inv(a_mat + eps_wrench * eye_task)
+            if use_inertia_eps:
+                # Guarded above to be mutually exclusive with use_adaptive_eps,
+                # so branch order here cannot decide "which eps" -- the config
+                # already did. Same scoping as that branch: the projector's
+                # Lambda only, wrench-shaping lambda_mat untouched.
+                eps_effective = self._inertia_scheduled_lambda_regularization(a_mat)
+                lambda_mat_nullspace = np.linalg.inv(a_mat + eps_effective * eye_task)
+            elif use_adaptive_eps:
                 eps_effective = self._scheduled_lambda_regularization(cond_task)
                 lambda_mat_nullspace = np.linalg.inv(a_mat + eps_effective * eye_task)
+            elif use_svd_filtering and use_shaping:
+                # The nullspace-posture projector deliberately keeps the
+                # uniform-eps Lambda: this repo has already established that the
+                # wrench-shaping Lambda and the projector's Lambda must be tuned
+                # separately (see lambda_adaptive_regularization's docstring),
+                # and the projector's correctness argument is about dynamic
+                # consistency, not about singularity back-off. SCI is scoped to
+                # the wrench only.
+                lambda_mat_nullspace = np.linalg.inv(a_mat + eps_wrench * eye_task)
             else:
                 lambda_mat_nullspace = lambda_mat
 
@@ -599,7 +1111,13 @@ class XAxisCartesianImpedanceController:
             accel_ff_active = True
 
         singular_scale = 1.0
-        if cond_task > self.cfg.jacobian_singular_cond_max > 0.0:
+        if (not use_svd_filtering) and cond_task > self.cfg.jacobian_singular_cond_max > 0.0:
+            # singular_scale is the OTHER uniform (whole-wrench, isotropic)
+            # near-singularity mechanism, and svd_singularity_filtering exists
+            # precisely to replace it with a per-direction one -- applying both
+            # would re-introduce the isotropic authority loss SCI removes.
+            # jacobian_singular_cond_max itself is untouched and still governs
+            # the default path; this only bypasses it when SCI is explicitly on.
             singular_scale = float(self.cfg.jacobian_singular_cond_max / cond_task)
         use_diagonal_shaping = bool(self.cfg.lambda_diagonal_shaping)
         if use_shaping and lambda_mat is not None:
@@ -607,13 +1125,41 @@ class XAxisCartesianImpedanceController:
             # to a dynamically consistent task force. The nullspace projector
             # below always uses the full (undiagonalized) lambda_mat -- only
             # the wrench-shaping step is affected by lambda_diagonal_shaping.
+            # When svd_singularity_filtering is on, lambda_mat is already the
+            # SCI-filtered inverse, so the per-direction back-off is applied
+            # here, inherently: Lambda_SCI == U diag(a_i) U^T Lambda_exact.
             lambda_for_wrench = np.diag(np.diag(lambda_mat)) if use_diagonal_shaping else lambda_mat
             wrench_effective = lambda_for_wrench @ wrench_task
+        elif use_svd_filtering:
+            # Shaping off: there is no Lambda in this path at all -- the law is
+            # a plain Jacobian-transpose force map (tau = J_task^T F), so the
+            # direction that cannot be actuated is the KINEMATIC one,
+            # null(J_task^T), i.e. the left singular vectors of J_task with
+            # small sigma. Attenuate the commanded wrench along those directions
+            # and leave every well-conditioned one at full authority. The
+            # operator U diag(a_i) U^T has spectral norm <= 1 (every a_i is in
+            # [0, 1]), so this branch can only reduce commanded torque, never
+            # amplify it. Mass weighting is deliberately absent: nothing in this
+            # path uses M.
+            u_task, sigma_task, _ = np.linalg.svd(J_task, full_matrices=True)
+            svd_sigma = sigma_task
+            svd_lambda, _svd_lambda_sq, svd_attenuation = self._sci_direction_damping(sigma_task)
+            # For a wide J_task (rows <= cols, always the case here) u_active is
+            # all of U; for a tall one the extra columns of U span directions
+            # J_task^T maps to zero anyway, and dropping them entirely is the
+            # correct (sigma == 0) limit of the same filter.
+            u_active = u_task[:, : sigma_task.shape[0]]
+            wrench_effective = u_active @ (svd_attenuation * (u_active.T @ wrench_task))
         else:
             wrench_effective = wrench_task
         wrench_scaled = wrench_effective * singular_scale
         tau_task_nominal = J_task.T @ wrench_scaled
-        tau_damping = -self.cfg.kd_joint * qd
+        kd_joint_vec = (
+            self.cfg.kd_joint_by_joint
+            if self.cfg.kd_joint_by_joint is not None
+            else np.full(6, self.cfg.kd_joint, dtype=np.float64)
+        )
+        tau_damping = -kd_joint_vec * qd
         if self.cfg.posture_kp_by_joint is not None or self.cfg.posture_kd_by_joint is not None:
             kp_vec = (
                 self.cfg.posture_kp_by_joint
@@ -708,6 +1254,80 @@ class XAxisCartesianImpedanceController:
         tau_orient_wrist = task_backtrack_scale * tau_orient_wrist
         tau_friction_ff = task_backtrack_scale * tau_friction_ff
         g = task_backtrack_scale * g
+
+        # Manipulability CBF (default off; the whole block is skipped, which
+        # is what makes the default path byte-identical rather than merely
+        # numerically close). Deliberately placed HERE -- last, on the
+        # post-backtracking tau_preclip:
+        #   - it filters the torque that would actually have been commanded,
+        #     including every bias term, so the barrier condition is enforced
+        #     on the real input to the plant rather than on a task-torque
+        #     fragment that later gets scaled;
+        #   - the QP's box is the SAME torque-headroom box the backtracker
+        #     targets, so the headroom guarantee upstream is preserved (the
+        #     QP can only return a point inside it);
+        #   - the final hard clip below still runs afterwards, unchanged.
+        # tau_preclip is rebound so the reported pre-clip torque is the one
+        # actually commanded; the size of the correction is reported
+        # separately as manipulability_cbf_delta_tau_norm. Consequence worth
+        # knowing when reading a trace: the per-term breakdown (tau_task /
+        # tau_damping / tau_posture / tau_orient_wrist / tau_friction_ff /
+        # tau_gravity) sums to the PRE-filter torque, so it stops summing to
+        # tau_preclip exactly on any cycle the CBF was active -- the missing
+        # amount is exactly the CBF correction, whose norm is reported.
+        cbf_active = False
+        cbf_mu: float | None = None
+        cbf_h: float | None = None
+        cbf_h_dot: float | None = None
+        cbf_slack: float | None = None
+        cbf_delta_norm = 0.0
+        cbf_feasible = True
+        if use_manipulability_cbf:
+            assert self._jacobian_fn is not None  # guarded above
+            # Reuse the inverse the Lambda block already formed when one of the
+            # P3 flags is on; otherwise form it here. Provably the same matrix
+            # either way (that block reads the same st["mass_matrix"], and the
+            # guard above already established it is present) -- this only
+            # avoids a second 6x6 inversion per cycle.
+            m_inv_cbf = (
+                m_inv
+                if m_inv is not None
+                else np.linalg.inv(np.asarray(st["mass_matrix"], dtype=np.float64).reshape(6, 6))
+            )
+            # Dynamics bias for qddot = M^-1 (tau - bias). `g` is this cycle's
+            # gravity-compensation torque AS THIS CONTROLLER APPLIED IT (it is
+            # part of tau_preclip), so subtracting it here is exactly the
+            # right bookkeeping in both lanes: where the adapter compensates
+            # gravity externally (the MuJoCo lane, which does not put
+            # gravity_torque on the state) g is zero and the plant really does
+            # see qddot = M^-1 tau; where the controller compensates it itself,
+            # g is in tau and must come back out. Coriolis is omitted, the
+            # same standing approximation as hard_constraint_qp.py.
+            cbf = manipulability_cbf_filter(
+                tau_nominal=tau_preclip,
+                jacobian=J,
+                jacobian_fn=self._jacobian_fn,
+                q=q,
+                qd=qd,
+                m_inv=m_inv_cbf,
+                bias=g,
+                tau_lower=-tau_limit_headroom,
+                tau_upper=+tau_limit_headroom,
+                epsilon=float(self.cfg.manipulability_cbf_epsilon),
+                alpha1=float(self.cfg.manipulability_cbf_alpha1),
+                alpha2=float(self.cfg.manipulability_cbf_alpha2),
+                fd_step=float(self.cfg.manipulability_cbf_fd_step),
+                curvature_step=float(self.cfg.manipulability_cbf_curvature_step),
+            )
+            tau_preclip = cbf.tau
+            cbf_active = bool(cbf.active)
+            cbf_mu = float(cbf.manipulability)
+            cbf_h = float(cbf.h)
+            cbf_h_dot = float(cbf.h_dot)
+            cbf_slack = float(cbf.slack_at_nominal)
+            cbf_delta_norm = float(cbf.delta_norm)
+            cbf_feasible = bool(cbf.feasible)
+
         tau = tau_preclip
 
         tau_clipped = np.clip(tau, -tau_limit, +tau_limit)
@@ -740,6 +1360,9 @@ class XAxisCartesianImpedanceController:
             inertia_shaping_active=use_shaping,
             lambda_diagonal_shaping_active=bool(use_shaping and use_diagonal_shaping),
             lambda_adaptive_regularization_active=bool((use_shaping or use_nullspace) and use_adaptive_eps),
+            nullspace_inertia_adaptive_regularization_active=bool(
+                use_nullspace and use_inertia_eps and lambda_mat_nullspace is not None
+            ),
             lambda_regularization_effective=float(eps_effective),
             nullspace_posture_active=use_nullspace,
             mass_matrix_provided=bool(mass_matrix_provided),
@@ -754,7 +1377,27 @@ class XAxisCartesianImpedanceController:
             x_integral_action_active=use_x_integral,
             x_integral_value=float(self._x_integral),
             split_base_wrist_task_active=use_split_base_wrist,
+            split_base_wrist_active_joints=(
+                tuple(split_active_joints) if use_split_base_wrist else None
+            ),
+            split_base_wrist_task_dims=(
+                tuple(split_task_dims) if use_split_base_wrist else None
+            ),
             y_corridor_scale=corridor_scale,
             acceleration_feedforward_active=accel_ff_active,
             wrench_accel_ff=wrench_accel_ff,
+            transport_axis_index=int(task_axis),
+            svd_singularity_filtering_active=use_svd_filtering,
+            svd_task_singular_values=None if svd_sigma is None else svd_sigma.copy(),
+            svd_damping_lambda=None if svd_lambda is None else svd_lambda.copy(),
+            svd_direction_attenuation=(
+                None if svd_attenuation is None else svd_attenuation.copy()
+            ),
+            manipulability_cbf_active=cbf_active,
+            manipulability=cbf_mu,
+            manipulability_cbf_h=cbf_h,
+            manipulability_cbf_h_dot=cbf_h_dot,
+            manipulability_cbf_slack=cbf_slack,
+            manipulability_cbf_delta_tau_norm=cbf_delta_norm,
+            manipulability_cbf_feasible=cbf_feasible,
         )

@@ -137,9 +137,11 @@ from simulation.ur5e_pendulum_compose import (  # noqa: E402
     compose_ur5e_pendulum_model,
     derive_pendulum_constants,
 )
+from controller_core.config_provenance import check_config_pose  # noqa: E402
 from tools.diagnostics.pendulum_swingup_energy_shaping import (  # noqa: E402
     PendulumRunContext,
     add_common_pendulum_args,
+    load_config,
     resolve_equilibria,
     write_output_json,
 )
@@ -515,23 +517,42 @@ def default_context() -> PendulumRunContext:
         pendulum_xml=str(PENDULUM_XML),
         arm_q=tuple(float(v) for v in GOAL1_ARM_Q),
         config_path=str(CONFIG_PATH),
-        controller_kind=controller_kind,
+        # Was a bare `controller_kind`, which exists nowhere in this scope --
+        # the same discarded-flag bug fixed in context_from_args below, but
+        # here it was a hard NameError that made this entrypoint (and its six
+        # tests) fail on import-and-call rather than fail silently.
+        controller_kind=CONTROLLER_KIND,
     )
 
 
 def context_from_args(args) -> PendulumRunContext:
+    """Local override of the shared helper (this lane defaults a different
+    asset/pose). It must therefore repeat the shared helper's config <-> pose
+    check: a script that builds its own context silently opts out of every
+    guard the shared path added, which is precisely how a config gets run at
+    the wrong pose. See controller_core.config_provenance."""
     pendulum_xml = str(Path(args.pendulum_xml).resolve()) if args.pendulum_xml else str(PENDULUM_XML)
     arm_q = (tuple(float(v) for v in args.start_q_rad) if args.start_q_rad is not None
              else tuple(float(v) for v in GOAL1_ARM_Q))
+    config_path = str(Path(args.config).resolve())
+    provenance = check_config_pose(
+        load_config(Path(config_path)),
+        arm_q,
+        pendulum_xml,
+        controller_kind=(args.controller_kind or CONTROLLER_KIND),
+        config_name=Path(config_path).name,
+        allow_mismatch=bool(getattr(args, "allow_pose_mismatch", False)),
+    )
     return PendulumRunContext(
         pendulum_xml=pendulum_xml,
         arm_q=arm_q,
-        config_path=str(Path(args.config).resolve()),
+        config_path=config_path,
         # Read the FLAG. This previously referenced a bare `controller_kind`
         # that exists nowhere in scope, so --controller-kind parsed fine and was
         # then silently discarded -- the run would use plain OSC while the
         # command line said otherwise.
         controller_kind=(args.controller_kind or CONTROLLER_KIND),
+        provenance=provenance,
     )
 
 
