@@ -63,6 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Must MATCH the run being filmed. The renderer re-runs the\n"
                         "trial to capture history, so a mismatch here films a\n"
                         "different rollout than the numbers came from.")
+    p.add_argument("--velocity-hold", action="store_true",
+                   help="Keep the catch in velocity tracking (required for the\n"
+                        "singular-pose hold). Must MATCH the filmed run.")
     p.add_argument("--allow-pose-mismatch", action="store_true",
                    help="Render a config off its declared pose/asset/controller. "
                         "Only for a deliberate cross-pose comparison -- the video "
@@ -125,6 +128,7 @@ def main(argv=None) -> int:
         constants=constants, coupling_c0=c0, config_path=Path(args.config),
         controller_kind=str(args.controller_kind), duration_s=float(args.duration_s),
         track_history=True, velocity_swingup=bool(args.velocity_swingup),
+        velocity_hold=bool(args.velocity_hold),
         lqr_K=np.asarray(lqr["K"], dtype=np.float64),
         lqr_a_max=float(lqr["a_max"]), phi_switch_max_rad=float(args.phi_switch_max_rad),
         hold_s=float(args.hold_s))
