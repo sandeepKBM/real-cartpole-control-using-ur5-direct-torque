@@ -73,6 +73,7 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -208,6 +209,7 @@ def run_energy_scheduled_trial(
     s_switch: float = 1.2,
     phi_switch_max_rad: float = 0.45,
     hold_s: float = 4.0,
+    velocity_hold: bool = False,
 ) -> dict:
     """One continuous rollout, guards ON, no discrete phase change anywhere.
 
@@ -295,6 +297,8 @@ def run_energy_scheduled_trial(
     lqr_switch_state = None
     held_to_end = None
     max_abs_phi_after_switch = 0.0
+    fell_after_switch_t = None  # first t after handoff where |phi_inv| > 0.5 rad
+    last_hold_t = None          # last t spent in the LQR hold branch
     peak_abs_a_cmd = 0.0
     history = [] if track_history else None
 
@@ -398,7 +402,17 @@ def run_energy_scheduled_trial(
         if K is not None and lqr_engaged_t is None:
             if abs(s_val) <= s_switch and dist <= phi_switch_max_rad:
                 lqr_engaged_t = t
-                if velocity_swingup:
+                # velocity_hold keeps the drive row in VELOCITY tracking through
+                # the catch instead of switching to position tracking. At the
+                # singular pose this is what makes the hold realizable: position
+                # tracking adds lag that mis-phases the balancing cart-accel and
+                # PUMPS the pole (energy climbs to 1.12 E_top, Z sags into the
+                # floor guard); velocity tracking removes that integrator so the
+                # LQR's command is realized cleanly (energy stays ~1.0). The env
+                # var is kept as an override for older launch scripts.
+                _keep_vel_hold = velocity_hold or bool(
+                    int(os.environ.get("KEEP_VEL_HOLD", "0")))
+                if velocity_swingup and not _keep_vel_hold:
                     # Back to position tracking for the catch. The LQR was
                     # derived against a position-tracked plant; leaving the row
                     # in velocity mode would hand it a different plant than the
@@ -432,6 +446,9 @@ def run_energy_scheduled_trial(
             s_vec = np.array([x_act - x_ref, xd_act, phi_inv, thetadot], dtype=np.float64)
             a_cmd = float(np.clip(-(K @ s_vec)[0], -lqr_a_max, lqr_a_max))
             max_abs_phi_after_switch = max(max_abs_phi_after_switch, abs(phi_inv))
+            last_hold_t = t
+            if fell_after_switch_t is None and abs(phi_inv) > 0.5:
+                fell_after_switch_t = t
             target_x_vel = float(np.clip(target_x_vel + a_cmd * CONTROL_DT,
                                          -V_MAX_MPS, V_MAX_MPS))
             target_x = target_x + target_x_vel * CONTROL_DT
@@ -576,6 +593,15 @@ def run_energy_scheduled_trial(
         "held_after_switch": held_to_end,
         "max_abs_phi_after_switch_rad": (
             float(max_abs_phi_after_switch) if lqr_engaged_t is not None else None),
+        # How long the pole stayed upright (|phi_inv| <= 0.5 rad) after the
+        # handoff, in seconds. This is the gradient a hold search needs: max|phi|
+        # saturates at pi for ANY eventual fall and cannot tell a 4 s hold from an
+        # instant one.
+        "upright_duration_after_switch_s": (
+            None if lqr_engaged_t is None else
+            float((fell_after_switch_t if fell_after_switch_t is not None
+                   else (last_hold_t if last_hold_t is not None else lqr_engaged_t))
+                  - lqr_engaged_t)),
         "held_and_upright": bool(
             held_to_end and not guard_fired
             and max_abs_phi_after_switch <= 0.35),
@@ -647,6 +673,23 @@ def objective_spec(x, spec: dict) -> float:
                                   e_center=float(x[2]), e_width=float(x[3]),
                                   db_slow=float(x[4]), db_sharp=float(x[5]),
                                   e_target=float(x[6]))
+    # SCORE-THE-HOLD MODE (2026-08-23). When the spec carries an LQR, run the
+    # full flip->catch->hold and score the ACTUAL hold, not just arrival |s|.
+    # Arrival |s| is necessary but not sufficient: at this pose the capture basin
+    # is a knife-edge (the pole must reach vertical with |thetadot| inside the
+    # LQR's LINEAR basin), and only end-to-end scoring finds a schedule that
+    # lands there. Velocity-mode hold (KEEP_VEL_HOLD) is what makes the catch
+    # realizable here, so it is expected to be set in the search environment.
+    lqr_kwargs = {}
+    scoring_hold = spec.get("lqr_K") is not None
+    if scoring_hold:
+        lqr_kwargs = dict(
+            lqr_K=np.asarray(spec["lqr_K"], dtype=np.float64),
+            lqr_a_max=float(spec["lqr_a_max"]),
+            s_switch=float(spec.get("s_switch", 1.2)),
+            phi_switch_max_rad=float(spec.get("phi_switch_max_rad", 0.30)),
+            hold_s=float(spec.get("hold_s", 6.0)),
+        )
     r = run_energy_scheduled_trial(
         _model_for(spec["pendulum_xml"]), params,
         arm_q=np.asarray(spec["arm_q"], dtype=np.float64),
@@ -656,9 +699,23 @@ def objective_spec(x, spec: dict) -> float:
         transport_axis_index=spec["transport_axis_index"],
         duration_s=spec["duration_s"], s_capture=spec["s_capture"],
         velocity_swingup=bool(spec.get("velocity_swingup", False)),
+        velocity_hold=bool(spec.get("velocity_hold", False)),
+        **lqr_kwargs,
     )
     if r["guard_fired"]:
         return 1e3 - float(r["first_guard_t"] or 0.0)
+    if scoring_hold:
+        # Ordering (lower = better): held (< -900) << catch-attempted, ranked by
+        # how upright it stayed (100..103) << never arrived (200+). This gives a
+        # gradient: learn to arrive, then to stay up longer, then to hold.
+        if r.get("held_and_upright"):
+            return -1000.0 + float(r.get("max_abs_phi_after_switch_rad") or 0.0)
+        if r.get("lqr_engaged_t") is not None:
+            # Rank catch-attempts by how LONG they stayed upright, not by max|phi|
+            # (which saturates at pi for any eventual fall and gives no gradient).
+            dur = float(r.get("upright_duration_after_switch_s") or 0.0)
+            return 100.0 - dur
+        return 200.0 + float(r["min_theta_dist_from_inverted"])
     if r["first_arrival"] is None:
         # Never reached the top: rank by how close it got, strictly worse than
         # anything that did arrive.
@@ -774,6 +831,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "the joint exclusion and the posture weights are unchanged: "
                         "this drops one TERM from one task row, it is not a "
                         "different controller.")
+    p.add_argument("--velocity-hold", action="store_true",
+                   help="Keep the drive row in VELOCITY tracking through the LQR "
+                        "catch instead of switching to position tracking. Required "
+                        "for the hold at the singular ARM_Q0: position tracking's "
+                        "lag mis-phases the balancing cart-acceleration and PUMPS "
+                        "the pole (E climbs to 1.12 E_top, Z sags into the floor "
+                        "guard); velocity tracking realizes the LQR command cleanly "
+                        "(E stays ~1.0) so the catch holds. Default off preserves "
+                        "the position-tracked catch the LQR K was derived against.")
     p.add_argument("--output-json", type=Path, default=None)
     return p
 
@@ -824,6 +890,7 @@ def main(argv=None) -> int:
         controller_kind=str(args.controller_kind), transport_axis_index=axis,
         duration_s=float(args.duration_s), s_capture=float(args.s_capture),
         velocity_swingup=bool(args.velocity_swingup),
+        velocity_hold=bool(args.velocity_hold),
     )
     lqr_kwargs = {}
     if args.lqr_json is not None:
@@ -869,8 +936,18 @@ def main(argv=None) -> int:
             "duration_s": float(args.duration_s),
             "s_capture": float(args.s_capture),
             "velocity_swingup": bool(args.velocity_swingup),
+            "velocity_hold": bool(args.velocity_hold),
             "max_rotations_before_arrival": args.max_rotations,
         }
+        if args.lqr_json is not None:
+            # Score the full flip->catch->hold in the search, not just arrival.
+            spec["lqr_K"] = [float(v) for v in np.asarray(_l["K"], dtype=float).ravel()]
+            spec["lqr_a_max"] = float(_l["a_max"])
+            spec["s_switch"] = float(args.s_switch)
+            spec["phi_switch_max_rad"] = float(args.phi_switch_max_rad)
+            spec["hold_s"] = float(args.hold_s)
+            print(f"SEARCH SCORES THE HOLD: LQR a_max={_l['a_max']:.3f} "
+                  f"phi_switch<={args.phi_switch_max_rad} hold_s={args.hold_s}")
         res = _minimize(functools.partial(objective_spec, spec=spec), bounds,
                         backend=args.search_backend, maxiter=args.maxiter,
                         popsize=args.popsize, seed=args.seed,

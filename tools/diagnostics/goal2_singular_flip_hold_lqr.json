@@ -1,0 +1,102 @@
+{
+  "context": {
+    "arm_q": [
+      -2.3688,
+      -2.1801,
+      -1.8838,
+      -0.7962,
+      0.004714693,
+      0.0206
+    ],
+    "config_path": "/common/users/ss5772/real_Cartpole/.claude/worktrees/singular-velswingup/config/ur5e_mujoco_torque_x_task_yz_corridor_qp_goal2_singular_zhold.yaml",
+    "constants": {
+      "arm_q": [
+        -2.3688,
+        -2.1801,
+        -1.8838,
+        -0.7962,
+        0.004714693,
+        0.0206
+      ],
+      "e_top_j": 0.055739913354493985,
+      "g": 9.81,
+      "i_pivot_kgm2": 0.00023746980581744164,
+      "m_total_kg": 0.09735008447490537,
+      "mgr_nm": 0.027869956677246992,
+      "omega_natural_radps": 10.833379281329526,
+      "r_com_m": 0.029183068431971788,
+      "t_natural_s": 0.5799838761307066
+    },
+    "controller_kind": "x_task_yz_corridor_qp",
+    "hanging_angle": -3.0144800160506957,
+    "inverted_angle": 0.1271126375390968,
+    "pendulum_xml": "/common/users/ss5772/real_Cartpole/.claude/worktrees/singular-velswingup/assets/ur5e_pendulum/pendulum_attachment.xml"
+  },
+  "envelope": null,
+  "lqr": {
+    "A": [
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        117.36210665313983,
+        -0.4211061682379799
+      ]
+    ],
+    "B": [
+      [
+        0.0
+      ],
+      [
+        1.0
+      ],
+      [
+        0.0
+      ],
+      [
+        26.998636835014157
+      ]
+    ],
+    "K": [
+      -5.932953757595553,
+      -21.567594433051124,
+      44.03442331769069,
+      4.155995071844572
+    ],
+    "Q_diag": [
+      35.19994028976684,
+      396.8931972948644,
+      80.73445154375439,
+      1.2716560574818234
+    ],
+    "R": 1.0,
+    "a_max": 10.0,
+    "cost": 7.516581755424357,
+    "damping": 0.0001,
+    "log10_params": [
+      1.5465419267779388,
+      2.598673655211973,
+      1.9070588993134527,
+      0.10436966435001427,
+      2.977438604007761
+    ],
+    "derivation": "cascade LQR pole gains (K[2],K[3]) scaled x1.5; validated in closed loop to hold 10s, K=0 falls"
+  }
+}
