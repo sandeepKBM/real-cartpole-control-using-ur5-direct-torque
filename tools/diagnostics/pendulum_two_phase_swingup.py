@@ -405,6 +405,23 @@ def run_energy_scheduled_trial(
                     # one its K was solved for -- the exact substitution this
                     # repo keeps getting caught by.
                     _inner.task_velocity_rows = ()
+                    # RE-SYNC THE REFERENCE TO THE ARM (2026-08-23). In velocity
+                    # mode nothing tracked target_x -- it is a free-running
+                    # integration by-product that drifted far from the arm
+                    # (measured: target_x ran to ~-0.3 m while the arm was
+                    # elsewhere). Position-tracking that stale target now would
+                    # slam the cart toward it, PUMP the pole through vertical and
+                    # sag Z into the guard -- exactly the observed catch failure
+                    # (thetadot grew -1.3 -> -21 approaching the top). Carrying
+                    # target_x across is right for a POSITION-tracked swing-up
+                    # (Goal-1 at wrist_2=-90, where it already tracked the arm);
+                    # for a velocity swing-up the equivalent "no step at the
+                    # seam" requires re-syncing target_x/target_x_vel to the
+                    # measured arm state, NOT carrying the runaway across.
+                    if state_prev_ee is not None:
+                        target_x = float(state_prev_ee[transport_axis_index])
+                    if state_prev_vel is not None:
+                        target_x_vel = float(state_prev_vel[transport_axis_index])
                 lqr_switch_state = {"t": t, "phi_inv_rad": phi_inv,
                                     "thetadot": thetadot, "s": s_val,
                                     "energy_over_e_top": e_frac}
