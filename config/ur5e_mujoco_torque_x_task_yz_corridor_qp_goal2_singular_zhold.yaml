@@ -1,0 +1,296 @@
+# GOAL 2 -- swing-up + catch AT THE WRIST-2 SINGULARITY.
+#
+# ARM_Q0 exactly as committed (wrist_2 = 0.004714693 rad = 0.270 deg, the
+# singular value; cond(J6) = 1395.76) with pendulum_attachment.xml, whose
+# LOCAL-Z hinge is horizontal and fully live at this pose -- the realrod asset
+# is DEAD here (12.7% gravity torque), see AGENTS.md sec.0.
+#
+# This applies the Goal-1 recipe unchanged EXCEPT where measurement at this
+# pose forced a difference. Every number below was measured here, not carried.
+#
+# ================== WHAT THE SINGULARITY ACTUALLY COSTS ====================
+# cond(J6)=1395.76 comes from sigma_min=0.0015 of the COUPLED 6x6. The blocks
+# are separately healthy:
+#     cond(J_pos)  = 2.72   (Goal 1: 2.64)   <- translation is fine
+#     cond(J_rot)  = 2.17   (Goal 1: 1.73)   <- rotation is fine
+# The degenerate direction is a COMBINATION of translation and rotation, so a
+# task that never demands that combination never meets it. For the swing-up
+# drive the singular pose is if anything cheaper than Goal 1's:
+#     |qd| for 1 m/s along the drive = 3.4018 rad/s  (Goal 1: 3.6556)
+#     |c0| along the drive           = 0.002841      (Goal 1: 0.002841)
+#     Lambda_00 on the drive row     = 3.954966      (Goal 1: 3.967529)
+#
+# ============ THE ONE INVERTED DECISION: pan is NOT excluded ===============
+# Goal 1 uses task_excluded_joints: [0]. Doing that HERE is what creates the
+# ill-conditioning, measured on the reduced 4-row task (X + 3 orientation) in
+# this file's own rotated basis:
+#     pan FREE     : rank 4, cond   7.24   (Goal 1 pan-free: 5.99)
+#     pan EXCLUDED : rank 4, cond 519.53   sigma_min 0.0039
+# Physically: the singular wrist_2 has lost its rotational DOF about world Z,
+# and shoulder_pan is the joint that substitutes for it. Remove pan AND leave
+# the wrist singular and the task genuinely loses that direction.
+#
+# pan is nonetheless NOT carrying the motion -- min-norm joint velocity share
+# per task direction, measured here:
+#     pure drive, 1 m/s        pan  0.1%   <- the swing-up barely uses pan
+#     roll about drive axis    pan 14.5%
+#     pitch about hinge        pan  0.3%
+#     yaw about world Z        pan 77.5%   <- pan exists here for YAW only
+# So pan stays in the task purely as reserve authority for yaw, which is
+# exactly the DOF the singular wrist gave up. It is held by a posture weight
+# rather than removed, the same mechanism that held wrist_2 to 0.288 deg in
+# Goal 1 while keeping it in the task.
+#
+# wrist_2 is ALSO weighted, for a different reason: wrist_2 = 0.27 deg IS the
+# singularity, and if it drifts the pose de-singularises and the run stops
+# testing what it claims to test. Its excursion must be REPORTED as evidence
+# the pose stayed singular.
+#
+# ========================== gains, all measured here ========================
+# kp_x/kd_x = 400/40 * Lambda_00, Lambda_00 = 3.954966 in THIS basis at the
+#             inverted equilibrium, eps = lambda_regularization = 0.1, from the
+#             UN-excluded Jacobian.  -> 1581.9862 / 158.1986
+# kd_rot    = 10 * mean(Lambda_rot diag) = 10 * 1.195423 = 11.9542.
+#             EIGHT TIMES Goal 1's 1.485, and that is the real price of the
+#             singularity: rotation here is HEAVIER (Lambda_rot 1.195 vs
+#             0.148), not unavailable. Independent cross-check -- an existing
+#             ARM_Q0-derived config reached kd_rot = 11.954 by another route.
+# kp_rot    = 0, unchanged: kp_rot > 0 is measured UNSTABLE at this exact
+#             singularity (30 trips at ~3.5 s, 5 at ~27 s, 0 never).
+#
+# ============================ THE FLOOR ====================================
+# MEASURED on the first pump probe at this pose: min tip world z = 0.0074 m.
+# SEVEN MILLIMETRES. Goal 1 clears by 0.20 m.
+#
+# Floor penetration is SILENT in this model -- the pendulum geoms are
+# contype="0" conaffinity="0", so the rod passes THROUGH the table with no
+# contact force, no warning and no error. It is visible only by tracking the
+# tip site's world z explicitly, which is why nothing caught it before.
+#
+# The inherited bounds are not protective HERE. Hanging tip clearance at
+# ARM_Q0 is 0.0634 m while the Z corridor was 0.05 and the Z guard 0.06 -- so
+# the guard trips at essentially the floor-contact threshold, ~3 mm of margin.
+# AGENTS.md sec.0 calls that "luck, not design"; this probe spent the luck.
+#
+# Sized by SWEEP, not by arithmetic -- the corridor bounds the ARM's Z drift
+# while tip height also depends on where the rod is in its swing, so the
+# relationship is not one-to-one. Measured on the identical schedule:
+#     z corridor / guard    tip clearance   E_peak/E_top   rotations
+#       0.05 / 0.060  (inherited)  0.0074 m     1.0496        1.51
+#       0.04 / 0.045               0.0144 m     1.0713        1.52
+#       0.03 / 0.035  <-- chosen   0.0222 m     1.0625        1.52
+# Tightening costs NOTHING here: pump energy is unchanged across the sweep and
+# guards stay clean, so the corridor was never the energy constraint. It buys
+# 3x the floor margin. With the loose bound a search is free to pick winners
+# that go through the table, because nothing penalises it.
+#
+# STILL NOT A CONTACT MODEL. This bounds the ARM's Z drift, which is a proxy
+# for tip height, not the tip height itself. min_tip_world_z_m must be read
+# on every run at this pose.
+#
+# ============================== known risk =================================
+# manipulability_cbf_epsilon 3.0e-4 vs measured mu = 4.326e-4 here: INACTIVE,
+# but only 44% margin (Goal 1 has 212x). This threshold was calibrated against
+# mu at the old near-singular transport pose, which is essentially this pose --
+# so unlike in Goal 1 it may genuinely engage. Watch for
+# manipulability_cbf_active / _feasible in the run record.
+#
+provenance:
+  derived_for:
+    # ARM_Q0 with wrist_2 = -90 deg. Same constant as
+    # tools/diagnostics/x_task_orientation_cbf_balance_gain_search.py::ARM_Q_W2M90
+    # (the script that measured this file's Lambda) and
+    # tools/diagnostics/pendulum_flip_catch_hold.py::ARM_Q_W2NEG90.
+    arm_q_rad: [-2.3688, -2.1801, -1.8838, -0.7962, 0.004714693, 0.0206]
+    controller_kind: "x_task_yz_corridor_qp"
+    pendulum_xml: pendulum_attachment.xml
+  notes: >-
+    GOAL 2, THE SINGULAR POSE. DRIVE BASIS: task_rotation col0 = in-plane
+    horizontal perpendicular to the hinge (col0.hinge = 5.4e-17). kp_x/kd_x =
+    400/40 * Lambda_00 with Lambda_00 = 3.954966 measured HERE in THAT basis.
+    kd_rot = 10 * 1.195423 = 11.9542, eight times Goal 1's value because
+    Lambda_rot is eight times larger at this singularity. task_excluded_joints
+    is EMPTY on purpose: excluding pan here takes the 4-row task from cond 7.24
+    to 519.53, because pan substitutes for the rotational DOF the singular
+    wrist_2 has lost. manipulability_cbf_epsilon 3.0e-4 vs mu = 4.326e-4 here
+    is only 44% margin and is NOT re-derived -- a known open item.
+
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  gravity_mode: "gravity_comp"
+  gravity_source: "pinocchio"
+  coriolis_feedforward: true
+  default_controller: "x_task_yz_corridor_qp"
+  output_dir: "outputs/ur5e_mujoco_torque_x_task_yz_corridor_qp_orientation_cbf_balance"
+
+controller:
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    # Lambda-derived at THIS pose (cond(J)=7.20, inverted equilibrium) -- see
+    # the header. 400/40 * Lambda_xx=3.831680.
+    kp_x: 1581.9862
+    kd_x: 158.1986
+    # Y: soft centering bias only (Y stays a corridor axis). NOT a hold task.
+    kp_y: 5.0
+    kd_y: 2.0
+    # Z-HOLD (2026-08-23). Z is PROMOTED to a tracked task axis here
+    # (task_axis_rows: [0, 2]) because the horizontal drive sags the EE ~3.8 cm
+    # into the floor guard within 0.38 s under the mandatory seed kick -- the
+    # soft centering (kp_z=5) and the z-corridor CBF (half-width 0.03) both fail
+    # to hold height against the drive's downward dynamic coupling (dz/dx~0.5 at
+    # this singular pose). kp_z/kd_z = 400/40 * Lambda_zz, Lambda_zz = 2.5704
+    # measured in THIS task basis at ARM_Q0 (eps = lambda_regularization = 0.1,
+    # UN-excluded Jacobian), per AGENTS.md sec.7. This is a firm POSITION hold,
+    # not the 5.0 centering value -- moving z into task_axis_rows without
+    # re-deriving the gain is the exact wrong-role trap sec.7 warns about.
+    kp_z: 1028.1530
+    kd_z: 102.8153
+    # kp_rot=0 / kd_rot Lambda-derived-damping-only -- see the header's
+    # "NOT FULL-DE-SEARCHED" section for why these are principled defaults
+    # rather than a search result.
+    kp_rot: 0.0
+    kd_rot: 11.9542
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  # Unchanged from the parent file -- disables the global cond(J) wrench
+  # back-off for any physically realizable Jacobian (redundant with this
+  # controller's own manipulability CBF as the singularity-avoidance
+  # mechanism; see docs/status/disable_global_singular_scale_validation_
+  # 2026-07-30.md).
+  # Columns are the task axes expressed in world. col0 = drive (perpendicular
+  # to the hinge, horizontal), col1 = the hinge itself, col2 = world Z.
+  # Orthonormality is checked by controller_core.safety.validated_task_rotation,
+  # the SAME checker the safety monitor uses, so the two cannot disagree about
+  # what basis they are in.
+  # Z-HOLD row structure (2026-08-23). Row 0 = drive (tracked), row 2 = world Z
+  # (now tracked, kp_z above), row 1 = the hinge direction (kept as the Y
+  # corridor barrier). corridor_axis_rows must be DISJOINT from task_axis_rows.
+  # The tau_yz_soft centering bias now applies to row 1 only; row 2 gets its
+  # authority from the task instead.
+  task_axis_rows: [0, 2]
+  corridor_axis_rows: [1]
+
+  task_rotation:
+    - [-0.716448064,  0.697640431,  0.000000000]
+    - [-0.697640431, -0.716448064,  0.000000000]
+    - [ 0.000000000,  0.000000000,  1.000000000]
+
+  # --- friction feedforward (2026-08-18) ---------------------------------
+  # tau_ff = coulomb * tanh(qd / deadband) + viscous * qd, added to the bias.
+  # Friction opposes motion, so cancelling it means ADDING +c*sign(qd); tanh is
+  # the smooth surrogate for sign.
+  friction_feedforward: true
+  friction_ff_coulomb_nm:
+    shoulder_pan_joint: 4.0
+    shoulder_lift_joint: 4.88
+    elbow_joint: 4.0
+    wrist_1_joint: 0.8
+    wrist_2_joint: 0.8
+    wrist_3_joint: 0.8
+  friction_ff_viscous:
+    shoulder_pan_joint: 0.0
+    shoulder_lift_joint: 0.0
+    elbow_joint: 0.0
+    wrist_1_joint: 0.0
+    wrist_2_joint: 0.0
+    wrist_3_joint: 0.0
+  friction_ff_qd_deadband: 0.05
+
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+
+  # Unchanged from the parent file: shoulder_pan held out of the task (both a
+  # zeroed Jacobian column and a shut torque box -- see
+  # controller_core/x_task_yz_corridor_qp/config.py's task_excluded_joints
+  # docstring). Not re-screened against THIS pose in this pass -- inherited
+  # from the parent's own screening at the same ARM_Q0/wrist_2=-90 pose, so it
+  # still applies verbatim.
+  # pan (index 0) held by WEIGHT, not excluded -- exclusion here costs
+  # cond 7.24 -> 519.53. wrist_2 (index 4) held so the pose stays singular.
+  posture_joint_weights: [60.0, 1.0, 1.0, 1.0, 60.0, 1.0]
+  task_excluded_joints: []
+
+  # --- Y/Z corridor + manipulability CBF: UNCHANGED from the parent file ---
+  yz_corridor_enabled: true
+  y_corridor_half_width_m: 0.05
+  # TIGHTENED for this pose -- see the FLOOR section in the header. NOT
+  # inherited: 0.05 here puts the rod tip on the table.
+  z_corridor_half_width_m: 0.03
+  yz_corridor_alpha1: 10.0
+  yz_corridor_alpha2: 10.0
+  manipulability_cbf: true
+  # NOTE: 3.0e-4 was calibrated against mu(ARM_Q0) at the OLD, near-singular
+  # transport pose (mu=4.326e-4 there). At THIS pose cond(J)=7.20 is
+  # well-conditioned, so mu is far larger and this row is expected to be
+  # inactive throughout -- inherited unchanged rather than recalibrated,
+  # since making it active here was never the goal (that is the transport
+  # pose's job, not this one's).
+  manipulability_cbf_epsilon: 3.0e-4
+  manipulability_cbf_alpha1: 10.0
+  manipulability_cbf_alpha2: 10.0
+
+  # --- NEW: orientation high-order CBF (2026-08-15) -------------------------
+  # See controller_core/x_task_yz_corridor_qp/config.py's `orientation_cbf`
+  # docstring for the full derivation (including the R_ref^T rotation
+  # correction, verified by finite difference -- NOT a bare +/-J_r qd).
+  orientation_cbf: true
+  orientation_cbf_max_error_rad: 0.20
+  orientation_cbf_alpha1: 10.0
+  orientation_cbf_alpha2: 10.0
+
+  dual_sweeps: 4
+  dual_root_iters: 10
+
+  safety:
+    max_joint_velocity_radps: 3.0
+    # Unchanged from the parent file -- see that file's header for the full
+    # justification (0.05 m corridor half-width vs 0.03 m class default,
+    # widened here to 0.06 m so the guard sits outside the corridor).
+    max_abs_y_drift_m: 0.06
+    # 0.045, not the 0.06 inherited from Goal 1: at THIS pose 0.06 is
+    # numerically indistinguishable from floor contact (clearance 0.0634 m).
+    max_abs_z_drift_m: 0.035
+    max_abs_orthogonal_drift_m: 0.06
+    max_orientation_error_rad: 0.25
+
+reward:
+  alive_bonus: 0.5
+  x_hold_weight: 5.0
+  y_hold_weight: 5.0
+  z_hold_weight: 10.0
+  orientation_weight: 5.0
+  torque_smooth_weight: 0.001
