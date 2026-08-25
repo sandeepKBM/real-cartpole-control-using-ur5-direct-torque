@@ -210,6 +210,19 @@ def run_energy_scheduled_trial(
     phi_switch_max_rad: float = 0.45,
     hold_s: float = 4.0,
     velocity_hold: bool = False,
+    blend_lqr: bool = False,
+    # Blend-weight shape (used only when blend_lqr=True). alpha = a_s * a_d, each
+    # a tanh gate that is ~1 when its coordinate is small and decays to ~0 past
+    # its center. Defaults sit at the discrete switch thresholds (s_switch=1.2,
+    # phi_switch_max=0.45) so the unified law starts life close to the validated
+    # switch, then can be tuned. The hard cutoff zeroes the LQR contribution well
+    # before the pole is far from the top, as cheap insurance against the linear
+    # law's bounded-but-wrong extrapolation leaking into the pump.
+    blend_s_center: float = 1.2,
+    blend_s_width: float = 0.5,
+    blend_dist_center: float = 0.45,
+    blend_dist_width: float = 0.20,
+    blend_dist_cutoff: float = 0.9,
 ) -> dict:
     """One continuous rollout, guards ON, no discrete phase change anywhere.
 
@@ -264,6 +277,18 @@ def run_energy_scheduled_trial(
                 f"x_task_yz_corridor_qp.")
         _inner.task_velocity_rows = (int(transport_axis_index),)
 
+    # The unified blend never resets task_velocity_rows, so the drive row stays
+    # VELOCITY-tracked through the catch -- the same plant the pole-weighted LQR
+    # was validated against. Position-hold has no continuous analog (the discrete
+    # path re-syncs target_x at the switch instant, which a switch-free law has no
+    # instant to do), so refuse it rather than silently run the LQR against a
+    # different plant than its K was solved for.
+    if blend_lqr and velocity_swingup and not velocity_hold:
+        raise RuntimeError(
+            "blend_lqr requires velocity_hold=True with velocity_swingup: the "
+            "switch-free blend keeps the drive row velocity-tracked throughout, "
+            "so there is no seam at which to re-sync a position-tracked catch.")
+
     x_ref = float(state0.ee_pos[transport_axis_index])
     policy = policy or EnergyBlendPolicy(params.e_center, params.e_width)
 
@@ -285,6 +310,7 @@ def run_energy_scheduled_trial(
     min_dist_inverted = np.inf
     min_tip_z = np.inf
     max_blend = 0.0
+    max_alpha = 0.0  # peak LQR blend weight (blend_lqr path only)
     t_blend_half = None
     prev_theta = None
     theta_travel = 0.0
@@ -392,6 +418,106 @@ def run_energy_scheduled_trial(
             a_cmd = params.a_seed * float(np.sign(coupling_c0))
         else:
             a_cmd = amplitude * float(np.tanh(drive_arg / max(deadband, 1e-9)))
+
+        if blend_lqr and K is not None:
+            # ---- UNIFIED SMOOTH-BLEND LAW: one continuous control law, no
+            # discrete switch anywhere. u = (1-alpha)*u_energy + alpha*u_lqr,
+            # with alpha a pure function of state that fades the energy pump out
+            # and the LQR in as the pole nears the top.
+            #
+            # Energy (pump) candidate WITH its leash -- exactly what the swing-up
+            # branch applies below; alpha fades this whole term (pump + leash)
+            # out near the top so the leash cannot fight the catch.
+            if velocity_swingup and state_prev_ee is not None:
+                leash_x = float(state_prev_ee[transport_axis_index])
+                leash_v = float(state_prev_vel[transport_axis_index])
+            else:
+                leash_x, leash_v = target_x, target_x_vel
+            a_energy = a_cmd - params.k_pos * (leash_x - x_ref) - params.k_vel * leash_v
+
+            # LQR candidate from the MEASURED end-effector state -- the same s_vec
+            # the discrete hold uses. Its own clip bounds it to +-lqr_a_max even
+            # when the linear law is extrapolated far from the top; alpha then
+            # scales that bounded value to ~0 there so it never reaches the cart.
+            x_act = float(state_prev_ee[transport_axis_index]) if state_prev_ee is not None else x_ref
+            xd_act = float(state_prev_vel[transport_axis_index]) if state_prev_vel is not None else 0.0
+            s_vec = np.array([x_act - x_ref, xd_act, phi_inv, thetadot], dtype=np.float64)
+            a_lqr = float(np.clip(-(K @ s_vec)[0], -lqr_a_max, lqr_a_max))
+
+            # Blend weight in [0,1]: ~0 far from the top (energy owns the cart),
+            # ~1 at the top (LQR owns it). No latch -- alpha rises AND falls as
+            # the pole passes through, and only once truly captured (dist->0,
+            # |s|->0) does it stay pinned near 1 and hold. Zeroed during the seed
+            # (pole at the bottom) and beyond the hard cutoff.
+            if t < params.t_seed_s or dist > blend_dist_cutoff:
+                alpha = 0.0
+            else:
+                a_s = 0.5 * (1.0 - float(np.tanh((abs(s_val) - blend_s_center)
+                                                 / max(blend_s_width, 1e-9))))
+                a_d = 0.5 * (1.0 - float(np.tanh((dist - blend_dist_center)
+                                                 / max(blend_dist_width, 1e-9))))
+                alpha = a_s * a_d
+            a_cmd = (1.0 - alpha) * a_energy + alpha * a_lqr
+            max_alpha = max(max_alpha, alpha)
+            peak_abs_a_cmd = max(peak_abs_a_cmd, abs(a_cmd))
+
+            # Reporting-only engagement analog of the discrete switch: first time
+            # the LQR owns at least half the command AND the pole is genuinely
+            # near the top. Drives the hold metrics; it does NOT gate control.
+            if lqr_engaged_t is None and alpha >= 0.5 and dist <= phi_switch_max_rad:
+                lqr_engaged_t = t
+                lqr_switch_state = {"t": t, "phi_inv_rad": phi_inv,
+                                    "thetadot": thetadot, "s": s_val,
+                                    "energy_over_e_top": e_frac, "alpha": alpha}
+
+            # Same velocity-tracked integration + step as the rest of the rollout.
+            target_x_vel = float(np.clip(target_x_vel + a_cmd * CONTROL_DT,
+                                         -V_MAX_MPS, V_MAX_MPS))
+            target_x = target_x + target_x_vel * CONTROL_DT
+            state = build_mujoco_state(
+                model, data, site_id=site_id, joint_ids=joint_ids,
+                time_s=t, dt_s=CONTROL_DT,
+                target_x=target_x, target_x_vel=target_x_vel, target_x_accel=a_cmd,
+                reference_quat=state0.ee_quat,
+                transport_axis_index=transport_axis_index,
+                gravity_compensation=True,
+            )
+            tau, diag = adapter.step(state=state)
+            if not bool(diag.get("safety_ok", True)) and not guard_fired:
+                guard_fired = True
+                guard_reason = str(diag.get("safety_reason", ""))
+                guard_t = t
+            mon.step(thetadot=thetadot, phi=phi_hang, drive_accel=a_cmd, dt=CONTROL_DT)
+            state_prev_ee = np.asarray(state.ee_pos, dtype=np.float64)
+            state_prev_vel = np.asarray(state.ee_lin_vel, dtype=np.float64)
+            data.ctrl[:6] = np.asarray(tau, dtype=np.float64).reshape(6)
+            mujoco.mj_step(model, data)
+            if tip_site >= 0:
+                tip_z_now = float(data.site_xpos[tip_site][2])
+                min_tip_z = min(min_tip_z, tip_z_now)
+                if tip_z_now < FLOOR_MARGIN_M and not guard_fired:
+                    guard_fired = True
+                    guard_reason = f"tip world z {tip_z_now:.4f} < floor margin {FLOOR_MARGIN_M} m"
+                    guard_t = t
+                    break
+            if lqr_engaged_t is not None:
+                max_abs_phi_after_switch = max(max_abs_phi_after_switch, abs(phi_inv))
+                last_hold_t = t
+                if fell_after_switch_t is None and abs(phi_inv) > 0.5:
+                    fell_after_switch_t = t
+            if track_history:
+                history.append({"t": t, "phase": "blend", "alpha": float(alpha),
+                                "a_cmd": a_cmd, "a_energy": a_energy, "a_lqr": a_lqr,
+                                "phi_inv_deg": float(np.degrees(phi_inv)),
+                                "thetadot": thetadot, "s": s_val,
+                                "energy_over_e_top": e_frac,
+                                "orientation_error": float(diag.get("orientation_error_norm", 0.0)),
+                                "ee": np.asarray(state.ee_pos, dtype=np.float64).tolist(),
+                                "qpos6": np.asarray(data.qpos[:6], dtype=np.float64).tolist()})
+            if lqr_engaged_t is not None and t - lqr_engaged_t >= hold_s:
+                held_to_end = True
+                break
+            continue
 
         # SOURCE SWITCH, not a controller swap. Once the pole is inside the
         # capture band the LQR takes over writing the cart acceleration; the
@@ -575,6 +701,7 @@ def run_energy_scheduled_trial(
         "params": dict(params.__dict__),
         "guard_fired": guard_fired, "guard_reason": guard_reason, "first_guard_t": guard_t,
         "max_blend": float(max_blend), "t_blend_half_s": t_blend_half,
+        "blend_lqr": bool(blend_lqr), "max_alpha": float(max_alpha),
         "peak_abs_a_cmd_mps2": float(peak_abs_a_cmd),
         "min_theta_dist_from_inverted": float(min_dist_inverted),
         "best_abs_s": None if not np.isfinite(best_abs_s) else float(best_abs_s),
@@ -689,6 +816,12 @@ def objective_spec(x, spec: dict) -> float:
             s_switch=float(spec.get("s_switch", 1.2)),
             phi_switch_max_rad=float(spec.get("phi_switch_max_rad", 0.30)),
             hold_s=float(spec.get("hold_s", 6.0)),
+            blend_lqr=bool(spec.get("blend_lqr", False)),
+            blend_s_center=float(spec.get("blend_s_center", 1.2)),
+            blend_s_width=float(spec.get("blend_s_width", 0.5)),
+            blend_dist_center=float(spec.get("blend_dist_center", 0.45)),
+            blend_dist_width=float(spec.get("blend_dist_width", 0.20)),
+            blend_dist_cutoff=float(spec.get("blend_dist_cutoff", 0.9)),
         )
     r = run_energy_scheduled_trial(
         _model_for(spec["pendulum_xml"]), params,
@@ -840,6 +973,19 @@ def build_parser() -> argparse.ArgumentParser:
                         "guard); velocity tracking realizes the LQR command cleanly "
                         "(E stays ~1.0) so the catch holds. Default off preserves "
                         "the position-tracked catch the LQR K was derived against.")
+    p.add_argument("--blend-lqr", action="store_true",
+                   help="ONE unified high-level law instead of an energy->LQR "
+                        "source switch: u=(1-alpha)*u_energy + alpha*u_lqr, alpha "
+                        "a smooth state function that fades the pump out and the "
+                        "LQR in near the top. No discrete switch anywhere. Requires "
+                        "--velocity-hold (the switch-free blend keeps the drive row "
+                        "velocity-tracked throughout, so there is no seam to "
+                        "re-sync a position catch at). Needs --lqr-json.")
+    p.add_argument("--blend-s-center", type=float, default=1.2)
+    p.add_argument("--blend-s-width", type=float, default=0.5)
+    p.add_argument("--blend-dist-center", type=float, default=0.45)
+    p.add_argument("--blend-dist-width", type=float, default=0.20)
+    p.add_argument("--blend-dist-cutoff", type=float, default=0.9)
     p.add_argument("--output-json", type=Path, default=None)
     return p
 
@@ -901,7 +1047,17 @@ def main(argv=None) -> int:
             s_switch=float(args.s_switch),
             phi_switch_max_rad=float(args.phi_switch_max_rad),
             hold_s=float(args.hold_s),
+            blend_lqr=bool(args.blend_lqr),
+            blend_s_center=float(args.blend_s_center),
+            blend_s_width=float(args.blend_s_width),
+            blend_dist_center=float(args.blend_dist_center),
+            blend_dist_width=float(args.blend_dist_width),
+            blend_dist_cutoff=float(args.blend_dist_cutoff),
         )
+        if args.blend_lqr:
+            print(f"UNIFIED BLEND LAW (no switch): alpha gates s@{args.blend_s_center}"
+                  f"/{args.blend_s_width}, dist@{args.blend_dist_center}"
+                  f"/{args.blend_dist_width}, cutoff {args.blend_dist_cutoff}")
         print(f"LQR handoff: K={_l['K']}  a_max={_l['a_max']:.4f}  "
               f"switch |s|<={args.s_switch} and |phi|<={args.phi_switch_max_rad}")
     ctx = {"model": model, "trial_kwargs": trial_kwargs}
@@ -946,6 +1102,12 @@ def main(argv=None) -> int:
             spec["s_switch"] = float(args.s_switch)
             spec["phi_switch_max_rad"] = float(args.phi_switch_max_rad)
             spec["hold_s"] = float(args.hold_s)
+            spec["blend_lqr"] = bool(args.blend_lqr)
+            spec["blend_s_center"] = float(args.blend_s_center)
+            spec["blend_s_width"] = float(args.blend_s_width)
+            spec["blend_dist_center"] = float(args.blend_dist_center)
+            spec["blend_dist_width"] = float(args.blend_dist_width)
+            spec["blend_dist_cutoff"] = float(args.blend_dist_cutoff)
             print(f"SEARCH SCORES THE HOLD: LQR a_max={_l['a_max']:.3f} "
                   f"phi_switch<={args.phi_switch_max_rad} hold_s={args.hold_s}")
         res = _minimize(functools.partial(objective_spec, spec=spec), bounds,
