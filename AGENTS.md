@@ -141,12 +141,69 @@ unmeasured, which is still the likeliest silent failure of the handoff.
   visible swing) and it carries no HUD — so do **not** cite it as a flip or as a passing result
   without re-running it and reading real numbers.
 
-### Goal 2 — 2-axis swing-up, at the SINGULAR wrist_2
+### Goal 2 — swing-up at the SINGULAR wrist_2
+
+### GOAL 2 FLIP **AND** HOLD ACHIEVED 2026-08-24 — single axis, guards ON, at the SINGULAR pose
+
+First sustained flip-and-hold at the pose Goal 1 always moved AWAY from. On branch
+`exp/singular-velswingup-torquehold` (commit `eae0183`; NOT yet merged into
+`feature/ur5e-mujoco-torque-control`). Architecture: **velocity-swingup -> torque-LQR-hold**,
+ONE drive axis (in-plane horizontal), at `ARM_Q0` as-is with `wrist_2` at the singularity
+(`cond(J)=1396`). End-to-end in one continuous rollout, **all guards on, no guards-off path** —
+so unlike the `swingup_flip_pan_lift_elbow_noguard.mp4` reference below, this is a POSITIVE
+result under this repo's standing rule.
+
+```
+swing-up engages LQR at t = 2.67 s   phi = 17.1 deg   thetadot = -2.62 rad/s
+HOLDS max|phi| = 0.299 rad for the full 10 s hold
+guard_fired = False        tip clears floor by 3.6 cm (min_tip 0.036 m)
+K=0 COUNTERFACTUAL from the identical arrival falls to pi -> the hold is control,
+  not hinge friction (this repo has retracted a friction "hold" before).
+```
+
+Verified: `tests/mujoco/test_pendulum_singular_flip_hold.py` (2 passed, re-run 2026-08-24 in the
+`mujoco_ur5e` env, ~151 s — needs `pinocchio`, so it FAILS on the bare miniforge python; use the
+conda env). Reproduce: `tools/diagnostics/_run_goal2_singular_flip_hold.sh`. LQR gains:
+`tools/diagnostics/goal2_singular_flip_hold_lqr.json`. Config
+`config/ur5e_mujoco_torque_x_task_yz_corridor_qp_goal2_singular_zhold.yaml`.
+
+**The load-bearing insight: track the drive axis as a VELOCITY reference during the catch, not a
+POSITION reference. This is NOT "velocity control vs torque control" — the motors are ALWAYS
+torque-controlled (this is the true-torque lane); the choice is one level up, in how the cascade
+turns the high-level law's desired cart ACCELERATION into a reference the low-level impedance
+controller tracks.** Position reference (integrate the accel twice) carries tracking LAG, so the
+LQR's balancing cart-acceleration arrives OUT OF PHASE with the pole — negative damping, which
+PUMPS the pole (`E -> 1.12 E_top`, EE sags, falls). Velocity reference (integrate once) realizes
+the LQR command on-phase (`E stays ~1.0`), so it damps instead of pumps. `--velocity-hold` flag
+on `pendulum_two_phase_swingup.py` (additive, default off — the position-tracked catch elsewhere
+is unchanged).
+
+Three ingredients, all required together (each landed + independently verified this session):
+1. **Direct tip-world-z floor guard** (`d1f5b70`): the shared monitor's per-axis z-drift is
+   silently ignored on the `task_rotation` path, so a 4.9 cm EE sag reached 1.4 cm off the
+   (collision-free, SILENT) floor untripped. See the floor-clearance section — floor penetration
+   here has no contact force and no warning.
+2. **World-Z promoted to a tracked task axis** (`8254822`): `kp_z = 400*Lambda_zz = 1028`, else
+   the horizontal drive sags the EE into the floor guard in 0.38 s before the pump even starts.
+3. **`--velocity-hold` + pole-weighted LQR** (this commit): the cascade LQR (tuned on
+   placed-inverted) under-weights the pole for the harder swing-up ARRIVAL; scaling phi/phidot
+   gains x1.5 crosses into a sustained hold. The capture basin here is a KNIFE-EDGE (window
+   ~[1.5x, 2x]; x3 and the ARE-optimal higher-gain designs overshoot), so the search had to
+   SCORE THE END-TO-END HOLD, not just arrival `|s|` — see the `upright_duration_after_switch_s`
+   metric (max|phi| saturates at pi for any eventual fall and gives a hold search no gradient).
+
+Still to do on this result: it is on an unmerged branch; the CLAUDE.md Goal-2 subsections BELOW
+(controller "gated on the CRITIC pass", "nothing independently verified") predate it and describe
+the state before this flip. Reconcile on merge. The `x_task_yz_corridor_qp` critic pass (§5) is
+still the gate for any BROADER claim about that controller family beyond this single validated
+single-axis run.
 
 - **Pose**: `ARM_Q0` as-is, wrist_2 at the singularity (`cond(J) = 1395.76`).
 - **Controller**: the 2-axis controller (`controller_core/x_task_yz_corridor_qp/`), which exists
   precisely to survive this pose. **Gated on the CRITIC pass** — §5's no-exceptions rule
-  applies; nothing about that controller is currently independently verified.
+  applies; nothing about that controller is currently independently verified. (Superseded in part
+  by the 2026-08-24 result above — a single-axis run of this controller family now IS verified
+  end-to-end; the critic pass remains the gate for broader claims.)
 - **Reference behavior**: `outputs/pendulum_renders/swingup_flip_pan_lift_elbow_noguard.mp4`.
 - **Pendulum**: `assets/ur5e_pendulum/pendulum_attachment.xml` (the default 0.12 m, **local-Z
   hinge**). Determined by the same physics as Goal 1's, in the opposite direction: at `ARM_Q0`'s
