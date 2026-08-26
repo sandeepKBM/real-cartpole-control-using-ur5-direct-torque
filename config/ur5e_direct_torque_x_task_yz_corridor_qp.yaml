@@ -233,16 +233,25 @@ controller:
   # to-cycle, so seeding the primal (tau) and dual (lambda) from the previous
   # cycle converges in ~20 inner iters instead of 80 -- measured at ARM_Q0 with
   # the corridor+manip rows active: compute() 9.9 -> 3.6 ms and the solve 8.8 ->
-  # 2.5 ms on the bench host (~3.5x on the solve), while the per-state torque
-  # error vs the 20000-iter reference DROPS from up to 1.33 Nm (cold) to ~9e-3 Nm
-  # (warm) -- i.e. faster AND ~150x closer to the true QP. Warm-start does not
-  # change the fixed point (projected gradient is a contraction to the unique box
-  # optimum); it only reaches it in fewer iterations, and the controller resets
-  # its warm buffers on reset_from_state. Default OFF everywhere else; enabled
-  # here because this is the deadline-bound real-time path. See
-  # controller_core/x_task_yz_corridor_qp/config.py's qp_warm_start docstring,
-  # controller_core/constrained_box_qp.py, and
-  # tests/mujoco/test_corridor_qp_warm_start_parity.py.
+  # 2.5 ms on the bench host (~3.5x on the solve). On the slowly-varying cycles
+  # warm is also more accurate than the under-converged cold@80 (up to ~150x).
+  # Warm-start does not change the fixed point (projected gradient is a
+  # contraction to the unique box optimum); it only reaches it in fewer iterations,
+  # and the controller resets its warm buffers on reset_from_state.
+  #
+  # NOT UNIFORMLY AT LEAST AS ACCURATE AS COLD -- corrected 2026-08-26. At a fast
+  # transient the QP optimum can JUMP so the previous-cycle warm seed is farther
+  # from it than a cold analytic start, and the reduced warm budget cannot recover
+  # (one measured cycle: 4.80 Nm off a bit-stable reference vs 1.7e-4 Nm cold;
+  # barrier still satisfied -- a tracking-torque defect, not a breach). The
+  # safeguard is qp_warm_fallback_tol: each warm cycle is convergence-gated on a
+  # cheap box-projected residual and the rare non-converging one is redone as a
+  # plain cold 80-iter solve, so accuracy is >= cold BY CONSTRUCTION while the
+  # ~99% slowly-varying cycles keep the warm speedup. Default OFF everywhere else;
+  # enabled here because this is the deadline-bound real-time path. See
+  # controller_core/x_task_yz_corridor_qp/config.py's qp_warm_start /
+  # qp_warm_fallback_tol docstrings, controller_core/constrained_box_qp.py, and
+  # tests/mujoco/test_corridor_qp_warm_start_{parity,safeguard}.py.
   #
   # NOTE: because the cold solver was under-converged at the corridor-active
   # states, enabling the accurate warm solve CHANGES the closed-loop trajectory
@@ -251,6 +260,12 @@ controller:
   # "FIRST real-hardware trial" caveat above, not a regression.
   qp_warm_start: true
   qp_warm_max_iters: 20
+  # Convergence-gate threshold for the cold fallback (see the block above). A warm
+  # cycle whose box-projected residual exceeds this is redone as a cold 80-iter
+  # solve. Sized so a multi-Nm transient fails it while genuinely-converged warm
+  # cycles (residual ~1e-4 or below) pass, keeping the fallback rare. Set to null
+  # to disable the gate (trust warm unconditionally -- the pre-2026-08-26 behavior).
+  qp_warm_fallback_tol: 1.0e-3
 
   safety:
     max_joint_velocity_radps: 3.0

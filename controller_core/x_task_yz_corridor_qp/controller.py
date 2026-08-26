@@ -940,6 +940,12 @@ class XTaskYZCorridorQPController:
             solve_kwargs["x_warm"] = self._warm_x
             solve_kwargs["lam_warm"] = self._warm_lam
             solve_kwargs["max_iters"] = int(self.cfg.qp_warm_max_iters)
+            # Convergence gate: if the warm solve does not converge below this
+            # residual (a rare fast-transient cycle), the solver redoes it as a
+            # plain cold 80-iter solve, so accuracy is >= cold by construction.
+            # None disables the gate. See cfg.qp_warm_fallback_tol.
+            if getattr(self.cfg, "qp_warm_fallback_tol", None) is not None:
+                solve_kwargs["fallback_tol"] = float(self.cfg.qp_warm_fallback_tol)
         t_start = time.perf_counter()
         tau_qp, _dual, feasible = solve_constrained_box_qp(
             hessian,

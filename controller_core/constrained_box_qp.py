@@ -74,6 +74,8 @@ def solve_constrained_box_qp(
     dual_max: float = 1.0e6,
     x_warm: np.ndarray | None = None,
     lam_warm: np.ndarray | None = None,
+    fallback_tol: float | None = None,
+    cold_max_iters: int = 80,
 ) -> tuple[np.ndarray, np.ndarray, bool]:
     """Solve ``min 0.5 x'Hx + f'x`` s.t. ``lo<=x<=hi`` and ``A_ineq @ x <= b_ineq``.
 
@@ -100,6 +102,27 @@ def solve_constrained_box_qp(
     runs unchanged. When warm, callers typically also pass a smaller ``max_iters``
     -- warm starting makes the same accuracy reachable in ~20 inner iters instead
     of 80. The cold path (both None) is byte-for-byte the pre-2026-08-26 behavior.
+
+    CONVERGENCE-GATED COLD FALLBACK (2026-08-26, opt-in via ``fallback_tol``). A
+    warm start is fast on the ~99% of cycles where the QP optimum moves slowly, but
+    at a fast transient the optimum can JUMP so the previous-cycle seed is FARTHER
+    from the new optimum than a cold analytic start, and the reduced warm budget
+    cannot recover within its inner iterations (measured: a warm solve 4.80 Nm off
+    a bit-stable reference where cold is 1.7e-4 -- a tracking-torque defect, not a
+    barrier breach). When ``fallback_tol`` is not None AND the warm path ran, this
+    computes ONE cheap post-solve box-projected fixed-point residual
+    ``r = max| clip(x - step*(H x + f + A^T lam), lo, hi) - x |`` (zero at the box
+    optimum for the final multipliers; ``step`` and ``H`` are the same the inner
+    projected-gradient solver uses) and, if ``r > fallback_tol`` (or non-finite),
+    REDOES the cycle as a plain COLD solve (``cold_max_iters`` inner iters, the
+    analytic unconstrained-minimizer start), which is reliably accurate here. This
+    fires only on the rare transient cycles, so the slowly-varying cycles keep the
+    warm speedup; and because the caller re-seeds its warm buffer from whatever this
+    returns, a fallback also refreshes the seed and stops staleness from
+    compounding. ``fallback_tol=None`` (default) disables the gate: the warm result
+    is returned unconditionally, byte-for-byte the pre-gate warm behavior. The gate
+    only exists on the warm path -- when ``qp_warm_start`` is off the cold path runs
+    and this parameter is never consulted.
     """
     warm = x_warm is not None and lam_warm is not None
     h = 0.5 * (np.asarray(hessian, dtype=np.float64) + np.asarray(hessian, dtype=np.float64).T)
@@ -127,104 +150,135 @@ def solve_constrained_box_qp(
             # depth.
             warm = False
 
-    if USE_NUMBA and _nb is not None:
-        # Compiled hot path -- identical algorithm/result to the loop below.
-        # `h` here is already symmetrized; the kernel re-symmetrizes and adds
-        # the 1e-8 Tikhonov term itself, exactly as this function does, so pass
-        # the raw `h`.
-        if warm:
+    # `h_reg` (symmetrized + 1e-8 Tikhonov) is what the inner projected-gradient
+    # solve actually uses; the numba kernel forms the identical matrix internally.
+    # Shared here so both the numpy inner solve and the convergence-gate residual
+    # below use the same H.
+    h_reg = h + 1.0e-8 * np.eye(n, dtype=np.float64)
+
+    def _numba_solve(do_warm: bool, mi: int) -> tuple[np.ndarray, np.ndarray, bool]:
+        # Compiled hot path -- identical algorithm/result to `_numpy_solve`.
+        # `h` here is already symmetrized; the kernel re-symmetrizes and adds the
+        # 1e-8 Tikhonov term itself, exactly as this function does, so pass raw `h`.
+        if do_warm:
             x_nb, lam_nb, feasible_nb = _nb.constrained_ws(
                 h, f, lo, hi, a_mat, b_vec,
                 int(max(1, dual_sweeps)), int(max(1, dual_root_iters)),
-                int(max(1, max_iters)), float(tol), float(dual_max), xw, lw,
+                int(max(1, mi)), float(tol), float(dual_max), xw, lw,
             )
         else:
             x_nb, lam_nb, feasible_nb = _nb.constrained(
                 h, f, lo, hi, a_mat, b_vec,
                 int(max(1, dual_sweeps)), int(max(1, dual_root_iters)),
-                int(max(1, max_iters)), float(tol), float(dual_max),
+                int(max(1, mi)), float(tol), float(dual_max),
             )
         return (np.asarray(x_nb, dtype=np.float64),
                 np.asarray(lam_nb, dtype=np.float64), bool(feasible_nb))
 
-    # Pure-numpy path (numba absent, or forced off by the equivalence tests).
-    # `_x_start` holds the warm primal that every inner box solve is seeded from
-    # (updated only at the sweep-final commit, mirroring _box_qp_numba.constrained_ws
-    # exactly). None on the cold path -> solve_box_qp restarts from solve(h,-f).
-    h_reg = h + 1.0e-8 * np.eye(n, dtype=np.float64)
-    _x_start: list[np.ndarray | None] = [xw.copy() if warm else None]
+    def _numpy_solve(do_warm: bool, mi: int) -> tuple[np.ndarray, np.ndarray, bool]:
+        # Pure-numpy path (numba absent, or forced off by the equivalence tests).
+        # `_x_start` holds the warm primal that every inner box solve is seeded
+        # from (updated only at the sweep-final commit, mirroring
+        # _box_qp_numba.constrained_ws exactly). None on the cold path ->
+        # solve_box_qp restarts from solve(h, -f).
+        _x_start: list[np.ndarray | None] = [xw.copy() if do_warm else None]
 
-    def solve_for(lam_vec: np.ndarray) -> np.ndarray:
-        f_shifted = f + a_mat.T @ lam_vec
-        if _x_start[0] is None:
-            return solve_box_qp(h, f_shifted, lo, hi, max_iters=max_iters, tol=tol)
-        return _box_qp_warm(h_reg, f_shifted, lo, hi, _x_start[0], max_iters, tol)
+        def solve_for(lam_vec: np.ndarray) -> np.ndarray:
+            f_shifted = f + a_mat.T @ lam_vec
+            if _x_start[0] is None:
+                return solve_box_qp(h, f_shifted, lo, hi, max_iters=mi, tol=tol)
+            return _box_qp_warm(h_reg, f_shifted, lo, hi, _x_start[0], mi, tol)
 
-    lam = lw.copy() if warm else np.zeros(m, dtype=np.float64)
-
-    x = solve_for(lam)
-    if warm:
-        _x_start[0] = x
-    feasible = True
-
-    for _sweep in range(max(1, int(dual_sweeps))):
-        any_active = False
-        for i in range(m):
-
-            def g(lam_i: float, _i: int = i, _lam: np.ndarray = lam) -> float:
-                trial = _lam.copy()
-                trial[_i] = lam_i
-                x_trial = solve_for(trial)
-                return float(a_mat[_i] @ x_trial - b_vec[_i])
-
-            g0 = g(0.0)
-            if g0 <= tol:
-                # Constraint already satisfied with this multiplier at 0 --
-                # complementary slackness holds with lambda_i = 0.
-                if lam[i] != 0.0:
-                    lam[i] = 0.0
-                    any_active = True
-                continue
-
-            any_active = True
-            # g is monotonically non-increasing in lambda_i >= 0. Bracket a
-            # root via doubling, then bisect -- robust even if g is only
-            # piecewise-linear (kinks from the inner box QP's own clipping),
-            # where a pure secant method could overshoot.
-            lo_l, hi_l = 0.0, 1.0
-            g_hi = g(hi_l)
-            expand_iters = 0
-            while g_hi > tol and hi_l < dual_max and expand_iters < 40:
-                hi_l *= 2.0
-                g_hi = g(hi_l)
-                expand_iters += 1
-            if g_hi > tol:
-                # Even at dual_max the constraint can't be satisfied within
-                # the box -- genuinely infeasible (e.g. torque limits don't
-                # allow holding Y this tight while also doing the rest of
-                # the task). Report it, don't silently clamp.
-                feasible = False
-                lam[i] = hi_l
-                continue
-            for _ in range(max(1, int(dual_root_iters))):
-                mid = 0.5 * (lo_l + hi_l)
-                g_mid = g(mid)
-                if abs(g_mid) <= tol:
-                    lo_l = hi_l = mid
-                    break
-                if g_mid > 0:
-                    lo_l = mid
-                else:
-                    hi_l = mid
-            lam[i] = 0.5 * (lo_l + hi_l)
+        lam = lw.copy() if do_warm else np.zeros(m, dtype=np.float64)
 
         x = solve_for(lam)
-        if warm:
+        if do_warm:
             _x_start[0] = x
-        if not any_active:
-            break
+        feasible = True
 
-    return x, lam, feasible
+        for _sweep in range(max(1, int(dual_sweeps))):
+            any_active = False
+            for i in range(m):
+
+                def g(lam_i: float, _i: int = i, _lam: np.ndarray = lam) -> float:
+                    trial = _lam.copy()
+                    trial[_i] = lam_i
+                    x_trial = solve_for(trial)
+                    return float(a_mat[_i] @ x_trial - b_vec[_i])
+
+                g0 = g(0.0)
+                if g0 <= tol:
+                    # Constraint already satisfied with this multiplier at 0 --
+                    # complementary slackness holds with lambda_i = 0.
+                    if lam[i] != 0.0:
+                        lam[i] = 0.0
+                        any_active = True
+                    continue
+
+                any_active = True
+                # g is monotonically non-increasing in lambda_i >= 0. Bracket a
+                # root via doubling, then bisect -- robust even if g is only
+                # piecewise-linear (kinks from the inner box QP's own clipping),
+                # where a pure secant method could overshoot.
+                lo_l, hi_l = 0.0, 1.0
+                g_hi = g(hi_l)
+                expand_iters = 0
+                while g_hi > tol and hi_l < dual_max and expand_iters < 40:
+                    hi_l *= 2.0
+                    g_hi = g(hi_l)
+                    expand_iters += 1
+                if g_hi > tol:
+                    # Even at dual_max the constraint can't be satisfied within
+                    # the box -- genuinely infeasible (e.g. torque limits don't
+                    # allow holding Y this tight while also doing the rest of
+                    # the task). Report it, don't silently clamp.
+                    feasible = False
+                    lam[i] = hi_l
+                    continue
+                for _ in range(max(1, int(dual_root_iters))):
+                    mid = 0.5 * (lo_l + hi_l)
+                    g_mid = g(mid)
+                    if abs(g_mid) <= tol:
+                        lo_l = hi_l = mid
+                        break
+                    if g_mid > 0:
+                        lo_l = mid
+                    else:
+                        hi_l = mid
+                lam[i] = 0.5 * (lo_l + hi_l)
+
+            x = solve_for(lam)
+            if do_warm:
+                _x_start[0] = x
+            if not any_active:
+                break
+
+        return x, lam, feasible
+
+    _solve = _numba_solve if (USE_NUMBA and _nb is not None) else _numpy_solve
+
+    if not warm:
+        return _solve(False, max_iters)
+
+    x, lam, feasible = _solve(True, max_iters)
+    if fallback_tol is None:
+        return x, lam, feasible
+
+    # CONVERGENCE GATE. One cheap box-projected fixed-point residual at the warm
+    # (x, lam): r = max| clip(x - step*(H x + f + A^T lam), lo, hi) - x |, which is
+    # exactly zero when x is the box optimum for the returned multipliers and grows
+    # when the reduced warm budget could not track a jumped optimum. `step` and
+    # `h_reg` are the ones the inner solver uses, so this measures the same solve.
+    step = 1.0 / max(float(np.max(np.abs(h_reg))), 1.0)
+    grad = h_reg @ x + f + a_mat.T @ lam
+    resid = float(np.max(np.abs(np.clip(x - step * grad, lo, hi) - x)))
+    if np.isfinite(resid) and resid <= float(fallback_tol):
+        return x, lam, feasible
+    # Warm did not converge below the gate: redo the cycle COLD (analytic
+    # unconstrained-minimizer start, full `cold_max_iters`). Reliable at these
+    # instances, and it also refreshes the caller's warm seed with a good solution
+    # so the transient does not compound into the next cycle.
+    return _solve(False, int(cold_max_iters))
 
 
 def _box_qp_warm(

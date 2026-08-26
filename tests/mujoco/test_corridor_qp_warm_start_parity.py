@@ -180,6 +180,14 @@ def test_warm_compute_is_faster_at_the_singular_pose():
         cy = dict(base)
         cy["qp_warm_start"] = warm
         cy["qp_warm_max_iters"] = 20
+        # Measure the pure WARM-SOLVE speedup, isolated from the convergence-gated
+        # cold fallback (2026-08-26). This test JAMS the walls to 1e-4 to force the
+        # rows active -- a degenerate near-infeasible corridor where the warm solve
+        # legitimately does not converge below the gate residual, so with the gate
+        # on it would (correctly) fall back to cold every cycle and this test would
+        # be timing warm+cold, not warm. The gate's own cost/behavior is covered by
+        # tests/mujoco/test_corridor_qp_warm_start_safeguard.py.
+        cy["qp_warm_fallback_tol"] = None
         st = build_mujoco_state(
             model, data, site_id=site_id, joint_ids=joint_ids, time_s=0.0,
             dt_s=float(model.opt.timestep),

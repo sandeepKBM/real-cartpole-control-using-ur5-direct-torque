@@ -149,12 +149,17 @@ def constrained(h_in, f, lo, hi, a_mat, b_vec, dual_sweeps, dual_root_iters,
 # break and the dual coordinate-ascent are identical operation-for-operation.
 # Because projected gradient with a fixed step is a contraction to the unique box
 # optimum for the PD Hessian used here, the starting iterate changes only how many
-# iterations are needed, never the fixed point -- a warm start that is close makes
+# iterations are needed, never the fixed point -- a warm start that is CLOSE makes
 # the SAME `max_iters` budget reach the optimum more accurately (measured: at the
-# real corridor-QP instances it is uniformly at least as accurate as the cold
-# 80-iter solve, and far more so at the hard near-wall instances). This is the
-# whole reason the warm path can also run a smaller `max_iters` and still beat the
-# cold solve on tau accuracy vs a 2000+-iter reference.
+# slowly-varying corridor-QP instances it is at least as accurate as the cold
+# 80-iter solve, and far more so at the hard near-wall instances). That is why the
+# warm path can run a smaller `max_iters` and still beat the cold solve on those
+# cycles. It is NOT uniformly at least as accurate, however: at a fast transient a
+# stale seed can be FARTHER from a jumped optimum than a cold analytic start and
+# the reduced budget cannot recover (one cycle measured 4.80 Nm off vs 1.7e-4
+# cold). The convergence-gated cold fallback in constrained_box_qp.solve_
+# constrained_box_qp (fallback_tol) is what restores accuracy >= cold; these
+# kernels are unchanged by it (the gate is a cheap residual computed around them).
 
 
 @njit(cache=True)
