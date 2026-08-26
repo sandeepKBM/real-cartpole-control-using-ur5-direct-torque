@@ -55,6 +55,22 @@ _EXPECTED_SERVOL_PARAMS = ("pose", "speed", "acceleration", "time", "lookahead_t
 # called explicitly by velocity_transport.py before streaming instead.
 _EXPECTED_SPEEDL_PARAMS = ("xd", "acceleration", "time")
 
+# The exact speedJ(qd, acceleration, time) signature this code was written
+# against (ur_rtde's documented API for joint-velocity streaming) -- same
+# convention/rationale as _EXPECTED_SPEEDL_PARAMS above, mirrored for the new
+# joint_velocity control mode (hardware/joint_velocity_transport.py). Not
+# verified inside connect(); verify_speedj_signature() is public and called
+# explicitly by that transport module before streaming.
+_EXPECTED_SPEEDJ_PARAMS = ("qd", "acceleration", "time")
+
+# The exact speedJ(qd, acceleration, time) signature this code was written
+# against (ur_rtde's documented API for joint-velocity streaming) -- same
+# convention/rationale as _EXPECTED_SPEEDL_PARAMS above, mirrored for the new
+# joint_velocity control mode (hardware/joint_velocity_transport.py). Not
+# verified inside connect(); verify_speedj_signature() is public and called
+# explicitly by that transport module before streaming.
+_EXPECTED_SPEEDJ_PARAMS = ("qd", "acceleration", "time")
+
 
 def _load_rtde_classes() -> tuple[type[Any], type[Any]]:
     try:
@@ -284,6 +300,56 @@ class UR5eLink:
         if not np.all(np.isfinite(xd_arr)):
             raise RTDEStateError("speed_l() got non-finite velocity command")
         self._control.speedL(xd_arr.tolist(), float(acceleration), float(time_s))
+
+    def verify_speedj_signature(self) -> None:
+        """Explicit, opt-in counterpart to _verify_servol_signature -- see
+        _EXPECTED_SPEEDJ_PARAMS' comment for why this isn't wired into
+        connect() automatically. Callers that stream speedJ (only
+        joint_velocity_transport.py today) must call this once after
+        connect(with_control=True), before the first speed_j()."""
+        if self._control is None:
+            raise RTDEStateError("verify_speedj_signature() called before connect(with_control=True)")
+        speed_j = getattr(self._control, "speedJ", None)
+        if speed_j is None:
+            raise RTDELinkError(
+                "Connected RTDE control interface has no speedJ method -- cannot "
+                "perform joint velocity control with this library/robot combination."
+            )
+        try:
+            sig = inspect.signature(speed_j)
+        except (TypeError, ValueError):
+            return
+        params = list(sig.parameters)
+        if params and params[0] == "self":
+            params = params[1:]
+        if tuple(params[: len(_EXPECTED_SPEEDJ_PARAMS)]) != _EXPECTED_SPEEDJ_PARAMS:
+            raise RTDELinkError(
+                "speedJ's signature does not match the expected "
+                f"{_EXPECTED_SPEEDJ_PARAMS}; found parameters {tuple(params)}. Refusing "
+                "to guess argument order -- update hardware/link.py's "
+                "_EXPECTED_SPEEDJ_PARAMS after confirming the real signature for this "
+                "rtde_control version."
+            )
+
+    def speed_j(self, qd, *, acceleration: float, time_s: float = 0.0) -> None:
+        """Stream one RTDE ``speedJ`` joint-velocity setpoint. Mirrors
+        ``speed_l`` exactly, one level down the stack: ``qd`` is a 6-vector
+        of joint velocities (rad/s) we computed ourselves (see
+        ``controller_core/damped_least_squares.py``), bypassing the
+        firmware's own Cartesian-to-joint IK entirely -- this still uses the
+        robot's own joint SERVO loop (speedJ ramps toward each streamed
+        setpoint under firmware control), only the IK step is now ours.
+        ``acceleration`` bounds the joint-space ramp rate (rad/s^2);
+        ``time_s`` > 0 tells the robot to decelerate to zero by then if no
+        new speedJ arrives -- 0.0 (default) means "hold until superseded or
+        speedStop()", matching how this is streamed every cycle from
+        joint_velocity_transport.py's loop."""
+        if self._control is None:
+            raise RTDEStateError("speed_j() called before connect(with_control=True)")
+        qd_arr = np.asarray(qd, dtype=np.float64).reshape(6)
+        if not np.all(np.isfinite(qd_arr)):
+            raise RTDEStateError("speed_j() got non-finite velocity command")
+        self._control.speedJ(qd_arr.tolist(), float(acceleration), float(time_s))
 
     def speed_stop(self, acceleration: float = 10.0) -> None:
         """Best-effort deceleration stop for a speedL streaming session

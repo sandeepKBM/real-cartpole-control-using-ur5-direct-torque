@@ -13,6 +13,13 @@ from typing import Any, Protocol
 from .control_mode import normalize_control_mode
 from .direct_torque_link import UR5eDirectTorqueLink
 from .direct_torque_transport import DirectTorqueTransportResult, run_x_transport_direct_torque
+from .joint_velocity_transport import (
+    DEFAULT_DAMPING_LAMBDA_MAX,
+    DEFAULT_DAMPING_SIGMA0,
+    DEFAULT_JOINT_VELOCITY_CLAMP_RADPS,
+    JointVelocityTransportResult,
+    run_x_transport_joint_velocity,
+)
 from .link import UR5eLink
 from .position_transport import PositionTransportResult, run_x_transport_position
 from .safety import UR5eSafetyLimits
@@ -100,6 +107,16 @@ def run_x_transport(
     # other mode ignores them.
     rate_hz: float = 125.0,
     speed_l_acceleration: float = 1.2,
+    # joint_velocity mode only -- forwarded to run_x_transport_joint_velocity's
+    # own speed_j_acceleration/joint_velocity_clamp_radps/damping_lambda_max/
+    # damping_sigma0 params (defaults match that function's own defaults, so
+    # omitting these preserves default behavior exactly). rate_hz above is
+    # shared with velocity mode's link-frequency convention. Every other mode
+    # ignores these.
+    speed_j_acceleration: float = 1.2,
+    joint_velocity_clamp_radps: float = DEFAULT_JOINT_VELOCITY_CLAMP_RADPS,
+    damping_lambda_max: float = DEFAULT_DAMPING_LAMBDA_MAX,
+    damping_sigma0: float = DEFAULT_DAMPING_SIGMA0,
 ) -> XTransportResult:
     mode = normalize_control_mode(control_mode)
     transport_axis_index = validate_transport_axis_index(transport_axis_index)
@@ -117,6 +134,9 @@ def run_x_transport(
         #     computes `x0 = tcp0[0]` / `x_err = x_des - tcp[0]` on-robot.
         #   * velocity      -> hardware/velocity_transport.py is not plumbed
         #     for a transport axis at all (still hardcoded index 0).
+        #   * joint_velocity -> hardware/joint_velocity_transport.py reuses the
+        #     same X-only min-jerk profile/CartesianVelocityController as
+        #     velocity mode and is likewise not plumbed for a transport axis.
         # Allowing a non-zero axis there would command motion along X while
         # guarding (and scoring) along Y/Z -- i.e. the robot pushes off-axis
         # until the 0.03 m orthogonal-drift guard trips. `position` mode is
@@ -241,6 +261,44 @@ def run_x_transport(
             reason=raw_vel.reason,
             summary=raw_vel.summary,
             trace_path=raw_vel.trace_path,
+            control_mode=mode,
+        )
+
+    if mode == "joint_velocity":
+        # Same frequency_hz-must-match-rate_hz rationale as the velocity
+        # branch above -- see that branch's comment.
+        link_jv = UR5eLink(robot_ip, frequency_hz=rate_hz)
+        if not skip_joint_move:
+            _joint_move_ur5e_link(link_jv, motion_opt_in=motion_opt_in, target_q_rad=start_q_rad)
+        raw_jv: JointVelocityTransportResult = run_x_transport_joint_velocity(
+            link_jv,
+            config_path=config_path,
+            target_x_delta_m=target_x_delta_m,
+            move_duration_s=move_duration_s,
+            duration_s=duration_s,
+            output_dir=output_dir,
+            motion_opt_in=motion_opt_in,
+            max_tcp_accel_mps2_override=max_tcp_accel_mps2_override,
+            max_tcp_speed_mps_override=max_tcp_speed_mps_override,
+            accel_gap_cycles_override=accel_gap_cycles_override,
+            speed_lowpass_alpha_override=speed_lowpass_alpha_override,
+            speed_limit_gap_cycles_override=speed_limit_gap_cycles_override,
+            speed_limit_lowpass_alpha_override=speed_limit_lowpass_alpha_override,
+            accel_max_consecutive_violations_override=accel_max_consecutive_violations_override,
+            accel_hard_multiple_override=accel_hard_multiple_override,
+            speed_max_consecutive_violations_override=speed_max_consecutive_violations_override,
+            speed_hard_multiple_override=speed_hard_multiple_override,
+            rate_hz=rate_hz,
+            speed_j_acceleration=speed_j_acceleration,
+            joint_velocity_clamp_radps=joint_velocity_clamp_radps,
+            damping_lambda_max=damping_lambda_max,
+            damping_sigma0=damping_sigma0,
+        )
+        return XTransportResult(
+            ok=raw_jv.ok,
+            reason=raw_jv.reason,
+            summary=raw_jv.summary,
+            trace_path=raw_jv.trace_path,
             control_mode=mode,
         )
 

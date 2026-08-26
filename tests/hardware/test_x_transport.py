@@ -414,3 +414,98 @@ def test_run_x_transport_velocity_forwards_move_limit_overrides(monkeypatch):
     assert captured["speed_hard_multiple_override"] == 8.5
     assert result.ok is True
     assert result.control_mode == "velocity"
+
+
+# --------------------------------------------------------------------------- #
+# run_x_transport(control_mode="joint_velocity") -- dispatch-level tests only
+# (the real speedJ streaming/DLS loop is covered by
+# tests/hardware/test_joint_velocity_transport.py). Mirrors the velocity
+# dispatch tests above: patches both _joint_move_ur5e_link (so no real
+# moveJ/RTDE machinery is needed) and run_x_transport_joint_velocity, and
+# checks every kwarg (including the DLS/clamp params) reaches it.
+# --------------------------------------------------------------------------- #
+def test_run_x_transport_joint_velocity_link_frequency_matches_rate_hz(monkeypatch):
+    monkeypatch.setattr("hardware.x_transport._joint_move_ur5e_link", lambda *a, **k: None)
+
+    captured_link: dict[str, object] = {}
+
+    def _fake_run_x_transport_joint_velocity(link, **kwargs):
+        captured_link["frequency_hz"] = link.frequency_hz
+        from hardware.joint_velocity_transport import JointVelocityTransportResult
+
+        return JointVelocityTransportResult(ok=True, reason="", summary={"success": True}, trace_path=None)
+
+    monkeypatch.setattr(
+        "hardware.x_transport.run_x_transport_joint_velocity", _fake_run_x_transport_joint_velocity
+    )
+
+    run_x_transport(
+        control_mode="joint_velocity",
+        robot_ip="127.0.0.1",
+        config_path=Path("unused.yaml"),
+        target_x_delta_m=0.04,
+        move_duration_s=1.0,
+        duration_s=2.0,
+        output_dir=None,
+        motion_opt_in=True,
+        rate_hz=250.0,
+    )
+
+    assert captured_link["frequency_hz"] == pytest.approx(250.0)
+
+
+def test_run_x_transport_joint_velocity_forwards_dls_and_clamp_kwargs(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("hardware.x_transport._joint_move_ur5e_link", lambda *a, **k: None)
+
+    def _fake_run_x_transport_joint_velocity(link, **kwargs):
+        captured.update(kwargs)
+        from hardware.joint_velocity_transport import JointVelocityTransportResult
+
+        return JointVelocityTransportResult(ok=True, reason="", summary={"success": True}, trace_path=None)
+
+    monkeypatch.setattr(
+        "hardware.x_transport.run_x_transport_joint_velocity", _fake_run_x_transport_joint_velocity
+    )
+
+    result = run_x_transport(
+        control_mode="joint_velocity",
+        robot_ip="127.0.0.1",
+        config_path=Path("unused.yaml"),
+        target_x_delta_m=0.02,
+        move_duration_s=1.0,
+        duration_s=2.0,
+        output_dir=None,
+        motion_opt_in=True,
+        speed_j_acceleration=0.9,
+        joint_velocity_clamp_radps=0.42,
+        damping_lambda_max=0.11,
+        damping_sigma0=0.07,
+        max_tcp_accel_mps2_override=1.23,
+        speed_max_consecutive_violations_override=5,
+    )
+
+    assert captured["speed_j_acceleration"] == pytest.approx(0.9)
+    assert captured["joint_velocity_clamp_radps"] == pytest.approx(0.42)
+    assert captured["damping_lambda_max"] == pytest.approx(0.11)
+    assert captured["damping_sigma0"] == pytest.approx(0.07)
+    assert captured["max_tcp_accel_mps2_override"] == 1.23
+    assert captured["speed_max_consecutive_violations_override"] == 5
+    assert result.ok is True
+    assert result.control_mode == "joint_velocity"
+
+
+def test_run_x_transport_rejects_nonzero_axis_for_joint_velocity_mode():
+    with pytest.raises(ValueError, match="joint_velocity"):
+        run_x_transport(
+            control_mode="joint_velocity",
+            robot_ip="127.0.0.1",
+            config_path=Path("unused.yaml"),
+            target_x_delta_m=0.02,
+            move_duration_s=1.0,
+            duration_s=2.0,
+            output_dir=None,
+            motion_opt_in=True,
+            transport_axis_index=1,
+        )

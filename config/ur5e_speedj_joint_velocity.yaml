@@ -1,0 +1,87 @@
+# RTDE JOINT VELOCITY CONTROL (speedJ), dedicated config -- 2026-08-26.
+#
+# DO NOT point --control-mode joint_velocity at config/ur5e_velocity_control.yaml.
+# That config's default `reduced_task_dims: true` makes
+# CartesianVelocityController resolve the Cartesian task to a joint velocity
+# INTERNALLY (qd = qd_primary + N @ qd_posture) and then return
+# xd_cmd = J @ qd_internal -- i.e. it already did the Jacobian resolution.
+# hardware/joint_velocity_transport.py then feeds that xd_cmd into
+# controller_core/damped_least_squares.py, which resolves it AGAIN:
+# DLS(J, J @ qd_internal). Two consequences, both bad (measured in
+# tests/hardware/test_joint_velocity_resolution_fix.py):
+#   - well-conditioned pose: DLS(J, J@qd) reconstructs qd_internal almost
+#     exactly (measured residual ~1.7e-16) -- DLS becomes a pure no-op, and
+#     the entire point of routing through our own singularity-robust
+#     resolver is silently defeated.
+#   - AT THE SINGULARITY THIS MODE EXISTS TO HANDLE (ARM_Q0), the residual is
+#     ~1.8e-2 -- a real, UNCHARACTERIZED double-damped resolution stacking
+#     CartesianVelocityController's own pinv_damping on top of DLS's
+#     variable damping, exactly where correctness matters most.
+#   - ur5e_velocity_control.yaml is also independently flagged elsewhere in
+#     this repo as "actively known-unsafe" at dx=0.02m under
+#     reduced_task_dims (unresolved orientation-error divergence) -- a
+#     second, unrelated reason not to inherit it here.
+#
+# This config sets `reduced_task_dims: false` (and leaves every other
+# resolution-mode flag at its default-off), which routes
+# CartesianVelocityController through modes.py::compute_full_hold --
+# literally `return xd_full`: no Jacobian, no redundancy resolution, just
+# the raw 6D Cartesian task velocity (X feedforward + P correction, Y/Z/
+# orientation held via P). hardware/joint_velocity_transport.py's own
+# run_x_transport_joint_velocity() ALSO fails fast if any resolution-mode
+# flag is enabled on the loaded config, as defense in depth against this
+# exact mistake recurring with a future config edit.
+#
+# With this config, controller_core/damped_least_squares.py's DLS resolver
+# is the SOLE Cartesian-to-joint resolution step, matching
+# hardware/joint_velocity_transport.py's own module docstring ("the
+# controller builds a desired Cartesian velocity xd_cmd, then DLS resolves
+# it to qd").
+#
+# Same standing caveats as config/ur5e_velocity_control.yaml: NOT yet
+# real-hardware or URSim validated: kp_x/kp_y/kp_z/kp_rot are 1/s VELOCITY
+# gains (untuned, first-pass values, copied from that config's own
+# untuned defaults -- do not assume equivalence, this mode's resolution
+# path is entirely different downstream of xd_cmd).
+mujoco:
+  scene_xml: "assets/ur5e_torque/scene.xml"
+  joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+  actuator_order:
+    - shoulder_pan_torque
+    - shoulder_lift_torque
+    - elbow_torque
+    - wrist_1_torque
+    - wrist_2_torque
+    - wrist_3_torque
+  site_name: "attachment_site"
+  home_qpos: [0.0, -1.5707963267948966, 0.0, -1.5707963267948966, 0.0, 0.0]
+  use_home_qpos_as_start: true
+  output_dir: "outputs/ur5e_mujoco_torque_transport"
+
+controller:
+  velocity_control:
+    kp_x: 2.0
+    kp_y: 2.0
+    kp_z: 2.0
+    kp_rot: 2.0
+    max_lin_speed_mps: 0.25
+    max_ang_speed_radps: 0.5
+    # MUST stay false -- see this file's header. compute_full_hold returns
+    # the raw 6D Cartesian task velocity with no Jacobian/redundancy
+    # resolution, so DLS (in hardware/joint_velocity_transport.py) is the
+    # only place a Jacobian inverse happens.
+    reduced_task_dims: false
+    split_base_wrist_task: false
+    ik_seeded_resolution: false
+  safety:
+    max_joint_velocity_radps: 3.0
+    max_abs_y_drift_m: 0.03
+    max_abs_z_drift_m: 0.03
+    max_abs_orthogonal_drift_m: 0.05
+    max_orientation_error_rad: 0.25
