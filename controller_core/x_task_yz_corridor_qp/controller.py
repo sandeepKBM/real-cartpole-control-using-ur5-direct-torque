@@ -156,6 +156,7 @@ import numpy as np
 from ..constrained_box_qp import solve_constrained_box_qp
 from ..kinematics_utils import orientation_error_vec_wxyz, quat_to_rotmat
 from ..manipulability_cbf import (
+    JacobianDerivativeFn,
     JacobianFn,
     manipulability,
     manipulability_cbf_constraint_row,
@@ -176,6 +177,7 @@ class XTaskYZCorridorQPController:
         config: XTaskYZCorridorQPConfig,
         *,
         jacobian_fn: JacobianFn | None = None,
+        jacobian_derivative_fn: JacobianDerivativeFn | None = None,
     ) -> None:
         self.cfg = config
         # Keyword-only and optional, mirroring
@@ -184,6 +186,12 @@ class XTaskYZCorridorQPController:
         # on the per-cycle state can supply (and state_types normalizes the
         # state to plain arrays, so a callable could not travel there anyway).
         self._jacobian_fn: JacobianFn | None = jacobian_fn
+        # Optional analytic dJ/dq provider for the manipulability CBF gradient.
+        # When supplied, grad_mu comes from ONE closed-form kinematic call
+        # instead of 2*n finite-difference jacobian_fn evals; when None the
+        # gradient is finite-differenced exactly as before (default, unchanged).
+        # It MUST be the derivative of the SAME Jacobian jacobian_fn returns.
+        self._jacobian_derivative_fn: JacobianDerivativeFn | None = jacobian_derivative_fn
         # Pre-compile the optional Numba QP kernels at construction (before any
         # control cycle), so a real-time loop never pays the one-time JIT cost
         # on its first cycle. No-op if numba is absent (the numpy fallback runs),
@@ -206,6 +214,12 @@ class XTaskYZCorridorQPController:
         #: R_tool snapshotted at reset; identity until then. Only read when
         #: cfg.task_frame == "tool".
         self._R0 = np.eye(3, dtype=np.float64)
+        #: Warm-start buffers for the QP solve (cfg.qp_warm_start). The previous
+        #: cycle's primal (tau) and dual (lambda); None means "no warm start yet"
+        #: (the first cycle after a reset is a cold solve). Reset in
+        #: reset_from_state so a re-anchored run never reuses a stale solution.
+        self._warm_x: np.ndarray | None = None
+        self._warm_lam: np.ndarray | None = None
 
     # ---------------------------------------------------------------- setup
     def reset_from_state(self, state: dict[str, Any]) -> None:
@@ -216,6 +230,11 @@ class XTaskYZCorridorQPController:
         self._R0 = quat_to_rotmat(self._quat0)
         self._hold_reference_initialized = False
         self._initialized = True
+        # Drop any warm-start solution from a previous run: after a re-anchor the
+        # references (and therefore the QP solution) can jump, so seeding from the
+        # old solution would be a stale, wrong warm start.
+        self._warm_x = None
+        self._warm_lam = None
 
     @property
     def initialized(self) -> bool:
@@ -841,7 +860,8 @@ class XTaskYZCorridorQPController:
             mu_val = float(manipulability(jac))
             cbf_h = mu_val - float(self.cfg.manipulability_cbf_epsilon)
             grad_mu = manipulability_gradient(
-                self._jacobian_fn, q, step=float(self.cfg.manipulability_cbf_fd_step)
+                self._jacobian_fn, q, step=float(self.cfg.manipulability_cbf_fd_step),
+                jacobian_derivative_fn=self._jacobian_derivative_fn,
             )
             grad_norm = float(np.linalg.norm(grad_mu))
             if np.isfinite(grad_norm) and grad_norm > 0.0:
@@ -900,6 +920,26 @@ class XTaskYZCorridorQPController:
             binding = (a_ineq @ tau_des - b_ineq) > 0.0
 
         # --- 1.4 one solve ----------------------------------------------- #
+        # Warm start (cfg.qp_warm_start): seed the solve from the previous cycle's
+        # primal/dual and run a smaller inner budget. Only when a warm buffer
+        # actually exists (the first cycle after a reset stays a cold 80-iter
+        # solve); the solver itself re-checks the shapes and falls back to cold if
+        # the row count changed since the buffer was captured. This changes only
+        # the solve's iteration count, not its fixed point -- see the solver
+        # docstring and config.qp_warm_start.
+        warm_ready = (
+            bool(self.cfg.qp_warm_start)
+            and self._warm_x is not None
+            and self._warm_lam is not None
+        )
+        solve_kwargs: dict[str, Any] = dict(
+            dual_sweeps=int(self.cfg.dual_sweeps),
+            dual_root_iters=int(self.cfg.dual_root_iters),
+        )
+        if warm_ready:
+            solve_kwargs["x_warm"] = self._warm_x
+            solve_kwargs["lam_warm"] = self._warm_lam
+            solve_kwargs["max_iters"] = int(self.cfg.qp_warm_max_iters)
         t_start = time.perf_counter()
         tau_qp, _dual, feasible = solve_constrained_box_qp(
             hessian,
@@ -908,10 +948,14 @@ class XTaskYZCorridorQPController:
             tau_hi,
             a_ineq,
             b_ineq,
-            dual_sweeps=int(self.cfg.dual_sweeps),
-            dual_root_iters=int(self.cfg.dual_root_iters),
+            **solve_kwargs,
         )
         qp_solve_time_s = float(time.perf_counter() - t_start)
+        # Store this cycle's solution as the next cycle's warm start. Captured
+        # even when this cycle was cold (bootstraps the first warm cycle).
+        if bool(self.cfg.qp_warm_start):
+            self._warm_x = np.asarray(tau_qp, dtype=np.float64).copy()
+            self._warm_lam = np.asarray(_dual, dtype=np.float64).copy()
 
         tau_clipped = np.clip(tau_qp, -tau_limit, +tau_limit)
         saturated = np.abs(tau_qp - tau_clipped) > 1e-10

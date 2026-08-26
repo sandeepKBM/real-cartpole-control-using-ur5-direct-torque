@@ -165,6 +165,15 @@ from .constrained_box_qp import solve_constrained_box_qp
 #: ``state_types.as_impedance_robot_state`` normalizes to plain arrays.
 JacobianFn = Callable[[np.ndarray], np.ndarray]
 
+#: A callable ``q -> dJ/dq`` returning the analytic Jacobian-derivative tensor
+#: of shape ``(n, 6, n)`` where ``T[k][:, i] = d J[:, i] / dq_k`` for the SAME
+#: Jacobian ``JacobianFn`` returns. Supplied by a model provider that can form
+#: it in closed form (``hardware.local_dynamics.LocalPinocchioFastDynamics.
+#: jacobian_derivative``); when present it replaces the manipulability CBF
+#: gradient's 2*n finite-difference ``jacobian_fn`` evaluations with one call.
+#: DELIBERATELY not part of the per-cycle state dict, exactly like ``JacobianFn``.
+JacobianDerivativeFn = Callable[[np.ndarray], np.ndarray]
+
 #: Dual-ascent budget for the single-row CBF QP. Fixed here rather than
 #: exposed as config knobs: with exactly one constraint row the outer sweep
 #: has nothing to coordinate, so one pass of a well-resolved root-find is the
@@ -221,31 +230,67 @@ def manipulability(jacobian: np.ndarray) -> float:
     return float(np.prod(sigma))
 
 
+def _grad_mu_from_jacobian_derivative(
+    jac0: np.ndarray, d_tensor: np.ndarray
+) -> np.ndarray | None:
+    """The trace-formula contraction ``grad[i] = mu * tr(a_inv @ dJ_i @ J^T)``.
+
+    Returns ``None`` (rather than raising) when ``J J^T`` is ill-conditioned or
+    the result is non-finite, so the caller can fall back to the exact
+    ``mu``-difference near a true singularity. Shared by the finite-difference
+    and the analytic ``dJ/dq`` paths so both produce bit-identical numbers from
+    the same tensor.
+    """
+    jjt = jac0 @ jac0.T
+    mu0 = float(np.sqrt(max(float(np.linalg.det(jjt)), 0.0)))
+    try:
+        a_inv = np.linalg.inv(jjt)
+        # grad[i] = mu * tr(a_inv @ d_tensor[i] @ jac0^T), vectorized over i via
+        # plain matmul + a trace identity (tr(A@X) = sum(A * X^T)); avoids
+        # np.einsum's per-call contraction-path search on these small arrays.
+        djt = d_tensor @ jac0.T                       # (n, m, m): d_tensor[i] @ J^T
+        grad = mu0 * np.sum(a_inv * djt.transpose(0, 2, 1), axis=(1, 2))
+        if np.all(np.isfinite(grad)):
+            return grad
+    except np.linalg.LinAlgError:
+        pass
+    return None
+
+
 def manipulability_gradient(
     jacobian_fn: JacobianFn,
     q: np.ndarray,
     *,
     step: float = 1.0e-5,
+    jacobian_derivative_fn: JacobianDerivativeFn | None = None,
 ) -> np.ndarray:
-    """``grad_mu(q)`` in R^n, from central-difference ``dJ/dq`` combined by the
-    ANALYTIC trace formula rather than by differencing ``mu`` itself.
+    """``grad_mu(q)`` in R^n, from ``dJ/dq`` combined by the ANALYTIC trace
+    formula rather than by differencing ``mu`` itself.
 
     For ``mu = sqrt(det(J J^T))`` the exact derivative is
 
         d(mu)/dq_i = mu * tr( (J J^T)^-1 (dJ/dq_i) J^T )
 
-    (the two symmetric halves of ``d(JJ^T)/dq_i`` contribute equal traces). We
-    still need ``dJ/dq`` -- there is no way around ``J`` at perturbed ``q`` (12
-    ``jacobian_fn`` evaluations, CENTRAL for O(step^2)) -- but the combination is
-    then a single vectorized contraction with NO per-joint SVD. This replaces the
-    previous "difference ``mu`` at each perturbed ``q``" implementation, which
-    paid 12 extra SVDs and a Python loop; measured identical to it to 1.1e-10
-    across ARM_Q0 +- 0.5 rad (see tests/unit/test_manipulability_gradient.py) and
-    ~1.5x faster -- the manipulability CBF's dominant per-cycle cost after the QP.
+    (the two symmetric halves of ``d(JJ^T)/dq_i`` contribute equal traces). The
+    combination is a single vectorized contraction with NO per-joint SVD. The
+    ``dJ/dq`` tensor comes from one of two sources:
 
-    Falls back to the exact old ``mu``-difference near a true singularity, where
-    ``(J J^T)^-1`` is ill-conditioned: the fallback reuses the perturbed
-    Jacobians already computed, so it costs no extra evaluations.
+    * DEFAULT (``jacobian_derivative_fn is None``): central-difference
+      ``jacobian_fn`` at 2*n perturbed ``q`` (CENTRAL for O(step^2)). This is
+      the unchanged, byte-identical historical path.
+    * OPT-IN (``jacobian_derivative_fn`` supplied): the analytic ``dJ/dq``
+      tensor in ONE call (a provider's closed-form kinematic derivative, e.g.
+      ``LocalPinocchioFastDynamics.jacobian_derivative``). The provider MUST
+      return the derivative of the SAME Jacobian ``jacobian_fn`` returns (same
+      frame, row/joint order); a mismatch silently produces a wrong gradient,
+      which is why the parity test in ``tests/mujoco/`` is a hard gate. Measured
+      to agree with the finite difference to ~1e-9 while cutting the CBF's
+      dominant per-cycle cost (2*n Jacobian evals -> 1).
+
+    Both paths fall back to the exact ``mu``-difference near a true singularity,
+    where ``(J J^T)^-1`` is ill-conditioned. The finite-difference path reuses
+    the perturbed Jacobians it already computed (no extra evaluations); the
+    analytic path computes them on demand only when the fast contraction fails.
     """
     q = np.asarray(q, dtype=np.float64).reshape(-1)
     n = int(q.shape[0])
@@ -254,6 +299,22 @@ def manipulability_gradient(
         raise ValueError(f"manipulability_gradient requires step > 0; got {step!r}")
 
     jac0 = np.asarray(jacobian_fn(q), dtype=np.float64)
+
+    if jacobian_derivative_fn is not None:
+        d_tensor = np.asarray(jacobian_derivative_fn(q), dtype=np.float64)
+        expected = (n,) + jac0.shape
+        if d_tensor.shape != expected:
+            raise ValueError(
+                f"jacobian_derivative_fn returned shape {d_tensor.shape}, expected "
+                f"{expected} (n, *J.shape) -- it must be dJ/dq for the same Jacobian "
+                "jacobian_fn returns."
+            )
+        grad = _grad_mu_from_jacobian_derivative(jac0, d_tensor)
+        if grad is not None:
+            return grad
+        # Ill-conditioned J J^T near a true singularity: fall through to the
+        # exact mu-difference, which needs J at perturbed q (finite difference).
+
     jp: list[np.ndarray] = []
     jm: list[np.ndarray] = []
     d_tensor = np.empty((n,) + jac0.shape, dtype=np.float64)
@@ -268,19 +329,9 @@ def manipulability_gradient(
         jm.append(jmi)
         d_tensor[i] = (jpi - jmi) / (2.0 * delta)
 
-    jjt = jac0 @ jac0.T
-    mu0 = float(np.sqrt(max(float(np.linalg.det(jjt)), 0.0)))
-    try:
-        a_inv = np.linalg.inv(jjt)
-        # grad[i] = mu * tr(a_inv @ d_tensor[i] @ jac0^T), vectorized over i via
-        # plain matmul + a trace identity (tr(A@X) = sum(A * X^T)); avoids
-        # np.einsum's per-call contraction-path search on these small arrays.
-        djt = d_tensor @ jac0.T                       # (n, m, m): d_tensor[i] @ J^T
-        grad = mu0 * np.sum(a_inv * djt.transpose(0, 2, 1), axis=(1, 2))
-        if np.all(np.isfinite(grad)):
-            return grad
-    except np.linalg.LinAlgError:
-        pass
+    grad = _grad_mu_from_jacobian_derivative(jac0, d_tensor)
+    if grad is not None:
+        return grad
     # Ill-conditioned J J^T (near a true singularity): exact old behavior,
     # reusing the perturbed Jacobians -- no extra jacobian_fn calls.
     grad = np.zeros(n, dtype=np.float64)
@@ -391,12 +442,21 @@ def manipulability_cbf_filter(
     alpha2: float,
     fd_step: float = 1.0e-5,
     curvature_step: float = 1.0e-4,
+    jacobian_derivative_fn: JacobianDerivativeFn | None = None,
 ) -> ManipulabilityCBFResult:
     """One cycle of the OSCBF-style singularity-avoidance QP filter.
 
     ``jacobian`` is the already-available current-``q`` Jacobian (reused for
     ``mu`` so the caller does not pay for a 15th evaluation); ``jacobian_fn``
     is only used for the finite differences.
+
+    ``jacobian_derivative_fn`` (opt-in) supplies the analytic ``dJ/dq`` tensor
+    for ``grad_mu`` in one call instead of 2*n ``jacobian_fn`` evaluations; when
+    None (default) the gradient is finite-differenced exactly as before. The
+    directional curvature term (``qd^T H_mu qd``) is ALWAYS finite-differenced
+    from ``jacobian_fn`` -- it is a second derivative that the first-derivative
+    tensor does not supply, and it is only ~3 evaluations versus the gradient's
+    2*n, so it is deliberately left as the finite difference.
 
     SHORT-CIRCUIT (this is a correctness property, not just an optimization):
     when the constraint row is already satisfied at ``tau_nominal``, the
@@ -416,7 +476,9 @@ def manipulability_cbf_filter(
     tau_upper = np.asarray(tau_upper, dtype=np.float64).reshape(n)
 
     mu = manipulability(jacobian)
-    grad_mu = manipulability_gradient(jacobian_fn, q, step=fd_step)
+    grad_mu = manipulability_gradient(
+        jacobian_fn, q, step=fd_step, jacobian_derivative_fn=jacobian_derivative_fn
+    )
     grad_norm = float(np.linalg.norm(grad_mu))
     h_val = float(mu) - float(epsilon)
     h_dot = float(grad_mu @ qd)

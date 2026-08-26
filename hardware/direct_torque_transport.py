@@ -385,7 +385,19 @@ def run_x_transport_direct_torque(
                 "local_pinocchio, or set manipulability_cbf: false in the config."
             )
         jacobian_fn = local_dynamics.jacobian if local_dynamics is not None else None
-        controller = XTaskYZCorridorQPController(corridor_cfg, jacobian_fn=jacobian_fn)
+        # Analytic dJ/dq for the CBF gradient when the provider can form it
+        # (LocalPinocchioFastDynamics does; LocalMujocoDynamics does not). This
+        # replaces the CBF's 2*n finite-difference jacobian_fn evals with one
+        # closed-form call. Absent (None) => the CBF finite-differences as
+        # before. Since manipulability_cbf already REQUIRES
+        # dynamics_source='local_pinocchio' (checked just above), the analytic
+        # provider is always present on the path that runs the CBF.
+        jacobian_derivative_fn = getattr(local_dynamics, "jacobian_derivative", None)
+        controller = XTaskYZCorridorQPController(
+            corridor_cfg,
+            jacobian_fn=jacobian_fn,
+            jacobian_derivative_fn=jacobian_derivative_fn,
+        )
     safety = ImpedanceSafetyMonitor(safety_cfg)
     estop = EStopLatch()
     tracker = TimingTracker(frequency_hz)

@@ -72,6 +72,8 @@ def solve_constrained_box_qp(
     dual_sweeps: int = 4,
     dual_root_iters: int = 8,
     dual_max: float = 1.0e6,
+    x_warm: np.ndarray | None = None,
+    lam_warm: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, bool]:
     """Solve ``min 0.5 x'Hx + f'x`` s.t. ``lo<=x<=hi`` and ``A_ineq @ x <= b_ineq``.
 
@@ -85,7 +87,21 @@ def solve_constrained_box_qp(
 
     With a_ineq/b_ineq None or empty, this is exactly solve_box_qp (kept as
     a single entry point so callers don't need two code paths).
+
+    WARM START (2026-08-26, opt-in). Pass ``x_warm`` (previous cycle's primal
+    ``tau``) and ``lam_warm`` (previous cycle's dual multipliers) to seed the
+    dual coordinate-ascent from the last solution and warm-start every inner box
+    solve from ``x_warm``. This does NOT change the fixed point -- the projected-
+    gradient inner solve still contracts to the same box optimum and the dual
+    still root-finds the same complementary-slackness condition -- it only reaches
+    it in far fewer inner iterations because the cycle-to-cycle solution changes
+    slowly. Both must be supplied (a warm dual with a cold primal, or vice versa,
+    is refused) and their shapes must match ``n``/``m``; otherwise the cold path
+    runs unchanged. When warm, callers typically also pass a smaller ``max_iters``
+    -- warm starting makes the same accuracy reachable in ~20 inner iters instead
+    of 80. The cold path (both None) is byte-for-byte the pre-2026-08-26 behavior.
     """
+    warm = x_warm is not None and lam_warm is not None
     h = 0.5 * (np.asarray(hessian, dtype=np.float64) + np.asarray(hessian, dtype=np.float64).T)
     f = np.asarray(linear, dtype=np.float64).reshape(-1)
     lo = np.asarray(lower, dtype=np.float64).reshape(-1)
@@ -100,26 +116,55 @@ def solve_constrained_box_qp(
     b_vec = np.asarray(b_ineq, dtype=np.float64).reshape(-1)
     m = a_mat.shape[0]
 
+    if warm:
+        xw = np.asarray(x_warm, dtype=np.float64).reshape(-1)
+        lw = np.asarray(lam_warm, dtype=np.float64).reshape(-1)
+        if xw.shape[0] != n or lw.shape[0] != m:
+            # A stale warm start from a different problem shape (e.g. the row
+            # count changed between cycles) is silently wrong to reuse -- fall
+            # back to the cold solve rather than mis-seed. Not an error: the
+            # controller resets its buffer on such a change, this is defence in
+            # depth.
+            warm = False
+
     if USE_NUMBA and _nb is not None:
         # Compiled hot path -- identical algorithm/result to the loop below.
         # `h` here is already symmetrized; the kernel re-symmetrizes and adds
         # the 1e-8 Tikhonov term itself, exactly as this function does, so pass
         # the raw `h`.
-        x_nb, lam_nb, feasible_nb = _nb.constrained(
-            h, f, lo, hi, a_mat, b_vec,
-            int(max(1, dual_sweeps)), int(max(1, dual_root_iters)),
-            int(max(1, max_iters)), float(tol), float(dual_max),
-        )
+        if warm:
+            x_nb, lam_nb, feasible_nb = _nb.constrained_ws(
+                h, f, lo, hi, a_mat, b_vec,
+                int(max(1, dual_sweeps)), int(max(1, dual_root_iters)),
+                int(max(1, max_iters)), float(tol), float(dual_max), xw, lw,
+            )
+        else:
+            x_nb, lam_nb, feasible_nb = _nb.constrained(
+                h, f, lo, hi, a_mat, b_vec,
+                int(max(1, dual_sweeps)), int(max(1, dual_root_iters)),
+                int(max(1, max_iters)), float(tol), float(dual_max),
+            )
         return (np.asarray(x_nb, dtype=np.float64),
                 np.asarray(lam_nb, dtype=np.float64), bool(feasible_nb))
 
-    lam = np.zeros(m, dtype=np.float64)
+    # Pure-numpy path (numba absent, or forced off by the equivalence tests).
+    # `_x_start` holds the warm primal that every inner box solve is seeded from
+    # (updated only at the sweep-final commit, mirroring _box_qp_numba.constrained_ws
+    # exactly). None on the cold path -> solve_box_qp restarts from solve(h,-f).
+    h_reg = h + 1.0e-8 * np.eye(n, dtype=np.float64)
+    _x_start: list[np.ndarray | None] = [xw.copy() if warm else None]
 
     def solve_for(lam_vec: np.ndarray) -> np.ndarray:
         f_shifted = f + a_mat.T @ lam_vec
-        return solve_box_qp(h, f_shifted, lo, hi, max_iters=max_iters, tol=tol)
+        if _x_start[0] is None:
+            return solve_box_qp(h, f_shifted, lo, hi, max_iters=max_iters, tol=tol)
+        return _box_qp_warm(h_reg, f_shifted, lo, hi, _x_start[0], max_iters, tol)
+
+    lam = lw.copy() if warm else np.zeros(m, dtype=np.float64)
 
     x = solve_for(lam)
+    if warm:
+        _x_start[0] = x
     feasible = True
 
     for _sweep in range(max(1, int(dual_sweeps))):
@@ -174,7 +219,35 @@ def solve_constrained_box_qp(
             lam[i] = 0.5 * (lo_l + hi_l)
 
         x = solve_for(lam)
+        if warm:
+            _x_start[0] = x
         if not any_active:
             break
 
     return x, lam, feasible
+
+
+def _box_qp_warm(
+    h_reg: np.ndarray,
+    f: np.ndarray,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    x0: np.ndarray,
+    max_iters: int,
+    tol: float,
+) -> np.ndarray:
+    """Warm-started projected-gradient box QP, numpy mirror of
+    ``_box_qp_numba._box_ws``. ``h_reg`` is the ALREADY symmetrized + 1e-8
+    Tikhonov-regularized Hessian (the caller adds the regularizer once, exactly
+    as ``solve_box_qp`` does internally on the cold path). Starts from ``x0``
+    clipped into the box; identical recursion otherwise."""
+    x = np.clip(np.asarray(x0, dtype=np.float64).reshape(-1), lo, hi)
+    step = 1.0 / max(float(np.max(np.abs(h_reg))), 1.0)
+    for _ in range(max(1, int(max_iters))):
+        grad = h_reg @ x + f
+        x_new = np.clip(x - step * grad, lo, hi)
+        if float(np.max(np.abs(x_new - x))) <= float(tol):
+            x = x_new
+            break
+        x = x_new
+    return x

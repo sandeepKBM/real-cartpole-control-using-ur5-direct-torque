@@ -194,6 +194,16 @@ class LocalPinocchioFastDynamics:
     def jacobian(self, q: np.ndarray) -> np.ndarray:
         return self._dyn.jacobian(q, site_name=self._site_name)
 
+    def jacobian_derivative(self, q: np.ndarray) -> np.ndarray:
+        """Analytic ``dJ/dq`` tensor ``(n, 6, n)`` for the SAME Jacobian
+        ``jacobian()`` returns -- the manipulability CBF's opt-in fast path,
+        replacing 2*n central-difference ``jacobian()`` evals with one
+        kinematic pass. See ``PinocchioUR5eDynamics.jacobian_derivative`` for
+        the convention derivation. Only this Pinocchio-backed provider exposes
+        it; ``LocalMujocoDynamics`` does not, so the CBF falls back to finite
+        difference there."""
+        return self._dyn.jacobian_derivative(q, site_name=self._site_name)
+
     def jacobian_and_mass_matrix(self, q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         return self.jacobian(q), self.mass_matrix(q)
 

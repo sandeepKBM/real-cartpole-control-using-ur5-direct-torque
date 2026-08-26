@@ -500,6 +500,31 @@ class XTaskYZCorridorQPConfig(TorqueTaskQPConfig):
     dual_sweeps: int = 4
     dual_root_iters: int = 10
 
+    # --- Warm-started QP solve (2026-08-26) --------------------------------
+    #: Seed ``solve_constrained_box_qp`` from the PREVIOUS cycle's primal
+    #: (``tau``) and dual (``lambda``) instead of a cold start. The control
+    #: solution changes slowly cycle-to-cycle, so the dual coordinate-ascent
+    #: and every inner projected-gradient box solve start near their answer and
+    #: converge in far fewer iterations. Default OFF, so every existing config
+    #: is byte-for-byte unchanged: only a config that sets this True takes the
+    #: warm path, and the controller resets its warm buffers on
+    #: ``reset_from_state``.
+    #:
+    #: WHY IT PRESERVES THE CONTROL LAW. Projected gradient with a fixed step is
+    #: a contraction to the UNIQUE box optimum for the PD Hessian used here, so
+    #: the starting iterate changes only the iteration COUNT, never the fixed
+    #: point. Measured on the real corridor-QP instances at ARM_Q0: the warm
+    #: solve is uniformly at least as accurate as the cold 80-iter solve versus a
+    #: 4000-iter reference, and up to ~12x more accurate at the hard near-wall
+    #: instances the cold solver badly under-converges (1.19 Nm error). See the
+    #: solver docstring and tests/unit/test_constrained_box_qp_warm_start.py.
+    qp_warm_start: bool = False
+    #: Inner ``max_iters`` used on warm cycles (a warm start reaches the same
+    #: accuracy in ~20 iters that a cold start needs 80 for). Only consulted when
+    #: ``qp_warm_start`` is True AND a warm buffer is available (the first cycle
+    #: after a reset is still a cold 80-iter solve). Ignored otherwise.
+    qp_warm_max_iters: int = 20
+
     @staticmethod
     def _parse_joint_corridor_joints(raw) -> tuple[int, ...]:
         """Validate joint indices: unique, in range, sorted for determinism."""
@@ -725,6 +750,8 @@ class XTaskYZCorridorQPConfig(TorqueTaskQPConfig):
             ),
             dual_sweeps=int(ctrl.get("dual_sweeps", 4)),
             dual_root_iters=int(ctrl.get("dual_root_iters", 10)),
+            qp_warm_start=bool(ctrl.get("qp_warm_start", False)),
+            qp_warm_max_iters=int(ctrl.get("qp_warm_max_iters", 20)),
             orientation_cbf=bool(ctrl.get("orientation_cbf", False)),
             orientation_cbf_max_error_rad=_parse_manipulability_cbf_alpha(
                 ctrl.get("orientation_cbf_max_error_rad", 0.20),

@@ -222,6 +222,36 @@ controller:
   dual_sweeps: 4
   dual_root_iters: 10
 
+  # --- WARM-STARTED QP SOLVE (2026-08-26) --- ENABLED HERE, THE REAL-TIME PATH -
+  # solve_constrained_box_qp is the corridor-QP controller's dominant per-cycle
+  # cost (~82% of compute()); at the singular pose the cold solve overruns the
+  # 500 Hz (2 ms) deadline and deadline-tripped the real loop by cycle 3. The
+  # cold dual coordinate-ascent restarts every inner projected-gradient box solve
+  # from scratch and starts the dual from lambda=0, so at a strongly-active
+  # near-wall state it BOTH under-converges (measured >1 Nm torque error vs a
+  # 20000-iter reference) AND is slow. The control solution changes slowly cycle-
+  # to-cycle, so seeding the primal (tau) and dual (lambda) from the previous
+  # cycle converges in ~20 inner iters instead of 80 -- measured at ARM_Q0 with
+  # the corridor+manip rows active: compute() 9.9 -> 3.6 ms and the solve 8.8 ->
+  # 2.5 ms on the bench host (~3.5x on the solve), while the per-state torque
+  # error vs the 20000-iter reference DROPS from up to 1.33 Nm (cold) to ~9e-3 Nm
+  # (warm) -- i.e. faster AND ~150x closer to the true QP. Warm-start does not
+  # change the fixed point (projected gradient is a contraction to the unique box
+  # optimum); it only reaches it in fewer iterations, and the controller resets
+  # its warm buffers on reset_from_state. Default OFF everywhere else; enabled
+  # here because this is the deadline-bound real-time path. See
+  # controller_core/x_task_yz_corridor_qp/config.py's qp_warm_start docstring,
+  # controller_core/constrained_box_qp.py, and
+  # tests/mujoco/test_corridor_qp_warm_start_parity.py.
+  #
+  # NOTE: because the cold solver was under-converged at the corridor-active
+  # states, enabling the accurate warm solve CHANGES the closed-loop trajectory
+  # at those states versus the sim runs that used the cold solver (warm's
+  # trajectory is the one that matches the true QP). Treat this as part of the
+  # "FIRST real-hardware trial" caveat above, not a regression.
+  qp_warm_start: true
+  qp_warm_max_iters: 20
+
   safety:
     max_joint_velocity_radps: 3.0
     # 0.06 m, not the 0.03 m class default -- sits OUTSIDE the 0.05 m
