@@ -20,6 +20,7 @@ from controller_core.x_axis_cartesian_impedance import (
     CartesianImpedanceConfig,
     XAxisCartesianImpedanceController,
 )
+from controller_core.x_task_yz_corridor_qp import XTaskYZCorridorQPConfig, XTaskYZCorridorQPController
 from simulation.ur5e_mujoco_torque import accel_duration_displacement, x_profile_accel, x_profile_target
 from transport_metrics import compute_valid_move_hold_metrics, summarize_move_hold_trace
 
@@ -143,6 +144,60 @@ def _load_impedance_bundle(config_path: Path) -> tuple[CartesianImpedanceConfig,
     return impedance_cfg, safety_cfg, frequency_hz
 
 
+# Controller families this loop knows how to drive. "impedance" (the tuned
+# OSC law, XAxisCartesianImpedanceController) is the historical default and
+# stays the default here -- an omitted `controller_kind` key reproduces the
+# pre-2026-08-26 behavior exactly, byte for byte (see
+# test_default_controller_kind_still_builds_impedance_controller).
+# "x_task_yz_corridor_qp" selects the reduced-task corridor-QP + HOCBF law
+# (controller_core/x_task_yz_corridor_qp/), added so this loop can drive the
+# controller family that survives the wrist-2 singularity (cond(J)~1396) --
+# see AGENTS.md sec.0/sec.3 for why plain OSC is structurally mismatched
+# there. This constant is the single source of truth both the reader below
+# and the config-time validation loop use, so a typo in one cannot silently
+# diverge from the other.
+_SUPPORTED_CONTROLLER_KINDS = ("impedance", "x_task_yz_corridor_qp")
+
+
+def _read_controller_kind(config_path: Path) -> str:
+    """Read ``controller.controller_kind`` from a YAML config, defaulting to
+    ``"impedance"`` -- the only control law this loop drove before this field
+    existed. Read as its own cheap, separate YAML parse (rather than folded
+    into ``_load_impedance_bundle``, which unconditionally builds a
+    ``CartesianImpedanceConfig`` and would either raise or silently build a
+    nonsensical config for a file written for a different controller family)
+    so the caller can dispatch to the matching loader BEFORE parsing gains
+    that config doesn't have.
+    """
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    ctrl = cfg.get("controller", {}) or {}
+    kind = str(ctrl.get("controller_kind", "impedance")).strip()
+    if kind not in _SUPPORTED_CONTROLLER_KINDS:
+        raise ValueError(
+            f"controller.controller_kind must be one of {_SUPPORTED_CONTROLLER_KINDS!r}; "
+            f"got {kind!r} in {config_path}"
+        )
+    return kind
+
+
+def _load_corridor_qp_bundle(
+    config_path: Path,
+) -> tuple[XTaskYZCorridorQPConfig, ImpedanceSafetyConfig, float]:
+    """Mirrors ``_load_impedance_bundle`` for the reduced-task corridor-QP
+    controller family (``controller_core/x_task_yz_corridor_qp``). Same
+    ``controller.safety`` section, same ``hardware.rtde_frequency_hz``
+    field/default -- the only thing that differs from the impedance loader is
+    which config class parses ``controller:``.
+    """
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    ctrl = cfg.get("controller", {}) or {}
+    safety_raw = ctrl.get("safety", {}) or {}
+    corridor_cfg = XTaskYZCorridorQPConfig.from_controller_yaml_section(ctrl)
+    safety_cfg = impedance_safety_config_from_section(safety_raw)
+    frequency_hz = float(cfg.get("hardware", {}).get("rtde_frequency_hz", 500.0))
+    return corridor_cfg, safety_cfg, frequency_hz
+
+
 def run_x_transport_direct_torque(
     link: UR5eDirectTorqueLink,
     *,
@@ -192,6 +247,32 @@ def run_x_transport_direct_torque(
         raise ValueError("motion_opt_in must be True for a live direct-torque transport")
     transport_axis_index = validate_transport_axis_index(transport_axis_index)
 
+    # Fail before ever touching the robot (same intent as the gain_overrides
+    # validation further down, and the coriolis_feedforward/telemetry_gap_bridge
+    # checks right below): controller_kind gates two combinations that would
+    # otherwise only surface as a confusing runtime error mid-run.
+    controller_kind = _read_controller_kind(config_path)
+    if controller_kind == "x_task_yz_corridor_qp" and transport_axis_index != 0:
+        # XTaskYZCorridorQPController.compute() itself raises on this (its
+        # reduced task Jacobian is J[0:1,:]+J[3:6,:] by construction), but
+        # that would only happen after link.connect() and the first read --
+        # catch it here instead, matching this function's existing
+        # fail-before-connecting pattern.
+        raise ValueError(
+            "controller_kind='x_task_yz_corridor_qp' is world-X only (its reduced task "
+            f"Jacobian is J[0:1,:]+J[3:6,:] by construction); got transport_axis_index="
+            f"{transport_axis_index}. Use controller_kind='impedance' for off-X transport."
+        )
+    if controller_kind == "x_task_yz_corridor_qp" and gain_overrides:
+        # XTaskYZCorridorQPController has no set_gains() -- silently ignoring
+        # gain_overrides here would be exactly the "operation appears to
+        # succeed but did nothing" failure AGENTS.md sec.7 warns about.
+        raise ValueError(
+            "gain_overrides is not implemented for controller_kind='x_task_yz_corridor_qp' "
+            "(XTaskYZCorridorQPController has no set_gains()); edit the YAML's "
+            "controller.gains section directly instead."
+        )
+
     dynamics_source = normalize_dynamics_source(dynamics_source)
     if coriolis_feedforward and dynamics_source not in ("local", "local_pinocchio"):
         # The robot's own firmware compensates gravity inside directTorque()
@@ -233,7 +314,12 @@ def run_x_transport_direct_torque(
     else:
         local_dynamics = None
 
-    impedance_cfg, safety_cfg, frequency_hz = _load_impedance_bundle(config_path)
+    if controller_kind == "impedance":
+        impedance_cfg, safety_cfg, frequency_hz = _load_impedance_bundle(config_path)
+        corridor_cfg = None
+    else:
+        corridor_cfg, safety_cfg, frequency_hz = _load_corridor_qp_bundle(config_path)
+        impedance_cfg = None
     if abs(frequency_hz - 500.0) > 1.0:
         raise ValueError(
             f"direct_torque transport expects ~500 Hz RTDE; config requested {frequency_hz} Hz"
@@ -257,12 +343,49 @@ def run_x_transport_direct_torque(
     elif target_accel_mps2 is not None:
         raise ValueError(f"target_accel_mps2 is only meaningful for accel/duration profiles, not {trajectory_profile!r}")
 
-    controller = XAxisCartesianImpedanceController(impedance_cfg)
-    if gain_overrides:
-        # Validated (unknown-field / non-finite rejection) and applied before
-        # link.connect() -- fail on a bad override dict before ever touching
-        # the robot, not mid-run.
-        controller.set_gains(gain_overrides)
+    if controller_kind == "impedance":
+        controller = XAxisCartesianImpedanceController(impedance_cfg)
+        if gain_overrides:
+            # Validated (unknown-field / non-finite rejection) and applied before
+            # link.connect() -- fail on a bad override dict before ever touching
+            # the robot, not mid-run.
+            controller.set_gains(gain_overrides)
+    else:
+        # jacobian_fn: XTaskYZCorridorQPController's manipulability_cbf needs
+        # J at PERTURBED q (finite-difference gradient of mu(q)), which no
+        # per-cycle state snapshot can supply. RTDE's getJacobian() only
+        # returns J at the robot's CURRENT q, so only a local dynamics
+        # provider (already constructed above -- the same object this loop
+        # uses for its per-cycle J/M when selected) can serve this role.
+        # Sourced from the SAME provider already in use, not a second one, so
+        # the manipulability CBF and the per-cycle task see numerically
+        # identical kinematics.
+        #
+        # dynamics_source MUST be 'local_pinocchio' specifically when
+        # manipulability_cbf is on, not merely "some local provider" --
+        # measured (2026-08-26, critic bench): 'local' (LocalMujocoDynamics,
+        # a full mj_forward per jacobian_fn call, ~14 calls/cycle for the
+        # CBF's finite-difference gradient) runs this loop at 4.9 ms median
+        # and deadline-trips by cycle 3 against the 2 ms/500 Hz budget;
+        # 'local_pinocchio' (LocalPinocchioFastDynamics) runs at 1.26 ms
+        # median and fits. 'rtde' cannot supply jacobian_fn at all (current-q
+        # only). Reject both before ever connecting, rather than let the loop
+        # start and deadline-trip a few cycles into a live run.
+        if corridor_cfg.manipulability_cbf and dynamics_source != "local_pinocchio":
+            raise ValueError(
+                "controller_kind='x_task_yz_corridor_qp' with manipulability_cbf: true "
+                f"requires dynamics_source='local_pinocchio'; got dynamics_source="
+                f"{dynamics_source!r}. 'rtde' cannot supply a jacobian_fn evaluable at "
+                "arbitrary q (the CBF's finite-difference gradient needs J at PERTURBED q, "
+                "and RTDE's getJacobian() only returns J at the robot's CURRENT q). 'local' "
+                "(LocalMujocoDynamics) technically can, but measured at ~4.9 ms/cycle median "
+                "it exceeds this loop's 2 ms/500 Hz budget and will deadline-trip a few "
+                "cycles into a real run -- 'local_pinocchio' (LocalPinocchioFastDynamics) "
+                "measured ~1.26 ms/cycle median and fits. Pass --dynamics-source "
+                "local_pinocchio, or set manipulability_cbf: false in the config."
+            )
+        jacobian_fn = local_dynamics.jacobian if local_dynamics is not None else None
+        controller = XTaskYZCorridorQPController(corridor_cfg, jacobian_fn=jacobian_fn)
     safety = ImpedanceSafetyMonitor(safety_cfg)
     estop = EStopLatch()
     tracker = TimingTracker(frequency_hz)
@@ -814,8 +937,15 @@ def run_x_transport_direct_torque(
                     # docs/status/clock_timing_late_cycles_2026-07-28.md).
                     "jacobian_cond": float(output.jacobian_cond),
                     "singular_scale": float(output.singular_scale),
-                    "task_scale": float(output.task_scale),
-                    "task_backtrack_iters": int(output.task_backtrack_iters),
+                    # task_scale/task_backtrack_iters are CartesianImpedanceOutput-only
+                    # fields (geometric torque backtracking has no equivalent in the
+                    # corridor-QP controller, which saturates via its own box-QP
+                    # instead) -- getattr keeps this row shape additive rather than
+                    # raising AttributeError for controller_kind='x_task_yz_corridor_qp'.
+                    # Byte-identical for the impedance path: the attribute exists there,
+                    # so getattr returns exactly output.task_scale/task_backtrack_iters.
+                    "task_scale": float(getattr(output, "task_scale", 1.0)),
+                    "task_backtrack_iters": int(getattr(output, "task_backtrack_iters", 0)),
                     "tau_controller": tau_controller.tolist(),
                     "tau_coriolis": tau_coriolis.tolist(),
                     "coriolis_feedforward_active": bool(coriolis_feedforward),
@@ -910,6 +1040,13 @@ def run_x_transport_direct_torque(
     summary = {
         "backend": "ursim_rtde_direct_torque",
         "config_path": str(config_path),
+        # Which control law actually ran this cycle -- read back from the
+        # instantiated controller's class name, not just the parsed YAML
+        # field, so a summary can be checked against "did this run actually
+        # use the controller it claims to" per AGENTS.md sec.7's "verify the
+        # effect, not the invocation" rule.
+        "controller_kind": controller_kind,
+        "controller_class": type(controller).__name__,
         "gain_overrides": dict(gain_overrides) if gain_overrides else {},
         "target_x_delta": float(target_x_delta_m),
         "target_x_delta_m": float(target_x_delta_m),

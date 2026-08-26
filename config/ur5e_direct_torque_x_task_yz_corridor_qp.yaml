@@ -1,0 +1,235 @@
+# Real-UR5e `direct_torque` transport, corridor-QP inner control law
+# (controller_core/x_task_yz_corridor_qp) instead of the tuned OSC impedance
+# controller. Added 2026-08-26 to make that controller family selectable on
+# `hardware/direct_torque_transport.py` via the new `controller.controller_kind`
+# field -- see that file's `_read_controller_kind`/`_load_corridor_qp_bundle`.
+#
+# ============================== WHY THIS EXISTS =============================
+# Plain OSC (XAxisCartesianImpedanceController) is structurally mismatched at
+# the UR5e wrist-2 singularity (cond(J) ~= 1396 at the real transport start
+# pose, ARM_Q0/`hardware/poses.py`) -- see AGENTS.md sec.0/sec.3. The
+# corridor-QP controller (reduced X+orientation task, Y/Z bounded by a
+# high-order-CBF corridor instead of held rigidly, plus a manipulability CBF
+# row) is what survives that pose IN SIMULATION. This file is the hardware
+# entry point for that controller family; it does NOT itself prove hardware
+# validity -- see "NOT YET REAL-HARDWARE VALIDATED" below.
+#
+# =========================== WHERE EVERY VALUE CAME FROM ====================
+# Every field under `controller:` (gains, task_excluded_joints, the corridor
+# and manipulability-CBF blocks, the safety thresholds) is copied VERBATIM,
+# unchanged, from the simulation config this repo already validated in
+# MuJoCo at the singular pose:
+#     config/ur5e_mujoco_torque_x_task_yz_corridor_qp_enabled.yaml
+# That file's own header documents where ITS numbers came from (a Lambda-
+# based unit conversion from config/ur5e_mujoco_torque_osc_tuned.yaml's
+# kp_x/kd_x=400/40, a differential_evolution search for kp_rot/kd_rot, and a
+# measured manipulability_cbf_epsilon calibrated against mu(ARM_Q0) on the
+# compiled MuJoCo model) -- read it for the full provenance chain, not
+# re-derived here.
+#
+# Nothing here is re-tuned or re-validated for the real robot. Per this
+# repo's own standing rule (AGENTS.md sec.7, "a gain belongs to the case it
+# was derived for"), that means every number below is a SIM-DERIVED VALUE
+# CARRIED TO HARDWARE UNCHANGED, not a hardware-validated one. Concretely
+# unproven:
+#   * MuJoCo's rigid-body model (masses/inertias/friction) vs the real arm --
+#     the same gap every other hardware config in this repo has, but never
+#     independently re-checked for THIS controller family's gains.
+#   * The corridor half-widths (0.05 m) and the widened drift-guard
+#     thresholds (0.06 m, see `safety:` below) were sized against a SIM
+#     dose-response measurement at a DIFFERENT pose (the -45deg base-rotation
+#     pose, docs/status/neg45_y_axis_diagnosis_and_fix_2026-08-01.md /
+#     docs/status/neg45_drift_tolerance_validation_2026-08-01.md) -- carried
+#     to ARM_Q0 by the sim config this file copies, not independently
+#     measured at ARM_Q0 itself, sim or real.
+#   * manipulability_cbf_epsilon=3.0e-4 was calibrated against mu(ARM_Q0) on
+#     the COMPILED MUJOCO MODEL (tools/diagnostics/x_task_yz_corridor_qp_sim_check.py),
+#     not the real arm's actual kinematics.
+#
+# =============================== NOT YET REAL-HARDWARE VALIDATED ============
+# This controller family has NEVER been run against real RTDE hardware or
+# URSim as of this file's creation -- only in MuJoCo (see the sim config
+# above) and through the mocked-RTDE unit/smoke tests this same change adds
+# (tests/hardware/test_direct_torque_corridor_qp.py). Treat any real run of
+# this config as a FIRST real-hardware trial: start with small displacements,
+# short durations, and a human at the e-stop, exactly as this repo's own
+# playbook already requires for any new hardware config.
+#
+# =============================== REAL-TIME BUDGET -- MEASURED, ENFORCED ====
+# This loop runs at 500 Hz (2 ms/cycle). XTaskYZCorridorQPController's
+# per-cycle cost is NOT just the QP solve (Numba-compiled, warmed up at
+# construction -- see controller.py's __init__): with manipulability_cbf: true
+# below, `manipulability_gradient`/`manipulability_directional_curvature` call
+# `jacobian_fn` ~14 times per cycle (see controller_core/manipulability_cbf.py).
+#
+# BENCH RESULT (2026-08-26): `jacobian_fn` sourced from `LocalMujocoDynamics`
+# (dynamics_source='local', a full `mj_forward` per evaluation -- see
+# hardware/local_dynamics.py) runs this loop at 4.9 ms median per cycle and
+# deadline-trips the loop's own DeadlineMonitor by cycle 3 -- confirmed by an
+# actual mocked-RTDE run, not estimated. `LocalPinocchioFastDynamics`
+# (dynamics_source='local_pinocchio') runs at 1.26 ms median and fits inside
+# the 2 ms budget. `dynamics_source='rtde'` cannot supply a jacobian_fn at
+# all (RTDE's getJacobian() only returns J at the CURRENT q, never at a
+# perturbed q the CBF's finite-difference gradient needs).
+#
+# CONSEQUENTLY: `hardware/direct_torque_transport.py` now REQUIRES
+# `dynamics_source='local_pinocchio'` whenever `controller_kind:
+# "x_task_yz_corridor_qp"` is paired with `manipulability_cbf: true` (this
+# file has both) -- it raises a ValueError before ever calling
+# `link.connect()` if `dynamics_source` is `'local'` or `'rtde'` instead. This
+# is not optional and not a default a caller can silently miss: pass
+# `--dynamics-source local_pinocchio` (or the equivalent
+# `dynamics_source="local_pinocchio"` kwarg) whenever running this config.
+#
+# =============================== OTHER SILENT-DEFAULT NOTES (2026-08-26) ====
+# Three things worth stating explicitly rather than leaving as an unstated
+# default, flagged in code review:
+#
+#   (a) `friction_feedforward` is OFF (absent below -> class default False).
+#       The real UR5e has measured, meaningful joint friction the frictionless
+#       MuJoCo model this config's gains were derived from does not reproduce
+#       (AGENTS.md sec.3, "Real joint friction added to the sim model"). This
+#       controller DOES support friction_feedforward (wired into `compute()`
+#       -- see controller_core/x_task_yz_corridor_qp/config.py's note on it),
+#       but no friction_ff_coulomb_nm/friction_ff_viscous values have been
+#       derived or validated for THIS controller family on real hardware.
+#       Left off deliberately for a first real trial, not an oversight -- a
+#       wrong feedforward term actively adds torque, which is a worse failure
+#       mode for a first hardware run than a known, pre-existing friction
+#       tracking error.
+#
+#   (b) `task_frame` is UNSET here, so it takes the class default `"world"`
+#       (controller_core/x_task_yz_corridor_qp/config.py). Combined with the
+#       default `task_axis_rows: (0,)` this means: world-X is the tracked
+#       task axis, world-Y/Z are corridor-bounded -- i.e. plain world-X-only
+#       transport, the same physical axis convention
+#       XAxisCartesianImpedanceController's `target_x`/`target_x_vel` already
+#       use on this hardware loop. This IS the correct pairing for a generic
+#       transport config (no pendulum, no tool-frame swing-up basis) -- stated
+#       explicitly here because `task_frame: "tool"` and the explicit
+#       `task_rotation` basis are both real, silently-different alternatives
+#       this controller supports (see that field's docstring), and an
+#       unstated default reads as "nobody decided" rather than "world was the
+#       right choice."
+#
+#   (c) `dynamics_source: local_pinocchio` is REQUIRED at the CALL SITE (a
+#       Python kwarg / CLI flag, not a YAML field -- this controller family
+#       has no YAML-level dynamics-source selector) whenever
+#       `manipulability_cbf: true`, per the "REAL-TIME BUDGET" section above.
+#       Repeated here because it is easy to miss: nothing in THIS file alone
+#       enforces it, the enforcement lives in
+#       hardware/direct_torque_transport.py's pre-connect guard.
+#
+# =============================== WHAT DIFFERS FROM THE SIM FILE =============
+# Only the parts that are genuinely sim-only or MuJoCo-adapter-specific are
+# removed: the `mujoco:` block (scene/joint/actuator wiring, gravity source,
+# output_dir) and the `reward:` block (used only by the RL/diagnostic sim
+# harness, never read by hardware/direct_torque_transport.py). A `hardware:`
+# block is added (rtde_frequency_hz, read by
+# hardware/direct_torque_transport.py's `_load_corridor_qp_bundle`) and
+# `controller.controller_kind: "x_task_yz_corridor_qp"` is added -- the field
+# this change introduces to select this controller family on the hardware
+# loop. Everything under `controller:` besides those two additions is
+# byte-for-byte identical to the source sim file.
+
+hardware:
+  rtde_frequency_hz: 500.0
+
+controller:
+  controller_kind: "x_task_yz_corridor_qp"
+
+  torque_limits_mode: "initial"
+  torque_limits_initial:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  torque_limits_after_stable:
+    shoulder_pan_joint: 150.0
+    shoulder_lift_joint: 150.0
+    elbow_joint: 150.0
+    wrist_1_joint: 28.0
+    wrist_2_joint: 28.0
+    wrist_3_joint: 28.0
+  gains:
+    # UNIT CONVERSION, NOT A RETUNE -- see
+    # config/ur5e_mujoco_torque_x_task_yz_corridor_qp_enabled.yaml's header
+    # for the full derivation (Lambda_xx=5.9298 at ARM_Q0, converting
+    # osc_tuned.yaml's acceleration-domain kp_x/kd_x=400/40 to this
+    # controller's force-domain 2400/240).
+    kp_x: 2400.0
+    kd_x: 240.0
+    # Soft Y/Z centering bias only (tau_yz_soft) -- NOT a Cartesian hold task.
+    # See controller_core/x_task_yz_corridor_qp/config.py's kp_y/kd_y/kp_z/kd_z
+    # docstring: reusing hard-task gains here would recreate the stiff Y/Z
+    # hold this controller exists to remove.
+    kp_y: 5.0
+    kd_y: 2.0
+    kp_z: 5.0
+    kd_z: 2.0
+    # differential_evolution search result at ARM_Q0 -- see the source sim
+    # file's header for the objective/search-space/measured-improvement detail.
+    kp_rot: 35.121920
+    kd_rot: 52.787714
+    kp_posture: 25.0
+    kd_posture: 6.0
+    kd_joint: 4.0
+  # Disables the global cond(J) wrench back-off for any physically realizable
+  # Jacobian -- singularity avoidance here is the manipulability CBF's job,
+  # not this term's. Same value/reason as every other tuned config in this
+  # repo (docs/status/disable_global_singular_scale_validation_2026-07-30.md).
+  jacobian_singular_cond_max: 1.0e18
+  torque_headroom: 0.9
+  qp_posture_regularization: 0.35
+  qp_enforce_velocity_bounds: true
+
+  # shoulder_pan held OUT of the task (zeroed Jacobian column + shut torque
+  # box) -- ARM_Q0 pins shoulder_pan for real wall/base clearance in the lab,
+  # and the reduced task otherwise gives it the single largest world-X
+  # Jacobian coefficient of any joint at this pose. Screened against ARM_Q0
+  # specifically (cond(J_reduced) 10.1 -> 519, still rank 4) -- do not carry
+  # this index set to a different pose without re-screening. See the source
+  # sim file's header and controller_core/x_task_yz_corridor_qp/config.py's
+  # task_excluded_joints docstring.
+  task_excluded_joints: [0]
+
+  # --- Y/Z corridor HOCBF + manipulability CBF: both ON -------------------
+  # This IS the mechanism this controller exists for -- see the header. The
+  # corridor half-width (0.05 m) is deliberately LARGER than
+  # ImpedanceSafetyMonitor's 0.03 m class default; `safety:` below widens the
+  # drift guards to 0.06 m to match, for the same reason the source sim file
+  # documents (a corridor narrower than the guard fights the guard, not the
+  # geometry). See "WHERE EVERY VALUE CAME FROM" above for the scope caveat
+  # on this number (measured at a different pose, sim only).
+  yz_corridor_enabled: true
+  y_corridor_half_width_m: 0.05
+  z_corridor_half_width_m: 0.05
+  yz_corridor_alpha1: 10.0
+  yz_corridor_alpha2: 10.0
+  manipulability_cbf: true
+  # 3.0e-4: mu(ARM_Q0) = 4.326e-4 on the compiled MuJoCo model (NOT
+  # re-measured on the real arm's kinematics) -- see the "REAL-TIME BUDGET"
+  # and "WHERE EVERY VALUE CAME FROM" notes above. Requires
+  # dynamics_source in {'local','local_pinocchio'} on the hardware call
+  # (hardware/direct_torque_transport.py raises loudly, before connecting,
+  # if this is true and dynamics_source='rtde' is selected instead).
+  manipulability_cbf_epsilon: 3.0e-4
+  manipulability_cbf_alpha1: 10.0
+  manipulability_cbf_alpha2: 10.0
+
+  dual_sweeps: 4
+  dual_root_iters: 10
+
+  safety:
+    max_joint_velocity_radps: 3.0
+    # 0.06 m, not the 0.03 m class default -- sits OUTSIDE the 0.05 m
+    # corridor half-width above so the corridor mechanism, not this guard,
+    # decides the outcome inside its own bound. See "WHERE EVERY VALUE CAME
+    # FROM" for the scope caveat: this number's dose-response justification
+    # was measured at a different pose, in sim.
+    max_abs_y_drift_m: 0.06
+    max_abs_z_drift_m: 0.06
+    max_abs_orthogonal_drift_m: 0.06
+    max_orientation_error_rad: 0.25
