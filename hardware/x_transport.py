@@ -94,6 +94,12 @@ def run_x_transport(
     target_accel_mps2: float | None = None,
     telemetry_gap_bridge: bool = False,
     telemetry_gap_bridge_max_cycles: int = 2,
+    # velocity mode only -- forwarded to run_x_transport_velocity's own
+    # rate_hz/speed_l_acceleration params (defaults match that function's
+    # defaults, so omitting these preserves prior behavior exactly). Every
+    # other mode ignores them.
+    rate_hz: float = 125.0,
+    speed_l_acceleration: float = 1.2,
 ) -> XTransportResult:
     mode = normalize_control_mode(control_mode)
     transport_axis_index = validate_transport_axis_index(transport_axis_index)
@@ -199,7 +205,14 @@ def run_x_transport(
         )
 
     if mode == "velocity":
-        link_v = UR5eLink(robot_ip, frequency_hz=125.0)
+        # frequency_hz must match the loop's own rate_hz -- the link's
+        # internal ConnectionHealth staleness budget and the RTDE
+        # receive/control interfaces are constructed against this value, so a
+        # mismatch (e.g. --rate-hz 250 against a hardcoded 125.0 link) is a
+        # real desync, not just cosmetic. Default 125.0 matches
+        # run_x_transport_velocity's own default, preserving prior behavior
+        # for every caller that doesn't pass rate_hz.
+        link_v = UR5eLink(robot_ip, frequency_hz=rate_hz)
         if not skip_joint_move:
             _joint_move_ur5e_link(link_v, motion_opt_in=motion_opt_in, target_q_rad=start_q_rad)
         raw_vel: VelocityTransportResult = run_x_transport_velocity(
@@ -220,6 +233,8 @@ def run_x_transport(
             accel_hard_multiple_override=accel_hard_multiple_override,
             speed_max_consecutive_violations_override=speed_max_consecutive_violations_override,
             speed_hard_multiple_override=speed_hard_multiple_override,
+            rate_hz=rate_hz,
+            speed_l_acceleration=speed_l_acceleration,
         )
         return XTransportResult(
             ok=raw_vel.ok,

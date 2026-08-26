@@ -304,6 +304,69 @@ def test_run_x_transport_urscript_forwards_move_limit_overrides(monkeypatch):
     assert captured["speed_hard_multiple_override"] == 8.5
 
 
+def test_run_x_transport_velocity_link_frequency_matches_rate_hz(monkeypatch):
+    """Regression test for a real desync bug: the velocity dispatch branch
+    used to hardcode UR5eLink(robot_ip, frequency_hz=125.0) regardless of the
+    rate_hz the streaming loop itself was told to use -- with rate_hz=250 the
+    control loop would target 250 Hz while the RTDE link's own
+    ConnectionHealth staleness budget and interfaces were built for 125 Hz.
+    Fixed by constructing UR5eLink(robot_ip, frequency_hz=rate_hz)."""
+    monkeypatch.setattr("hardware.x_transport._joint_move_ur5e_link", lambda *a, **k: None)
+
+    captured_link: dict[str, object] = {}
+
+    def _fake_run_x_transport_velocity(link, **kwargs):
+        captured_link["frequency_hz"] = link.frequency_hz
+        from hardware.velocity_transport import VelocityTransportResult
+
+        return VelocityTransportResult(ok=True, reason="", summary={"success": True}, trace_path=None)
+
+    monkeypatch.setattr("hardware.x_transport.run_x_transport_velocity", _fake_run_x_transport_velocity)
+
+    run_x_transport(
+        control_mode="velocity",
+        robot_ip="127.0.0.1",
+        config_path=Path("unused.yaml"),
+        target_x_delta_m=0.04,
+        move_duration_s=1.0,
+        duration_s=2.0,
+        output_dir=None,
+        motion_opt_in=True,
+        rate_hz=250.0,
+    )
+
+    assert captured_link["frequency_hz"] == pytest.approx(250.0)
+
+
+def test_run_x_transport_velocity_link_frequency_defaults_to_125(monkeypatch):
+    """A caller that doesn't pass rate_hz at all must still get the
+    historical 125.0 link frequency (default preserved)."""
+    monkeypatch.setattr("hardware.x_transport._joint_move_ur5e_link", lambda *a, **k: None)
+
+    captured_link: dict[str, object] = {}
+
+    def _fake_run_x_transport_velocity(link, **kwargs):
+        captured_link["frequency_hz"] = link.frequency_hz
+        from hardware.velocity_transport import VelocityTransportResult
+
+        return VelocityTransportResult(ok=True, reason="", summary={"success": True}, trace_path=None)
+
+    monkeypatch.setattr("hardware.x_transport.run_x_transport_velocity", _fake_run_x_transport_velocity)
+
+    run_x_transport(
+        control_mode="velocity",
+        robot_ip="127.0.0.1",
+        config_path=Path("unused.yaml"),
+        target_x_delta_m=0.04,
+        move_duration_s=1.0,
+        duration_s=2.0,
+        output_dir=None,
+        motion_opt_in=True,
+    )
+
+    assert captured_link["frequency_hz"] == pytest.approx(125.0)
+
+
 # --------------------------------------------------------------------------- #
 # run_x_transport(control_mode="velocity") -- dispatch-level test only (the
 # real speedL streaming loop is covered by tests/hardware/test_velocity_
