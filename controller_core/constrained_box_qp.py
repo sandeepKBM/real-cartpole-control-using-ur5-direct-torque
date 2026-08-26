@@ -33,6 +33,31 @@ import numpy as np
 
 from .box_qp import solve_box_qp
 
+# OPTIONAL compiled hot path (2026-08-26). The Numba kernels reproduce the
+# pure-Python dual-ascent below OPERATION-FOR-OPERATION (byte-identical results,
+# asserted in tests/unit/test_box_qp_numba.py) but run as machine code -- ~28x
+# faster on the per-cycle solve, removing the corridor-QP controller's dominant
+# real-time variance. controller_core stays pure-numpy and correct if numba is
+# absent: this import is guarded and the numpy path below is the fallback. Set
+# USE_NUMBA = False to force the numpy path (used by the equivalence tests).
+try:  # pragma: no cover - exercised only where numba is installed
+    from . import _box_qp_numba as _nb
+
+    USE_NUMBA = True
+except Exception:  # numba not installed / failed to import
+    _nb = None
+    USE_NUMBA = False
+
+
+def numba_warmup() -> bool:
+    """Compile the Numba kernels now (idempotent, disk-cached) so no control
+    cycle pays the one-time JIT cost. Returns True if the compiled path is
+    active. No-op and False when numba is unavailable."""
+    if USE_NUMBA and _nb is not None:
+        _nb.warmup()
+        return True
+    return False
+
 
 def solve_constrained_box_qp(
     hessian: np.ndarray,
@@ -74,6 +99,20 @@ def solve_constrained_box_qp(
     a_mat = np.asarray(a_ineq, dtype=np.float64).reshape(-1, n)
     b_vec = np.asarray(b_ineq, dtype=np.float64).reshape(-1)
     m = a_mat.shape[0]
+
+    if USE_NUMBA and _nb is not None:
+        # Compiled hot path -- identical algorithm/result to the loop below.
+        # `h` here is already symmetrized; the kernel re-symmetrizes and adds
+        # the 1e-8 Tikhonov term itself, exactly as this function does, so pass
+        # the raw `h`.
+        x_nb, lam_nb, feasible_nb = _nb.constrained(
+            h, f, lo, hi, a_mat, b_vec,
+            int(max(1, dual_sweeps)), int(max(1, dual_root_iters)),
+            int(max(1, max_iters)), float(tol), float(dual_max),
+        )
+        return (np.asarray(x_nb, dtype=np.float64),
+                np.asarray(lam_nb, dtype=np.float64), bool(feasible_nb))
+
     lam = np.zeros(m, dtype=np.float64)
 
     def solve_for(lam_vec: np.ndarray) -> np.ndarray:

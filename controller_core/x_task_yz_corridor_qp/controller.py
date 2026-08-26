@@ -184,6 +184,13 @@ class XTaskYZCorridorQPController:
         # on the per-cycle state can supply (and state_types normalizes the
         # state to plain arrays, so a callable could not travel there anyway).
         self._jacobian_fn: JacobianFn | None = jacobian_fn
+        # Pre-compile the optional Numba QP kernels at construction (before any
+        # control cycle), so a real-time loop never pays the one-time JIT cost
+        # on its first cycle. No-op if numba is absent (the numpy fallback runs),
+        # and disk-cached so this is a fast load after the first ever compile.
+        from ..constrained_box_qp import numba_warmup as _numba_warmup
+
+        _numba_warmup()
         self._initialized = False
         self._hold_reference_initialized = False
         self._p0 = np.zeros(3, dtype=np.float64)
