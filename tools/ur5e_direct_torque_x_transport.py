@@ -22,6 +22,29 @@ Examples:
 
 from __future__ import annotations
 
+import os
+
+# BLAS thread-count hygiene, set BEFORE numpy (and therefore its BLAS backend)
+# is imported below -- an already-loaded BLAS library ignores these env vars,
+# so this must run first, not just "early". This is the same 500 Hz
+# direct_torque loop XTaskYZCorridorQPController.compute() runs in
+# (config/ur5e_direct_torque_x_task_yz_corridor_qp.yaml); every array in its
+# per-cycle path is 6x6 or smaller, where a multi-threaded BLAS call spends
+# more time coordinating threads than doing the tiny amount of real work --
+# oversubscription risk this repo already documents for cluster jobs
+# (AGENTS.md sec 8) applies equally to a single real-time control process on
+# a shared, many-core host. `setdefault` so an operator's own explicit choice
+# is never overridden. MEASURED (2026-08-26, this bench host): neutral on
+# XTaskYZCorridorQPController.compute() specifically -- this numpy/OpenBLAS
+# build already keeps 6x6 ops single-threaded by its own heuristic here, so
+# no speedup was observed -- kept anyway as defensive hygiene since the
+# unpinned behavior is BLAS-build/host-dependent and this loop has no margin
+# to spare if a different environment's heuristic differs.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import argparse
 import json
 import sys

@@ -263,6 +263,7 @@ def manipulability_gradient(
     *,
     step: float = 1.0e-5,
     jacobian_derivative_fn: JacobianDerivativeFn | None = None,
+    jac0: np.ndarray | None = None,
 ) -> np.ndarray:
     """``grad_mu(q)`` in R^n, from ``dJ/dq`` combined by the ANALYTIC trace
     formula rather than by differencing ``mu`` itself.
@@ -291,6 +292,16 @@ def manipulability_gradient(
     where ``(J J^T)^-1`` is ill-conditioned. The finite-difference path reuses
     the perturbed Jacobians it already computed (no extra evaluations); the
     analytic path computes them on demand only when the fast contraction fails.
+
+    ``jac0`` (opt-in, 2026-08-26 perf pass): the caller's already-known
+    ``jacobian_fn(q)`` -- e.g. the per-cycle state's own ``jacobian`` field,
+    which every caller in this repo builds by evaluating the SAME provider at
+    the SAME ``q`` this function receives. Passing it skips one redundant
+    ``jacobian_fn(q)`` evaluation (a real, measured per-cycle cost on the
+    hardware Pinocchio path). The CALLER is responsible for the "same
+    provider, same q" guarantee -- exactly the same contract
+    ``jacobian_derivative_fn`` already carries. ``None`` (default) reproduces
+    the previous byte-identical behavior (``jacobian_fn(q)`` computed here).
     """
     q = np.asarray(q, dtype=np.float64).reshape(-1)
     n = int(q.shape[0])
@@ -298,7 +309,7 @@ def manipulability_gradient(
     if not np.isfinite(delta) or delta <= 0.0:
         raise ValueError(f"manipulability_gradient requires step > 0; got {step!r}")
 
-    jac0 = np.asarray(jacobian_fn(q), dtype=np.float64)
+    jac0 = np.asarray(jacobian_fn(q), dtype=np.float64) if jac0 is None else np.asarray(jac0, dtype=np.float64)
 
     if jacobian_derivative_fn is not None:
         d_tensor = np.asarray(jacobian_derivative_fn(q), dtype=np.float64)
@@ -346,6 +357,7 @@ def manipulability_directional_curvature(
     qd: np.ndarray,
     *,
     step: float = 1.0e-4,
+    mu0: float | None = None,
 ) -> float:
     """``qd^T H_mu(q) qd``, the only piece of the Hessian ``hddot`` needs.
 
@@ -365,6 +377,15 @@ def manipulability_directional_curvature(
 
     Exactly 0.0 at ``qd == 0`` (returned without any extra evaluation) -- the
     quadratic form is identically zero there, not merely small.
+
+    ``mu0`` (opt-in, 2026-08-26 perf pass): the caller's already-known
+    ``manipulability(jacobian_fn(q))`` -- e.g. ``compute()``'s own ``mu_val``,
+    computed from the SAME Jacobian this function would otherwise recompute
+    via a THIRD ``jacobian_fn(q)`` call (this function's own ``mu_p``/``mu_m``
+    already cost two; the at-``q`` evaluation is the redundant one when the
+    caller already has it). Same "same provider, same q" contract as
+    ``manipulability_gradient``'s ``jac0``. ``None`` (default) reproduces the
+    previous byte-identical behavior.
     """
     q = np.asarray(q, dtype=np.float64).reshape(-1)
     qd = np.asarray(qd, dtype=np.float64).reshape(-1)
@@ -377,7 +398,7 @@ def manipulability_directional_curvature(
             f"manipulability_directional_curvature requires step > 0; got {step!r}"
         )
     unit = qd / speed
-    mu_0 = manipulability(jacobian_fn(q))
+    mu_0 = float(mu0) if mu0 is not None else manipulability(jacobian_fn(q))
     mu_p = manipulability(jacobian_fn(q + delta * unit))
     mu_m = manipulability(jacobian_fn(q - delta * unit))
     second_derivative = (mu_p - 2.0 * mu_0 + mu_m) / (delta * delta)

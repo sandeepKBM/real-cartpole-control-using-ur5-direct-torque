@@ -158,7 +158,6 @@ from ..kinematics_utils import orientation_error_vec_wxyz, quat_to_rotmat
 from ..manipulability_cbf import (
     JacobianDerivativeFn,
     JacobianFn,
-    manipulability,
     manipulability_cbf_constraint_row,
     manipulability_directional_curvature,
     manipulability_gradient,
@@ -167,6 +166,27 @@ from ..state_types import as_impedance_robot_state
 from ..torque_task_qp import _velocity_implied_torque_bounds
 from .config import XTaskYZCorridorQPConfig
 from .output import XTaskYZCorridorQPOutput
+
+
+def _cond_from_sigma(sigma: np.ndarray) -> float:
+    """``np.linalg.cond(x)`` for ``p=None`` (2-norm), from an ALREADY-COMPUTED
+    singular-value array -- avoids a second SVD of a matrix whose SVD the
+    caller already has (see the LA-hygiene note at this function's call site).
+
+    Reproduces ``numpy.linalg._linalg.cond``'s ``p is None`` branch exactly:
+    ``s[0] / s[-1]`` under all-error suppression (0/0 -> nan, x/0 -> inf via
+    plain IEEE754 division), then nan -> inf. numpy's own fallback additionally
+    leaves a NaN result as NaN if the INPUT matrix itself already contained a
+    NaN; that case is not reproduced here (it would require scanning the whole
+    matrix on every call to guard a state that is already a controller-wide
+    invariant violation -- a NaN Jacobian trips other safety checks first).
+    For any finite Jacobian -- the only case this controller ever legitimately
+    sees -- this is bit-for-bit identical to ``np.linalg.cond(jac)``, and is
+    asserted so in the unit tests.
+    """
+    with np.errstate(all="ignore"):
+        r = float(sigma[0] / sigma[-1])
+    return float("inf") if np.isnan(r) else r
 
 
 class XTaskYZCorridorQPController:
@@ -611,6 +631,11 @@ class XTaskYZCorridorQPController:
         # commanded -- not the full 6x6, so it inverts exactly the map this
         # controller uses. Default False keeps every existing config bit-for-bit.
         lambda_reduced = None
+        # None unless task_space_inertia_shaping computes it below; threaded to
+        # the shared constraint-row m_inv further down so that flag combined
+        # with a corridor/CBF/orientation mechanism inverts mass_matrix ONCE,
+        # not twice (both are the identical matrix -- see that assignment).
+        m_inv_task: np.ndarray | None = None
         if bool(getattr(self.cfg, "task_space_inertia_shaping", False)):
             if not mass_matrix_provided:
                 raise ValueError(
@@ -618,9 +643,11 @@ class XTaskYZCorridorQPController:
                     "mass_matrix; Lambda cannot be formed. build_mujoco_state() supplies "
                     "it -- pass it, or turn the flag off."
                 )
-            # Local inversion: the shared m_inv further down in compute() is
-            # computed AFTER this point (it is only needed by the constraint rows),
-            # so referencing it here would NameError the moment the flag is on.
+            # Local inversion, THREADED to the shared m_inv further down (see
+            # that assignment): this is the SAME mass_matrix, so a second
+            # np.linalg.inv() there would be a redundant second inversion of
+            # an identical matrix -- computed once here, reused there whenever
+            # this flag and a constraint-row mechanism are both on.
             m_inv_task = np.linalg.inv(
                 np.asarray(st["mass_matrix"], dtype=np.float64).reshape(6, 6)
             )
@@ -639,7 +666,17 @@ class XTaskYZCorridorQPController:
                 lambda_reduced = np.diag(np.diag(lambda_reduced))
             wrench_reduced = lambda_reduced @ wrench_reduced
 
-        cond = float(np.linalg.cond(jac))
+        # SVD computed ONCE and threaded to both consumers that need it this
+        # cycle (cond(J) here, and mu(J) = prod(sigma) below when
+        # manipulability_cbf is on) -- np.linalg.cond(jac) internally computes
+        # this exact same SVD, and manipulability(jac) computed a SECOND,
+        # independent one from the SAME jac (measured: 2 of the 5 per-cycle
+        # SVD calls at ARM_Q0 were literally redundant). ``_cond_from_sigma``
+        # reproduces np.linalg.cond(jac)'s p=None formula (s[0]/s[-1] under
+        # errstate suppression, nan->inf) bit-for-bit from an already-computed
+        # sigma, verified against np.linalg.cond directly in the unit tests.
+        sigma_jac = np.linalg.svd(jac, compute_uv=False)
+        cond = _cond_from_sigma(sigma_jac)
         singular_scale = 1.0
         if cond > self.cfg.jacobian_singular_cond_max > 0.0:
             singular_scale = float(self.cfg.jacobian_singular_cond_max / cond)
@@ -806,8 +843,12 @@ class XTaskYZCorridorQPController:
         m_inv: np.ndarray | None = None
         use_joint_corridor = bool(self.cfg.joint_corridor_enabled) and bool(self.cfg.joint_corridor_joints)
         if use_corridor or use_manip_cbf or use_orientation_cbf or use_joint_corridor:
-            m_inv = np.linalg.inv(
-                np.asarray(st["mass_matrix"], dtype=np.float64).reshape(6, 6)
+            # Reuse m_inv_task (task_space_inertia_shaping's own inversion of
+            # the SAME mass_matrix) when it already exists, rather than
+            # inverting an identical matrix a second time this cycle.
+            m_inv = (
+                m_inv_task if m_inv_task is not None
+                else np.linalg.inv(np.asarray(st["mass_matrix"], dtype=np.float64).reshape(6, 6))
             )
 
         # Slot each corridor axis' (max, min) row pair into the fixed
@@ -857,11 +898,22 @@ class XTaskYZCorridorQPController:
         manip_row_index: int | None = None
         if use_manip_cbf:
             assert self._jacobian_fn is not None and m_inv is not None
-            mu_val = float(manipulability(jac))
+            # mu(J) = prod(sigma) reuses the SAME SVD already computed for
+            # cond(J) above (sigma_jac), instead of manipulability(jac)'s own
+            # independent SVD of the identical matrix -- one of the two
+            # redundant per-cycle SVDs this perf pass removed (see
+            # _cond_from_sigma's call site).
+            mu_val = float(np.prod(sigma_jac))
             cbf_h = mu_val - float(self.cfg.manipulability_cbf_epsilon)
             grad_mu = manipulability_gradient(
                 self._jacobian_fn, q, step=float(self.cfg.manipulability_cbf_fd_step),
                 jacobian_derivative_fn=self._jacobian_derivative_fn,
+                # jac == this cycle's state Jacobian == self._jacobian_fn(q):
+                # every caller in this repo builds the per-cycle state by
+                # evaluating the SAME provider at the SAME q (verified
+                # bit-identical for both the MuJoCo and Pinocchio providers).
+                # Skips one redundant jacobian_fn(q) evaluation.
+                jac0=jac,
             )
             grad_norm = float(np.linalg.norm(grad_mu))
             if np.isfinite(grad_norm) and grad_norm > 0.0:
@@ -873,6 +925,10 @@ class XTaskYZCorridorQPController:
                 curvature = manipulability_directional_curvature(
                     self._jacobian_fn, q, qd,
                     step=float(self.cfg.manipulability_cbf_curvature_step),
+                    # mu_val == manipulability(self._jacobian_fn(q)) already
+                    # (same argument as jac0 above): skips a THIRD redundant
+                    # jacobian_fn(q) call plus its manipulability()/SVD.
+                    mu0=mu_val,
                 )
                 a_row, b_scalar = manipulability_cbf_constraint_row(
                     grad_mu=grad_mu,
