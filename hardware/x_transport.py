@@ -21,6 +21,46 @@ from .urscript_transport import UrscriptTransportResult, run_urscript_x_transpor
 from .velocity_transport import VelocityTransportResult, run_x_transport_velocity
 
 
+# Half-width of the refused band around the UR WRIST singularity (wrist_2 at 0
+# or +-pi, where the wrist_1/wrist_3 axes align and the 6x6 Jacobian loses rank).
+# Measured cond(J) at this pose family (hardware/poses.py): ~7e16 at wrist_2=0,
+# ~9e2 at 0.005 rad, ~2e2 at 0.02 rad, ~30 at 0.2 rad. 0.05 rad (~2.9 deg) is a
+# deliberately conservative fence: it catches the genuinely singular region a
+# Cartesian command cannot survive while staying far from any well-conditioned
+# working pose (e.g. the wrist_2=-90 deg Goal-1 pose is 90 deg away). WRIST joint
+# only -- shoulder/elbow singularities are a separate concern this guard does not
+# claim to cover.
+WRIST_SINGULARITY_GUARD_RAD = 0.05
+_WRIST_2_JOINT_INDEX = 4  # JOINT_NAME_ORDER: pan, lift, elbow, wrist_1, WRIST_2, wrist_3
+
+
+def _check_wrist_singularity_for_cartesian_mode(mode: str, start_q_rad: np.ndarray | None) -> None:
+    """Refuse a Cartesian control mode (``position``/``velocity``) at a start pose
+    on or near the UR wrist singularity.
+
+    ``position`` (``servoL``) and ``velocity`` (``speedL``) command the robot in
+    TASK space, so PolyScope inverts the Jacobian every cycle; at the wrist
+    singularity that inversion is ill-posed and the robot raises a singularity
+    fault / protective stop. ``direct_torque`` and ``urscript`` command joint
+    torques and bypass the IK layer, so they are the correct modes here. Fail
+    fast on the host rather than trip a fault on the real arm mid-run.
+    """
+    if start_q_rad is None or mode not in ("position", "velocity"):
+        return
+    wrist_2 = float(np.asarray(start_q_rad, dtype=np.float64).reshape(-1)[_WRIST_2_JOINT_INDEX])
+    dist_to_singular = min(abs(wrist_2), abs(abs(wrist_2) - np.pi))
+    if dist_to_singular < WRIST_SINGULARITY_GUARD_RAD:
+        raise ValueError(
+            f"Start pose has wrist_2={np.degrees(wrist_2):.3f} deg, within "
+            f"{np.degrees(WRIST_SINGULARITY_GUARD_RAD):.1f} deg of the UR wrist "
+            f"singularity (wrist_2 = 0 or +-180 deg; cond(J) -> ~1e16). "
+            f"control_mode={mode!r} commands through PolyScope's Cartesian IK "
+            f"(servoL/speedL) and will raise a singularity fault at this pose. "
+            f"Use --control-mode direct_torque (joint-space torque, bypasses the "
+            f"IK layer) for singular or near-singular poses."
+        )
+
+
 def _validate_start_q_rad(start_q_rad: np.ndarray) -> np.ndarray:
     """Sanity-check a caller-supplied start pose before it ever reaches the
     robot: shape, finiteness, and the same absolute q_lower/q_upper ceiling
@@ -126,6 +166,7 @@ def run_x_transport(
         )
     if start_q_rad is not None:
         start_q_rad = _validate_start_q_rad(start_q_rad)
+    _check_wrist_singularity_for_cartesian_mode(mode, start_q_rad)
     if trajectory_profile != "min_jerk_move_hold" and mode != "direct_torque":
         # accel/duration profiles are wired for the direct_torque OSC loop
         # only tonight -- position/urscript have their own separate
