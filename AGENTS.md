@@ -856,6 +856,36 @@ Three control modes via `hardware/x_transport.py` (`--control-mode`):
    URSim validates the API only (no torque physics); real arm for motion.
 3. **`urscript`** — OSC on PolyScope (`urscript_transport.py`); minimum-latency path.
 
+**SINGULAR POSES NEED A JOINT-TORQUE MODE — `direct_torque` (or `urscript`), NEVER
+`position`/`velocity` (2026-08-26).** At the UR WRIST singularity (`wrist_2` at 0 or
++-180 deg — where `wrist_1`/`wrist_3` align and the 6x6 Jacobian loses rank,
+`cond(J) ~7e16` at `ARM_Q0`'s `wrist_2 = 0.27 deg`), the fault comes from PolyScope's
+own Cartesian IK, NOT from our control law: `position` (`servoL`) and `velocity`
+(`speedL`) command in TASK space, so PolyScope inverts the Jacobian every cycle and
+raises a singularity fault / protective stop that RTDE cannot suppress.
+`direct_torque` (`directTorque()`) and `urscript` command JOINT TORQUES and bypass the
+IK layer, so they are the ONLY modes that survive this pose — which is exactly why
+Goal 2's real-hardware path must be a joint-torque mode. (Our `--velocity-swingup` /
+`--velocity-hold` is task-space velocity TRACKING computed inside the torque law and
+emitted as joint torques — it is NOT PolyScope's `speedL` and is safe at the
+singularity; do not confuse the two.)
+
+**The trap: `--control-mode` DEFAULTS to `position` everywhere** — including
+`tools/ur5e_direct_torque_x_transport.py` despite its name — so a singular-pose run
+launched without an explicit `--control-mode direct_torque` silently lands on `servoL`
+and trips the fault on the real arm. **Guard (landed 2026-08-26, commit `2158ff2`):**
+`run_x_transport` now REFUSES `position`/`velocity` when the start pose is within
+0.05 rad (~2.9 deg) of the wrist singularity, failing fast on the host BEFORE any RTDE
+connection with a message pointing at `direct_torque`
+(`hardware/x_transport.py::_check_wrist_singularity_for_cartesian_mode`,
+`tests/hardware/test_wrist_singularity_guard.py`). The default was deliberately NOT
+flipped to `direct_torque` — that would make LIVE TORQUE the silent default and defeat
+`position` mode's purpose. Guard covers the WRIST joint only (shoulder/elbow
+singularities are a separate, unhandled concern). If a run is on `direct_torque` and
+STILL faults near the singularity, that is the UR's own SafetyController (its TCP-speed
+monitor also uses the Jacobian), not our command path — a hardware-layer constraint,
+not a bug here.
+
 Core modules:
 - `hardware/safety.py` — `UR5eSafetyLimits`, `ConnectionHealth`, one-way `EStopLatch`,
   `CartesianMoveMonitor` (TCP drift / orientation / growth abort).
